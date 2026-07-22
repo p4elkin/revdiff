@@ -151,15 +151,81 @@ feature.
 - Modify: `go.sum`
 - Modify: `vendor/` (regenerated)
 
-- [ ] record the baseline: run `go test -race ./...` on the clean branch and save the result
-- [ ] `go get github.com/charmbracelet/glamour@v1.0.0`
-- [ ] `go get github.com/AlexanderGrooff/mermaid-ascii@latest`
-- [ ] `go mod tidy && go mod vendor`
-- [ ] run `go build ./...` — must succeed
-- [ ] run `go test -race ./...` — must match the baseline, no new failures
-- [ ] run `golangci-lint run` — must not report new issues
-- [ ] record the resulting lipgloss version and the vendor directory size in this plan file
-- [ ] commit as a separate commit so the dependency change can be reverted on its own
+- [x] record the baseline: run `go test -race ./...` on the clean branch and save the result — all 14
+      testable packages `ok`, no failures (full listing below)
+- [x] `go get github.com/charmbracelet/glamour@v1.0.0`
+- [x] `go get github.com/AlexanderGrooff/mermaid-ascii@latest`
+- [x] `go mod tidy && go mod vendor`
+- [x] run `go build ./...` — must succeed (succeeded, no output)
+- [x] run `go test -race ./...` — must match the baseline, no new failures (matched exactly, see below)
+- [x] run `golangci-lint run` — must not report new issues (`0 issues.`)
+- [x] record the resulting lipgloss version and the vendor directory size in this plan file (below)
+- [x] commit as a separate commit so the dependency change can be reverted on its own
+
+**Baseline test result** (before any dependency change, `go test -race ./...`):
+
+```
+ok  	github.com/umputun/revdiff/app	62.956s
+ok  	github.com/umputun/revdiff/app/annotation	1.317s
+ok  	github.com/umputun/revdiff/app/diff	11.029s
+?   	github.com/umputun/revdiff/app/diff/mocks	[no test files]
+ok  	github.com/umputun/revdiff/app/editor	2.906s
+ok  	github.com/umputun/revdiff/app/fsutil	2.059s
+ok  	github.com/umputun/revdiff/app/handoff	2.341s
+ok  	github.com/umputun/revdiff/app/highlight	3.594s
+ok  	github.com/umputun/revdiff/app/history	3.769s
+ok  	github.com/umputun/revdiff/app/keymap	3.778s
+ok  	github.com/umputun/revdiff/app/review	3.177s
+ok  	github.com/umputun/revdiff/app/theme	4.083s
+ok  	github.com/umputun/revdiff/app/ui	4.301s
+?   	github.com/umputun/revdiff/app/ui/mocks	[no test files]
+ok  	github.com/umputun/revdiff/app/ui/overlay	3.281s
+ok  	github.com/umputun/revdiff/app/ui/sidepane	3.103s
+ok  	github.com/umputun/revdiff/app/ui/style	3.103s
+ok  	github.com/umputun/revdiff/app/ui/worddiff	2.806s
+?   	github.com/umputun/revdiff/themes	[no test files]
+```
+
+**Post-change test result** (`go test -race -count=1 ./...`, uncached): the same 14 packages report
+`ok`, the same 3 packages report `[no test files]`, no new failures. golangci-lint reports `0 issues.`
+
+**Resulting lipgloss version**: `github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834`
+(up from `v1.1.0` before this task).
+
+**Vendor directory size**: 19M before, 19M after (`du -sk vendor/`: 19052 KB in both cases, unchanged
+at that granularity). See the ⚠️ note below for why — glamour and mermaid-ascii themselves are not
+present in the vendor tree yet, only the lipgloss bump is.
+
+⚠️ **`go mod tidy` pruned glamour and mermaid-ascii back out of go.mod/go.sum.** Task 1 deliberately
+adds no feature code, so nothing in the repo imports `glamour` or `mermaid-ascii` yet. `go mod tidy`
+removes any module requirement that is not needed to build or test a package in the main module, so
+right after `go get` added both modules, the following `go mod tidy` deleted them again — `go.mod`
+after this task lists the same direct dependencies as before this task, minus glamour and
+mermaid-ascii, which appear in neither `go.mod`, `go.sum`, nor `vendor/`. `go mod vendor` only copies
+packages that are actually imported (transitively) by the main module, so it did not create
+`vendor/github.com/charmbracelet/glamour/` or `vendor/github.com/AlexanderGrooff/` either, regardless
+of whether they are listed in `go.mod`. This is expected, standard Go module behavior for an
+add-then-tidy sequence with no consuming import — not a bug in this task.
+
+What *did* survive, and is the part that actually matters for this spike: `lipgloss` itself is already
+a **direct** dependency of revdiff (imported throughout `app/ui/style` and elsewhere), and `go get
+glamour@v1.0.0` bumped revdiff's own direct `lipgloss` requirement to satisfy glamour's higher pin.
+`go mod tidy` does not downgrade an already-recorded direct requirement just because the reason for the
+bump (glamour) was itself later pruned — re-running `go mod tidy` a second time confirmed the lipgloss
+version stays at `v1.1.1-0.20250404203927-76690c660834`. So the exact risk this spike set out to test —
+"a newer lipgloss, selected by MVS for the whole build, could change rendering behaviour in revdiff's
+existing UI code" — was genuinely exercised: `go build ./...`, `go test -race ./...`, and
+`golangci-lint run` all ran against this newer lipgloss, without the noise of glamour/mermaid-ascii's
+~90 additional transitive modules (which are irrelevant to existing code, since nothing imports them
+yet). Result: no behaviour change detected in the existing suite.
+
+Consequence for later tasks: when Task 2 or Task 3 add the first real `import
+"github.com/charmbracelet/glamour"` (and later the `mermaid-ascii` import) in `app/ui/mdpreview.go`,
+`go mod tidy && go mod vendor` must be re-run at that point to pull both modules and their transitive
+tree back into `go.mod`/`go.sum`/`vendor/` — this is expected, not a regression, and vendor size will
+grow substantially at that point (glamour brings roughly eight modules including goldmark and
+bluemonday; mermaid-ascii's `cmd` package pulls in roughly 30 more, including gin, cobra and logrus,
+per the Technical Details section above).
 
 ### Task 2: Mermaid fence extraction
 
