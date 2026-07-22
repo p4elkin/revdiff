@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
@@ -275,10 +276,12 @@ func renderMarkdownDocument(lines []diff.DiffLine, width int) string {
 
 	r, err := glamour.NewTermRenderer(glamour.WithStyles(mdPreviewStyle), glamour.WithWordWrap(w))
 	if err != nil {
+		log.Printf("[WARN] create glamour renderer: %v", err)
 		return doc
 	}
 	out, err := r.Render(doc)
 	if err != nil {
+		log.Printf("[WARN] render markdown preview: %v", err)
 		return doc
 	}
 	return spliceMermaidArt(out, arts)
@@ -330,7 +333,7 @@ func (m Model) renderMarkdownPreview() string {
 // meaningless once the diff pane shows one whole-document glamour render
 // instead of one row per source line (see this plan's Solution Overview).
 //
-//   - toggle_markdown_preview must stay allowed so P can turn the mode back
+//   - toggle_preview must stay allowed so P can turn the mode back
 //     off — this is the mode's only exit key.
 //   - quit / discard_quit / help / theme_select / toggle_tree are session and
 //     layout actions that never touch m.nav.diffCursor or the annotation

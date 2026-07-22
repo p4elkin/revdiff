@@ -400,16 +400,17 @@ corrected from "five" to match.
 - [x] run tests — must pass before task 5
 
 ⚠️ **Go const identifier renamed from `ActionToggleMarkdownPreview` to `ActionTogglePreview` — the
-action string stays `"toggle_markdown_preview"`.** `app/keymap/keymap.go`'s `Action` const block and
-its `validActions` map are gofmt column-aligned, and the plan's original 27-character identifier was
-longer than every existing name in that block, so gofmt would have re-padded all ~50 unrelated lines
-around it (confirmed empirically: tried the long name first, `gofmt -w` produced a 56-insertion/
-52-deletion whitespace-only diff across the whole const block). A 19-character name
+action string kept its original longer spelling at the time (see git history; a later review pass
+renamed it to `toggle_preview`).** `app/keymap/keymap.go`'s `Action` const
+block and its `validActions` map are gofmt column-aligned, and the plan's original 27-character
+identifier was longer than every existing name in that block, so gofmt would have re-padded all ~50
+unrelated lines around it (confirmed empirically: tried the long name first, `gofmt -w` produced a
+56-insertion/52-deletion whitespace-only diff across the whole const block). A 19-character name
 (`ActionTogglePreview`) fits inside the existing column width and adds exactly one line with no
 collateral reformatting — directly serving the Patch-discipline goal of touching the minimum number of
-lines in a file that rebases by hand. The user-facing and config-file-facing string is unaffected: it
-is still `toggle_markdown_preview`, matched in `keymap.go`'s default binding, help entry, and
-`keymap_test.go`.
+lines in a file that rebases by hand. The user-facing and config-file-facing string was matched in
+`keymap.go`'s default binding, help entry, and `keymap_test.go`. (A later review pass renamed the
+string itself to `toggle_preview` to restore the 1:1 const-name-to-string pattern; see git history.)
 
 ⚠️ **The render cache field (`*mdPreviewCache`) lives on `loadedFileState` (`m.file`), not on
 `modeState` as the plan's "New state" section suggested.** Same gofmt-alignment reasoning as above:
@@ -556,7 +557,7 @@ runs the guard and delegates everything else, unchanged, to `dispatchResolvedAct
 existing caller.
 
 **Full allowlist decided (see `mdPreviewAllowedActions` in `mdpreview.go` for the authoritative,
-per-entry-commented version):** `toggle_markdown_preview` (the mode's only exit key), `quit`,
+per-entry-commented version):** `toggle_preview` (the mode's only exit key), `quit`,
 `discard_quit`, `help`, `theme_select`, `toggle_tree`, `scroll_diff_down`/`scroll_diff_up` (`J`/`K`,
 viewport-driven, safe per the `pinDiffCursorTo` fix above), and `dismiss` (esc — only clears a leftover
 search-match highlight). Everything else is swallowed, including some actions that read as harmless at
@@ -749,8 +750,8 @@ summary in one place.
 
 - **The Go identifier is `ActionTogglePreview`, not the planned `ActionToggleMarkdownPreview`.**
   The shorter name was needed to avoid triggering a large gofmt whitespace-only reformat of
-  `app/keymap/keymap.go`'s column-aligned const block. The user-facing string is unaffected — it
-  is still `toggle_markdown_preview` everywhere a person or a config file sees it. Same reasoning
+  `app/keymap/keymap.go`'s column-aligned const block. The user-facing string kept its original longer
+  spelling at the time (a later review pass renamed it to `toggle_preview`; see git history). Same reasoning
   moved the render-cache pointer, `mdPreviewCache`, onto `loadedFileState` instead of `modeState`
   as the plan's "New state" section had suggested — `loadedFileState`'s field-comment columns
   already had room for a long type name, `modeState`'s did not.

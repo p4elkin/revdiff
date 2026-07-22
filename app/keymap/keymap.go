@@ -52,7 +52,7 @@ const (
 	ActionToggleCollapsed  Action = "toggle_collapsed"
 	ActionToggleCompact    Action = "toggle_compact"
 	ActionToggleWrap       Action = "toggle_wrap"
-	ActionTogglePreview    Action = "toggle_markdown_preview"
+	ActionTogglePreview    Action = "toggle_preview"
 	ActionToggleTree       Action = "toggle_tree"
 	ActionToggleLineNums   Action = "toggle_line_numbers"
 	ActionToggleBlame      Action = "toggle_blame"

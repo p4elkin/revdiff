@@ -119,7 +119,7 @@ This mirrors the Makefile's `build` target (same ldflags, same `REV` computation
 ```sh
 command -v revdiffm   # should resolve to ~/.local/bin/revdiffm
 revdiffm --version
-revdiffm --dump-keys | grep 'toggle_markdown_preview'   # confirms P is bound in this build
+revdiffm --dump-keys | grep 'toggle_preview'   # confirms P is bound in this build
 command -v revdiff    # should still resolve to /opt/homebrew/bin/revdiff, unaffected
 revdiff --version
 ```
