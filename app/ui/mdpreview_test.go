@@ -827,3 +827,108 @@ func TestToggleMarkdownPreview_TurnsOffEvenWhenTOCNil(t *testing.T) {
 	off := pressKey(t, m, "P")
 	assert.False(t, off.modes.mdPreview, "P must turn preview OFF even when mdTOC is nil")
 }
+
+// --- Review phase 4: layout-change scroll + status/TOC display during preview ---
+
+// mdPreviewListLines builds a markdown fixture with a heading (so mdTOC is
+// non-nil), a blank separator, then n list items. List items render one glamour
+// row each and, being short, never word-wrap — so the rendered line count is
+// stable across the viewport widths these scroll tests toggle between, keeping
+// the YOffset assertions deterministic (a paragraph of plain context lines would
+// be joined and reflowed by glamour, and its line count would change with width).
+func mdPreviewListLines(n int) []diff.DiffLine {
+	lines := make([]diff.DiffLine, n+2)
+	lines[0] = diff.DiffLine{NewNum: 1, Content: "# Title", ChangeType: diff.ChangeContext}
+	lines[1] = diff.DiffLine{NewNum: 2, Content: "", ChangeType: diff.ChangeContext}
+	for i := range n {
+		lines[i+2] = diff.DiffLine{NewNum: i + 3, Content: fmt.Sprintf("- item %d", i), ChangeType: diff.ChangeContext}
+	}
+	return lines
+}
+
+func TestSyncViewportToCursor_MdPreviewOn_TreeToggle_PreservesScroll(t *testing.T) {
+	// BUG 1: toggle_tree is an allowed action in preview; toggleTreePane ->
+	// syncViewportToCursor. Without the mdPreview guard inside
+	// syncViewportToCursor, the YOffset-repositioning switch snaps the scroll to
+	// the (frozen, stale) diff cursor's row instead of leaving the user where
+	// they scrolled the glamour render to.
+	m := mdPreviewTestModel(mdPreviewListLines(200))
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	// user scrolls the rendered document well down, cursor stays frozen near the
+	// top (nav is blocked in preview). the diff-cursor row (~3) is far from the
+	// scrolled-to offset, so a cursor-follow reposition would be plainly visible.
+	m.nav.diffCursor = 3
+	m.layout.viewport.SetYOffset(80)
+	require.Equal(t, 80, m.layout.viewport.YOffset, "fixture sanity: 80 must be a valid offset on this content")
+
+	m.toggleTreePane() // allowed in preview -> syncViewportToCursor
+
+	assert.Equal(t, 80, m.layout.viewport.YOffset,
+		"toggling the tree pane in preview must preserve the scroll position, not snap it to the frozen diff cursor")
+}
+
+func TestSyncViewportToCursor_MdPreviewOn_ResizeShrink_ClampsWithoutBlankScreen(t *testing.T) {
+	// BUG 1, clamp branch: a resize that grows the viewport height (or otherwise
+	// shrinks the content below the current YOffset) must re-clamp YOffset to the
+	// new maximum. Pre-fix, with a deep frozen cursor neither switch case fires,
+	// so YOffset is left past the end -> a mostly blank screen. The guard's
+	// SetYOffset(YOffset) clamp fixes it.
+	m := mdPreviewTestModel(mdPreviewListLines(60))
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	m.nav.diffCursor = 58            // deep frozen cursor: neither switch case fires pre-fix
+	m.layout.viewport.SetYOffset(40) // valid while height is 20 (maxYOffset ~42)
+	require.Equal(t, 40, m.layout.viewport.YOffset, "fixture sanity: 40 must be valid at the pre-resize height")
+
+	// resize to a tall terminal at the same diff width (120*3/10 tree -> diff 80,
+	// matching mdPreviewTestModel's viewport.Width, so the render stays ~62 lines):
+	// the taller viewport drops maxYOffset to 0, so 40 is now past the end.
+	var model Model
+	require.NotPanics(t, func() {
+		result, _ := m.handleResize(tea.WindowSizeMsg{Width: 120, Height: 100})
+		model = result.(Model)
+	})
+
+	maxOffset := max(0, model.layout.viewport.TotalLineCount()-model.layout.viewport.Height)
+	assert.LessOrEqual(t, model.layout.viewport.YOffset, maxOffset,
+		"YOffset must be clamped within the re-wrapped content, never left past the end (blank screen)")
+	assert.Equal(t, 0, model.layout.viewport.YOffset,
+		"a viewport taller than the content must clamp the scroll to the top")
+}
+
+func TestStatusBar_MdPreviewOn_SuppressesHunkAndLineSegments(t *testing.T) {
+	// BUG 2: hunkSegment / lineNumberSegment are derived from the frozen
+	// m.nav.diffCursor and were gated only on focus != paneDiff (which stays
+	// paneDiff in preview). They kept printing a fake live "hunk X/Y" / "L:N/M"
+	// while the user scrolled the glamour render. They must be suppressed; the
+	// filename, the mode-icon row (incl. the ▤ preview icon) and the help hint
+	// stay.
+	lines := []diff.DiffLine{
+		{NewNum: 1, Content: "# Title", ChangeType: diff.ChangeContext},
+		{NewNum: 2, Content: "", ChangeType: diff.ChangeContext},
+		{OldNum: 0, NewNum: 3, Content: "added line", ChangeType: diff.ChangeAdd},
+		{NewNum: 4, Content: "context", ChangeType: diff.ChangeContext},
+	}
+	m := mdPreviewTestModel(lines)
+	m.layout.width = 200 // wide enough that no narrow-terminal degradation drops segments
+	m.nav.diffCursor = 2 // on the added line: a real hunk + line number position exists
+	require.Equal(t, paneDiff, m.layout.focus)
+
+	// sanity: with preview OFF these fake trackers are exactly what shows.
+	before := m.statusBarText()
+	require.Contains(t, before, "hunk 1/1", "fixture sanity: mode-off must show the hunk position")
+	require.Contains(t, before, "L:3/", "fixture sanity: mode-off must show the line number position")
+
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	status := m.statusBarText()
+	assert.NotContains(t, status, "hunk", "hunk position must be suppressed while previewing (frozen cursor)")
+	assert.NotContains(t, status, "L:", "line-number position must be suppressed while previewing (frozen cursor)")
+	assert.Contains(t, status, "plan.md", "the filename must still show while previewing")
+	assert.Contains(t, status, "▤", "the preview mode icon must still show while previewing")
+	assert.Contains(t, status, "? help", "the help hint must still show while previewing")
+}

@@ -230,6 +230,17 @@ func (m *Model) moveDiffCursorToEnd() {
 func (m *Model) syncViewportToCursor() {
 	cursorTop, cursorBottom := m.cursorVisualRange()
 	m.layout.viewport.SetContent(m.renderDiff())
+	// markdown preview shows one whole-document glamour render, not one row per
+	// source line, so the diff-cursor Y math below is meaningless — the cursor
+	// is frozen (nav is blocked in preview) while the user scrolls the render
+	// freely. still SetContent above (a resize or tree toggle genuinely needs
+	// glamour re-wrapped at the new width), but do not reposition from the
+	// cursor: keep the current YOffset, only re-clamping it to the (possibly
+	// shorter) re-wrapped content so a shrink cannot strand it past the end.
+	if m.modes.mdPreview {
+		m.layout.viewport.SetYOffset(m.layout.viewport.YOffset)
+		return
+	}
 	switch {
 	case cursorTop < m.layout.viewport.YOffset:
 		m.layout.viewport.SetYOffset(cursorTop)

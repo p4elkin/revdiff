@@ -62,7 +62,16 @@ func (m Model) View() string {
 		mainView = m.applyScrollbar(diffPane)
 
 	case m.file.singleFile && m.file.mdTOC != nil:
-		// single-file markdown with TOC: two-pane layout with TOC in left pane
+		// single-file markdown with TOC: two-pane layout with TOC in left pane.
+		// KNOWN MINOR LIMITATION (preview mode): the TOC's active-section highlight
+		// is driven by syncTOCActiveSection off the diff cursor, which is frozen
+		// while previewing, so the highlight stays pinned to the toggle-on section
+		// as the user scrolls the glamour render. Suppressing it cleanly would need
+		// a new TOCRender field in the upstream sidepane package (which this fork
+		// leaves untouched to keep rebase conflict surface minimal), and dropping
+		// the pane during preview would desync viewport width geometry — so it is
+		// left as a documented dim-highlight staleness (see PATCH.md). The
+		// misleading numeric trackers (hunk/line in the status bar) ARE suppressed.
 		tocContent := m.file.mdTOC.Render(sidepane.TOCRender{Width: m.layout.treeWidth, Height: ph, Focused: m.layout.focus == paneTree, Resolver: m.resolver})
 		mainView = m.renderTwoPaneLayout(tocContent, diffContent, m.file.mdTOC.ScrollState(), ph, diffPaneW)
 
@@ -254,8 +263,11 @@ func (m Model) statusBarText() string {
 
 // hunkSegment returns a formatted hunk position string for the status line.
 // returns "hunk X/Y" when cursor is on a changed line, "N hunks"/"1 hunk" otherwise, or empty if not in diff pane.
+// suppressed in markdown preview: the diff cursor is frozen there while the user
+// scrolls the glamour render, so a "hunk X/Y" derived from it would be a fake
+// live position.
 func (m Model) hunkSegment() string {
-	if m.layout.focus != paneDiff {
+	if m.layout.focus != paneDiff || m.modes.mdPreview {
 		return ""
 	}
 	cur, total := m.currentHunk()
@@ -275,8 +287,10 @@ func (m Model) hunkSegment() string {
 // The denominator is dynamic: on removed lines it shows the old file's max line number,
 // on context/added lines it shows the new file's max line number.
 // Returns empty string when focus is not on diff pane, cursor is out of range, or on a divider line.
+// Also suppressed in markdown preview: the frozen diff cursor no longer maps to
+// the scrolled glamour render, so "L:N/M" would be a fake live position.
 func (m Model) lineNumberSegment() string {
-	if m.layout.focus != paneDiff {
+	if m.layout.focus != paneDiff || m.modes.mdPreview {
 		return ""
 	}
 	if m.nav.diffCursor < 0 || m.nav.diffCursor >= len(m.file.lines) {

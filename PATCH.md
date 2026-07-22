@@ -69,6 +69,31 @@ edits beyond Task 4's file list, see the plan's Task 5 section for why):**
   - `if m.modes.mdPreview { return m, nil }` in `handleWheel`'s `hitTree` branch (TOC wheel must
     not drive `syncDiffToTOCCursor`, matching the swallowed n/N/p keys)
 
+**Review phase 4 wiring (stopping stale diff-cursor state from leaking into the display while
+previewing — same root cause as Task 5, caught at three more sites):**
+
+- `app/ui/diffnav.go` — a *new* file for the patch to touch, so a rebase that moves
+  `syncViewportToCursor` will surface a fresh conflict here.
+  - guard inside `syncViewportToCursor`, between the `SetContent(m.renderDiff())` call and the
+    YOffset-repositioning switch: `if m.modes.mdPreview { m.layout.viewport.SetYOffset(
+    m.layout.viewport.YOffset); return }`. Keeps the re-wrap (needed on resize / tree toggle)
+    but preserves the user's scroll instead of snapping to the frozen diff cursor; the
+    `SetYOffset(YOffset)` re-clamps to the new content so a shrink cannot strand the offset past
+    the end (blank screen). Reached in preview via the allowed `toggle_tree` action, terminal
+    resize, and a blame load landing mid-preview.
+- `app/ui/view.go`
+  - `hunkSegment()`: guard widened to `if m.layout.focus != paneDiff || m.modes.mdPreview`
+  - `lineNumberSegment()`: same widening. Both otherwise print a fake live "hunk X/Y" / "L:N/M"
+    off the frozen cursor while the glamour render scrolls freely. `statusSegmentsNoSearch` /
+    `statusSegmentsMinimal` need no change — they call these two helpers, which now return `""`.
+  - a comment on the `m.file.singleFile && m.file.mdTOC != nil` render branch documents the one
+    display-staleness left unfixed: the TOC active-section highlight. It is pinned to the
+    toggle-on section while previewing because `syncTOCActiveSection` runs off the frozen cursor.
+    Left as a MINOR limitation on purpose — a clean fix needs a new `TOCRender` field in the
+    upstream `app/ui/sidepane` package (which this fork keeps untouched), and dropping the TOC
+    pane during preview would desync the diff viewport's width geometry. It is a dim highlight,
+    not a numeric tracker, so lower stakes than the status-bar segments, which ARE fixed.
+
 **Test-only, mechanical, not part of the feature itself:**
 
 - `app/keymap/keymap_test.go` — asserts `P` resolves to `ActionTogglePreview`
@@ -81,8 +106,8 @@ edits beyond Task 4's file list, see the plan's Task 5 section for why):**
 
 `app/ui/diffview.go` and `app/ui/model.go` are the most actively developed files upstream and
 the most likely to conflict — this was flagged going in (see the plan's "Patch discipline"
-section) and confirmed empirically: `model.go` alone carries 5 of the patch's 14 existing-file
-hunks (keymap 4, model 5, diffview 1, mouse 3, view 1).
+section) and confirmed empirically: `model.go` alone carries 5 of the patch's 17 existing-file
+hunks (keymap 4, model 5, diffview 1, mouse 3, view 3, diffnav 1).
 
 ## Dependencies added
 
