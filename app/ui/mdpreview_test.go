@@ -599,3 +599,87 @@ func TestMdPreviewToggle_RoundTrip_PreservesPreExistingAnnotation(t *testing.T) 
 	require.Len(t, got, 1, "the pre-existing annotation must survive the preview round-trip untouched")
 	assert.Equal(t, want, got[0], "line anchor, type, and comment must be exactly unchanged")
 }
+
+// --- Task 6: regression check — mode off must be unchanged ---
+//
+// With m.modes.mdPreview off, renderDiff's early-return branch
+// (`if m.modes.mdPreview && m.file.mdTOC != nil`) must never be taken, so the
+// rest of the function — the same render loop that existed before this
+// feature — must behave exactly as it did before. There is no pre-feature
+// build to diff against at runtime, so the two tests below prove the
+// guarantee directly on the current code:
+//
+//   - TestRenderDiff_MarkdownPreviewOff_MarkdownFile_IdenticalRegardlessOfMdTOC
+//     covers the case where mdTOC IS set (a full-context single markdown
+//     file) — the only thing keeping the branch untaken is the flag itself.
+//     It also proves the check is not vacuous: flipping the flag on the same
+//     model must actually change the output, or an always-false branch would
+//     make every assertion here pass trivially.
+//   - TestRenderDiff_MarkdownPreviewOff_NonMarkdownFile_DoublyGated covers the
+//     case where mdTOC is nil (a non-markdown file) — the branch must stay
+//     untaken even if the flag were somehow left on, so the gate does not
+//     rely on the flag alone either.
+
+func TestRenderDiff_MarkdownPreviewOff_MarkdownFile_IdenticalRegardlessOfMdTOC(t *testing.T) {
+	doc := "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n"
+	m := mdPreviewTestModel(mdLines(doc))
+	require.False(t, m.modes.mdPreview)
+	require.NotNil(t, m.file.mdTOC, "fixture sanity: a full-context single markdown file must set mdTOC")
+
+	offWithTOC := m.renderDiff()
+	assert.Contains(t, offWithTOC, "| a | b |", "mode off must render the raw markdown source, pipes and all")
+	assert.NotContains(t, offWithTOC, "│", "mode off must contain no glamour-rendered table border")
+
+	// mdTOC alone (present vs absent) must not change the output when the
+	// flag is off — only the flag gates the branch.
+	withoutTOC := m
+	withoutTOC.file.mdTOC = nil
+	offWithoutTOC := withoutTOC.renderDiff()
+
+	assert.Equal(t, offWithTOC, offWithoutTOC,
+		"with mdPreview off, renderDiff output must be identical whether or not mdTOC is set — this proves the "+
+			"early-return branch is genuinely gated on the flag, not on mdTOC alone")
+
+	// non-vacuous proof: the equality above means nothing if the preview
+	// branch never fires under any condition. Flip mdPreview on for the same
+	// markdown model (mdTOC still present) and confirm the render genuinely
+	// changes — so the off-case checks above are exercising a real branch.
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	onOut := m.renderDiff()
+
+	assert.NotEqual(t, offWithTOC, onOut,
+		"sanity check: enabling preview must actually change renderDiff's output, otherwise the off-case "+
+			"equality above would pass even with a broken guard")
+	assert.Contains(t, onOut, "│", "mode on must render an aligned glamour table border")
+	assert.NotContains(t, onOut, "| a | b |", "mode on must not leave raw markdown pipe syntax in the output")
+}
+
+func TestRenderDiff_MarkdownPreviewOff_NonMarkdownFile_DoublyGated(t *testing.T) {
+	lines := []diff.DiffLine{
+		{NewNum: 1, Content: "package main", ChangeType: diff.ChangeContext},
+		{NewNum: 2, Content: "", ChangeType: diff.ChangeContext},
+		{NewNum: 3, Content: "func main() {}", ChangeType: diff.ChangeContext},
+	}
+	m := mdPreviewTestModel(lines)
+	m.file.name = "main.go"
+	m.file.mdTOC = nil // a non-markdown file never gets mdTOC populated (see the gate in loaders.go)
+	require.False(t, m.modes.mdPreview)
+
+	off := m.renderDiff()
+	assert.Contains(t, off, "package main", "mode off must render the raw source unchanged")
+
+	// doubly-gated: force the flag on directly, bypassing
+	// toggleMarkdownPreview's own mdTOC-nil refusal, to prove renderDiff's own
+	// early-return branch also requires mdTOC != nil and falls back
+	// byte-for-byte to the exact same normal render even if mdPreview is
+	// somehow left true.
+	forced := m
+	forced.modes.mdPreview = true
+	forcedOut := forced.renderDiff()
+
+	assert.Equal(t, off, forcedOut,
+		"renderDiff must fall back to the normal diff render when mdTOC is nil, even if mdPreview is true — "+
+			"the early-return branch requires BOTH conditions together")
+	assert.NotContains(t, off, "mdpreviewmermaidplaceholder", "mode-off output must show no markdown-preview internals")
+}

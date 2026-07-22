@@ -595,11 +595,35 @@ quirk):
 **Files:**
 - Modify: `app/ui/mdpreview_test.go`
 
-- [ ] write a test asserting `renderDiff` output is identical with the feature compiled in but the
+- [x] write a test asserting `renderDiff` output is identical with the feature compiled in but the
       mode off, for a markdown file and for a non-markdown file
-- [ ] run the full suite `go test -race -covermode=atomic ./...` — must pass
-- [ ] run `golangci-lint run` — must be clean
-- [ ] run tests — must pass before task 7
+- [x] run the full suite `go test -race -covermode=atomic ./...` — must pass
+- [x] run `golangci-lint run` — must be clean
+- [x] run tests — must pass before task 7
+
+Two tests added to `app/ui/mdpreview_test.go`:
+
+- `TestRenderDiff_MarkdownPreviewOff_MarkdownFile_IdenticalRegardlessOfMdTOC` — a full-context
+  single markdown file (`mdTOC != nil`), mode off. Asserts `renderDiff()` output is byte-identical
+  whether `mdTOC` is present or nil, proving the early-return branch is gated on the `mdPreview` flag
+  itself, not merely on `mdTOC`. Non-vacuous proof included in the same test: flipping `mdPreview` on
+  for the same model changes the output (glamour table border `│` appears, raw `| a | b |` pipe syntax
+  disappears) — so the preceding equality is not trivially true from a branch that never fires.
+- `TestRenderDiff_MarkdownPreviewOff_NonMarkdownFile_DoublyGated` — a non-markdown file (`mdTOC ==
+  nil`). Forces `mdPreview = true` directly (bypassing `toggleMarkdownPreview`'s own refusal) and
+  asserts `renderDiff()` output is still byte-identical to the flag-off render and contains no
+  markdown-preview internals (`mdpreviewmermaidplaceholder`) — proving the branch requires both
+  conditions together, not the flag alone.
+
+Both fixtures reuse `mdPreviewTestModel` (built on the existing `testModel`/`ParseTOC` factory), no
+new Model-construction path introduced.
+
+No regression found in the mode-off path — `renderDiff`'s guard (`if m.modes.mdPreview &&
+m.file.mdTOC != nil`) is exactly as gated as the plan requires.
+
+`go test -race -covermode=atomic ./...` via `make test`: all 16 previously-`ok` packages still `ok`
+(same set as Task 3's baseline), `app/themes` reports `[no test files]`, no failures.
+`golangci-lint run` via `make lint`: `0 issues.`
 
 ### Task 7: Build the `revdiffm` binary
 
