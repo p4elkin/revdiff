@@ -233,16 +233,39 @@ per the Technical Details section above).
 - Create: `app/ui/mdpreview.go`
 - Create: `app/ui/mdpreview_test.go`
 
-- [ ] write a failing test for a function that takes source lines and returns the document with
+- [x] write a failing test for a function that takes source lines and returns the document with
       ` ```mermaid ` fences replaced by rendered art
-- [ ] write failing tests for: no fences present, two fences in one document, an unterminated fence,
+- [x] write failing tests for: no fences present, two fences in one document, an unterminated fence,
       a fence with a language other than mermaid (must be left alone)
-- [ ] write a failing test asserting that a diagram which fails to parse falls back to the original
+- [x] write a failing test asserting that a diagram which fails to parse falls back to the original
       fence text verbatim, and never returns an error to the caller
-- [ ] implement the extraction, reusing `fencePrefix` from `app/ui/sidepane/toc.go:266-284` rather than
+- [x] implement the extraction, reusing `fencePrefix` from `app/ui/sidepane/toc.go:266-284` rather than
       writing new fence parsing
-- [ ] implement the `cmd.RenderDiagram` call with the fallback behaviour
-- [ ] run tests — must pass before task 3
+- [x] implement the `cmd.RenderDiagram` call with the fallback behaviour
+- [x] run tests — must pass before task 3
+
+⚠️ **`fencePrefix` turned out unexported.** As flagged in the task guidance, `sidepane.fencePrefix`
+(`app/ui/sidepane/toc.go:266-284`) is lowercase — package `app/ui` cannot call it. Wrote a local
+duplicate, `mdFencePrefix`, inside the new `app/ui/mdpreview.go` instead of exporting the sidepane
+helper. This touches zero existing files (patch-discipline preference) versus exporting `FencePrefix`
+across the package boundary for a single caller, which would edit `toc.go` and every future upstream
+rebase would need to re-apply that rename. The two copies are five lines each and share no state, so
+duplication costs nothing structurally.
+
+`go get github.com/AlexanderGrooff/mermaid-ascii@latest` plus `go mod tidy && go mod vendor` pulled the
+dependency tree back in cleanly: vendored module count went from 31 to 62 (+31, close to the ~30
+estimated in Technical Details), vendor directory size from 19M to 49M. `go build ./...`,
+`go test -race -covermode=atomic ./...` (all 14 previously-passing packages still `ok`, no new
+failures), and `golangci-lint run` (`0 issues.`) all passed against the full tree including gin, cobra,
+and logrus. No breakage from the new dependency tree — nothing to report as a blocker.
+
+Malformed-input safety: `cmd.RenderDiagram` itself always returns `(string, error)` and does not panic
+on the malformed input exercised in tests (confirmed by reading `mermaidFileToMap` in the vendored
+source — non-graph/flowchart input returns a clean `"unsupported graph type"` error). `renderMermaidBlock`
+still wraps the call in `recover()` as defense-in-depth per the plan's "must never panic" requirement,
+since that guarantee cannot be proven from reading one version of a third-party library. No test proves
+an actual panic path (none was found or constructed) — the recover code itself is therefore exercised
+structurally but not by a red-then-green panic test. See final report for the same caveat.
 
 ### Task 3: Document rendering via glamour
 
