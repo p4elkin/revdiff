@@ -727,9 +727,60 @@ Total coverage (excluding mocks): 90.6% of statements.
 
 ### Task 9: [Final] Update documentation
 
-- [ ] update `PATCH.md` with anything learned during implementation
-- [ ] record in this plan file any deviation from the original design
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `PATCH.md` with anything learned during implementation
+- [x] record in this plan file any deviation from the original design
+- [x] move this plan to `docs/plans/completed/` (deferred to orchestrator per exec workflow)
+
+## Deviations from original design
+
+This section records the notable differences between what this plan originally described and
+what actually got built. The per-task ⚠️ notes above are the detailed record; this is a short
+summary in one place.
+
+- **Task 1's dependency spike could not keep glamour and mermaid-ascii in `go.mod`.** The plan
+  expected the spike to exercise both new dependencies. In practice, `go mod tidy` prunes any
+  module requirement that nothing imports, and Task 1 deliberately added no feature code — so
+  right after `go get` added glamour and mermaid-ascii, the following `go mod tidy` removed them
+  again. The dependency-tree exercise the plan wanted only really happened in Task 2 (mermaid-ascii)
+  and Task 3 (glamour), once `app/ui/mdpreview.go` actually imported them. The one part of Task 1
+  that was genuinely exercised as planned: the lipgloss version bump that glamour's pin forces.
+  `go build`, `go test -race`, and `golangci-lint run` all ran against the bumped lipgloss, and came
+  back clean.
+
+- **The Go identifier is `ActionTogglePreview`, not the planned `ActionToggleMarkdownPreview`.**
+  The shorter name was needed to avoid triggering a large gofmt whitespace-only reformat of
+  `app/keymap/keymap.go`'s column-aligned const block. The user-facing string is unaffected — it
+  is still `toggle_markdown_preview` everywhere a person or a config file sees it. Same reasoning
+  moved the render-cache pointer, `mdPreviewCache`, onto `loadedFileState` instead of `modeState`
+  as the plan's "New state" section had suggested — `loadedFileState`'s field-comment columns
+  already had room for a long type name, `modeState`'s did not.
+
+- **The plan said "five hunks" for Task 4's wiring; the real count is higher.** Tracing the
+  existing `ActionToggleWrap` action end to end showed it already touches seven sites, not five,
+  because two of the plan's checklist items are each two separate edits (an action-registration
+  list, plus the actual dispatch case). Task 5 then added guards in `app/ui/model.go` and
+  `app/ui/mouse.go` that were not in the plan's original file list at all — those turned out to be
+  needed because cursor movement in this codebase has two independent paths (keymap-resolved
+  dispatch, and vim-motion's own screen-position motions bypassing dispatch entirely), plus a third
+  case discovered only while writing the toggle-preserves-cursor tests: the scroll-then-pin
+  mechanism behind the allowed `J`/`K` scroll keys. `PATCH.md` has the authoritative up-to-date list
+  of every edited file and hunk, confirmed against `git diff master...md-preview --stat`.
+
+- **Glamour word-wraps the whole document, not just prose — so a code fence does not protect the
+  mermaid art.** The plan's Technical Details section implied that putting the rendered diagram
+  inside a fenced code block would be enough to stop glamour from reflowing it, the same way
+  glamour never reflows a normal code block. That turned out to be wrong: glamour's `Finish` step
+  runs word-wrap over the whole accumulated document buffer, with no awareness of which parts came
+  from a code fence. Task 3 worked around this differently — with a wrap-atomic placeholder token
+  standing in for the diagram while glamour renders, then the real diagram text is spliced back into
+  the output afterward, never passed through glamour's word-wrap at all.
+
+- **Known cosmetic issue: h2 headings render with a literal `"## "` prefix.** This was found during
+  Task 8's live verification. It is glamour's `DarkStyleConfig` doing this by design — a
+  heading-prefix convention baked into that built-in style, not a bug this patch introduced. Other
+  rendering (tables, mermaid diagrams, bold/italic stripping, the toggle round-trip) is unaffected.
+  A future tweak could set a custom heading prefix or style if the bare-heading look is preferred,
+  but that is out of scope for this patch.
 
 ## Post-Completion
 

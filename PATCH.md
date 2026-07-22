@@ -87,8 +87,15 @@ hunks.
 
 - `github.com/charmbracelet/glamour` **v1.0.0** (deliberately v1, not v2 — v2 needs a
   different lipgloss module path that would vendor two copies of lipgloss)
-- `github.com/AlexanderGrooff/mermaid-ascii` (imported as a library, entry point
+- `github.com/AlexanderGrooff/mermaid-ascii` **@latest** (imported as a library, entry point
   `cmd.RenderDiagram`)
+
+Together these two grew the vendor tree from 31 modules / ~19M (baseline, before this patch) to
+71 modules / ~51M (after Task 3). Most of that growth is `mermaid-ascii`'s `cmd` package, which
+pulls in gin, cobra, and logrus as transitive dependencies of a library this patch only calls for
+one function (`cmd.RenderDiagram`) — see the plan's Technical Details section for why that
+tradeoff was accepted. Confirm the actual counts after any rebase with `du -sh vendor/`; they will
+drift as upstream's own dependencies change.
 
 **After every rebase, re-run `go mod tidy && go mod vendor`.** `go mod tidy` prunes an unused
 module requirement, so if the rebase's conflict resolution temporarily drops the only import of
