@@ -473,13 +473,122 @@ the gotchas note promised — no dead-guard trap here.
 **Files:**
 - Modify: `app/ui/mdpreview.go`
 - Modify: `app/ui/mdpreview_test.go`
+- Modify: `app/ui/model.go` — see the ⚠️ note below for why this task needed to touch a file outside
+  its original list
+- Modify: `app/ui/mouse.go` — see the same note
 
-- [ ] write a failing test that the annotation-creating key does nothing while preview is on
-- [ ] write a failing test that the cursor position is preserved across toggle on then off
-- [ ] write a failing test that annotations created before enabling preview still exist after toggling
+- [x] write a failing test that the annotation-creating key does nothing while preview is on
+- [x] write a failing test that the cursor position is preserved across toggle on then off
+- [x] write a failing test that annotations created before enabling preview still exist after toggling
       back, with the same line anchors
-- [ ] implement the guard
-- [ ] run tests — must pass before task 6
+- [x] implement the guard
+- [x] run tests — must pass before task 6
+
+⚠️ **The guard needed two call sites, not one, and one of them is not in `dispatchAction`.** Tracing
+`handleKey` end to end (not just the checklist above) showed key dispatch in this codebase has two
+separate paths that can move `m.nav.diffCursor`, not one:
+
+1. **Keymap-resolved actions.** `handleKey` resolves the pressed key to a `keymap.Action` and calls
+   `dispatchAction`, which both `handleKey` and `handleChordSecond` (chord second-stage) go through.
+   This is the path the plan's "one dispatch site" was written for, and it is where most unsafe actions
+   live: `ActionConfirm` (start/edit an annotation), `ActionAnnotateFile`, `ActionDeleteAnnotation`,
+   `ActionAnnotList` (opens the annotation-list jump), `ActionDown`/`ActionUp`/page/half-page/home/end
+   (cursor motion), `ActionNextHunk`/`ActionPrevHunk`, `ActionSearch` (a completed search can reposition
+   the cursor on next/prev match), and — only reachable when the markdown TOC pane has focus, which is
+   exactly the pane preview leaves available — `ActionNextItem`/`ActionPrevItem` and `ActionConfirm`
+   again, both of which call `syncDiffToTOCCursor`/`jumpTOCEntry` and reassign `m.nav.diffCursor`
+   unconditionally on every TOC move, not only on jump-confirm.
+2. **Vim-motion's own screen-position motions.** When `--vim-motion` is on, `interceptVimMotion` (called
+   from `handleKey` *before* `keymap.Resolve`) recognizes `G`, `gg`, `zz`/`zt`/`zb`, `H`/`M`/`L`, and
+   count-prefix digits directly off the raw key string and calls cursor-moving methods (e.g.
+   `jumpToLineN` for bare `G`) itself — these never reach `keymap.Resolve` or `dispatchAction` at all,
+   so a guard placed only in `dispatchAction` cannot see or block them. `TestInterceptVimMotion_MdPreviewOn_BypassKeysAreInert`
+   proves this concretely: pressing bare `G` with vim-motion and preview both on, guarded only at
+   `dispatchAction`, still jumped the cursor to the last line.
+
+   Fix: `handleKey`'s existing `if m.modes.vimMotion {` gate that decides whether to call
+   `interceptVimMotion` at all was extended to `if m.modes.vimMotion && !m.modes.mdPreview {` — a
+   one-token change. This disables vim-motion entirely while previewing, which costs nothing
+   functionally: none of vim-motion's own keys (`G`, `gg`, `z*`, `H`/`M`/`L`) are on the preview
+   allowlist below, and with vim-motion off, `G`/`gg`/etc. simply have no keymap binding and fall
+   through to `dispatchAction` as `action == ""` — an already-safe no-op.
+
+3. **The scroll-then-pin mechanism (discovered while writing the "toggle preserves cursor" tests, not
+   originally suspected).** `scroll_diff_down`/`scroll_diff_up` (`J`/`K`) must stay allowed — the plan's
+   own "IMPORTANT nuance" calls this out: scrolling the rendered document must keep working. But
+   `scrollDiffViewportLine` (the handler both of those actions call) does two things: it shifts the
+   viewport's Y-offset (`scrollDiffViewportBy`, purely a rendering concern, safe regardless of mode), and
+   it then calls `pinDiffCursorTo` to keep the cursor visible when it would otherwise scroll out of view.
+   `pinDiffCursorTo` computes the cursor's on-screen row via `cursorVisualRange`, which walks
+   `m.file.lines` assuming one row per source line — meaningless once the viewport shows the
+   whole-document glamour render instead. Left unguarded, an *allowed* key (`J`/`K`) would silently
+   reassign `m.nav.diffCursor` to whatever diff line happens to fall at the scrolled-to row in the wrong
+   coordinate space — exactly the bug this task exists to prevent, just reached through the one action
+   the plan explicitly said must stay live. `flushWheelPending` (called at the top of every `handleKey`)
+   and `handleResize` reach the same `pinDiffCursorTo` call, so a mouse-wheel scroll during preview
+   (mouse input is outside this task's stated scope, but the pin is deferred and gets flushed on the next
+   *keypress* regardless of input device) would have hit the identical bug on the very next key press,
+   including the `P` press meant to leave preview mode.
+
+   Fix: `pinDiffCursorTo` (`app/ui/mouse.go`) now returns `false` unconditionally when
+   `m.modes.mdPreview` is true, before doing any of its normal row math. This is a single guard at the
+   one function every cursor-follow-viewport call site already funnels through, so it protects
+   `scrollDiffViewportLine`, `flushWheelPending`, `handleResize`, and `handleWheelDebounce` all at once.
+   `TestScrollDiffViewportLine_MdPreviewOn_ScrollsButCursorUnchanged` proves both halves: `J` still moves
+   `YOffset` (scrolling works) and leaves `m.nav.diffCursor` untouched (the cursor stays inert).
+
+None of this contradicts the plan's "prefer one choke point" instruction — it sharpens it. There are two
+*mechanisms* that can move the cursor (keymap dispatch, and the independent scroll-follow-cursor
+machinery), each gated exactly once, at its own single natural chokepoint:
+`mdPreviewActionAllowed` (new, in `mdpreview.go`) for the first, and the one-line guard added directly
+inside `pinDiffCursorTo` (`mouse.go`) for the second. `model.go` itself gained only the `dispatchAction`
+guard call plus the vim-motion gate's `&&` — the actual allowlist and its rationale live entirely in
+`mdpreview.go`, matching the task's instruction to keep model.go's footprint minimal.
+
+⚠️ **`dispatchAction` was split into a thin wrapper plus `dispatchResolvedAction` to satisfy
+`golangci-lint`'s `gocyclo` check.** The guard's own `if m.modes.mdPreview && !mdPreviewActionAllowed(action)`
+adds two branches (the `if`, plus the `&&`) to whichever function contains it; `dispatchAction`'s
+existing action switch was already at the 20-branch gocyclo ceiling for this codebase, so adding the
+guard inline pushed it to 22 and `golangci-lint run` failed. `dispatchAction` is now a small wrapper that
+runs the guard and delegates everything else, unchanged, to `dispatchResolvedAction` (the old
+`dispatchAction` body, renamed and otherwise untouched) — `handleChordSecond` and `resolveVimLeader`
+(vim-motion's chord dispatch) still call `dispatchAction` by the same name, so this is invisible to every
+existing caller.
+
+**Full allowlist decided (see `mdPreviewAllowedActions` in `mdpreview.go` for the authoritative,
+per-entry-commented version):** `toggle_markdown_preview` (the mode's only exit key), `quit`,
+`discard_quit`, `help`, `theme_select`, `toggle_tree`, `scroll_diff_down`/`scroll_diff_up` (`J`/`K`,
+viewport-driven, safe per the `pinDiffCursorTo` fix above), and `dismiss` (esc — only clears a leftover
+search-match highlight). Everything else is swallowed, including some actions that read as harmless at
+first glance: `next_item`/`prev_item` (`n`/`N`/`p`) route to TOC navigation when the markdown TOC pane
+has focus — the same pane preview mode leaves reachable — and reassign the cursor there too;
+`toggle_pane`/`focus_tree`/`focus_diff` are excluded because switching focus into the TOC is pointless
+once TOC navigation is itself blocked; `info`, `reload`, `flush_output`, `mark_reviewed`, `filter`,
+`filter_unreviewed`, `open_file_in_editor`, `toggle_untracked`, and the other view-mode toggles
+(`toggle_wrap`, `toggle_collapsed`, `toggle_compact`, `toggle_line_numbers`, `toggle_blame`,
+`toggle_word_diff`, `toggle_hunk`) are excluded because none of them are needed to read a rendered
+preview and several of them (e.g. `toggle_wrap`) call `syncViewportToCursor`, whose Y-offset math has the
+same diff-line-coordinate assumption as `pinDiffCursorTo` had — left unguarded there too, which this task
+did not do, since none of those actions are on the allowlist and so can never reach that call while
+previewing.
+
+⚠️ **Known, deliberately out-of-scope observations for future work**, found during this task's
+investigation but outside "annotation and cursor keys" (mouse input, and a cosmetic-only pre-existing
+quirk):
+
+- Mouse wheel and left-click in the diff pane (`app/ui/mouse.go`'s `handleMouse`, entirely independent of
+  `handleKey`/`dispatchAction`) are not gated by this task's guard. Wheel scroll is protected transitively
+  by the `pinDiffCursorTo` fix above (it no longer pins regardless of caller), but `clickDiff`'s
+  row-under-pointer-to-cursor-index mapping still assumes diff-line coordinates and was not investigated
+  or fixed — this task's scope is keys.
+- `toggleMarkdownPreview` (existing since Task 4, unmodified here) and `toggleTreePane` (on the preview
+  allowlist) both call `syncViewportToCursor`, whose Y-offset math is computed from the stale diff-line
+  cursor position and then applied to the newly-rendered preview content — a coordinate-space mismatch
+  of the same shape as the `pinDiffCursorTo` bug, but purely cosmetic (it can leave the viewport scrolled
+  to a visually arbitrary position after enabling preview or toggling the tree pane) since neither
+  function assigns to `m.nav.diffCursor`. Not touched here since it does not threaten the cursor/
+  annotation round-trip guarantee this task tests for, and fixing it would mean editing `toggleMarkdownPreview`,
+  which belongs to Task 4.
 
 ### Task 6: Regression check — mode off must be unchanged
 

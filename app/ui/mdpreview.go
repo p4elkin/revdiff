@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/umputun/revdiff/app/diff"
+	"github.com/umputun/revdiff/app/keymap"
 )
 
 // mdFencePrefix returns the fence character ('`' or '~') and the count of leading
@@ -345,4 +346,73 @@ func (m Model) renderMarkdownPreview() string {
 		return m.file.mdPreviewCache.render(m.file.name, m.file.lines, m.layout.viewport.Width)
 	}
 	return renderMarkdownDocument(m.file.lines, m.layout.viewport.Width)
+}
+
+// mdPreviewAllowedActions is the fixed allowlist of keymap actions that stay
+// live while markdown preview is on. Every action not in this set is a no-op
+// while previewing (see mdPreviewActionAllowed and its call site in
+// dispatchAction, app/ui/model.go) because it would create, edit, delete, or
+// navigate to an annotation, or move/reposition m.nav.diffCursor — all
+// meaningless once the diff pane shows one whole-document glamour render
+// instead of one row per source line (see this plan's Solution Overview).
+//
+//   - toggle_markdown_preview must stay allowed so P can turn the mode back
+//     off — this is the mode's only exit key.
+//   - quit / discard_quit / help / theme_select / toggle_tree are session and
+//     layout actions that never touch m.nav.diffCursor or the annotation
+//     store (theme_select and help open an overlay; toggle_tree only flips
+//     pane visibility).
+//   - dismiss (esc) only clears a leftover search-match highlight from a
+//     search that completed before preview was turned on; it never touches
+//     the cursor or the store either.
+//   - scroll_diff_down/up (J/K) drive the viewport's YOffset directly rather
+//     than following the cursor — see pinDiffCursorTo's mdPreview guard in
+//     mouse.go for why that stays safe even though the same function also
+//     tries to "pin" the cursor back into view on a normal (mode-off) scroll.
+//
+// Deliberately NOT included, despite being layout/session actions with no
+// obvious annotation/cursor risk on their own: toggle_pane / focus_tree /
+// focus_diff (switching focus into the TOC pane is pointless once TOC
+// navigation itself is blocked below), info, reload, flush_output,
+// mark_reviewed, filter, filter_unreviewed, open_file_in_editor,
+// toggle_untracked, and the other view-mode toggles (wrap/collapsed/compact/
+// line_numbers/blame/word_diff/toggle_hunk) — none of them are needed to
+// read a rendered preview, and several (toggle_wrap, toggle_collapsed, ...)
+// still call syncViewportToCursor, whose Y-offset math silently assumes
+// diff-line coordinates (see cursorVisualRange) that preview content doesn't
+// have. Keeping the allowlist tight avoids relying on that math staying
+// harmless action-by-action.
+//
+// next_item/prev_item (n/N/p) are excluded even though they read like
+// harmless "file navigation": when the markdown TOC is active (the same gate
+// that allows preview at all — see toggleMarkdownPreview), these actions
+// route to jumpTOCEntry, which calls syncDiffToTOCCursor and unconditionally
+// reassigns m.nav.diffCursor — exactly the class of bug this allowlist
+// exists to prevent, just reached through TOC navigation instead of the diff
+// pane's own j/k.
+var mdPreviewAllowedActions = map[keymap.Action]bool{
+	keymap.ActionTogglePreview:  true,
+	keymap.ActionQuit:           true,
+	keymap.ActionDiscardQuit:    true,
+	keymap.ActionHelp:           true,
+	keymap.ActionThemeSelect:    true,
+	keymap.ActionToggleTree:     true,
+	keymap.ActionScrollDiffDown: true,
+	keymap.ActionScrollDiffUp:   true,
+	keymap.ActionDismiss:        true,
+}
+
+// mdPreviewActionAllowed reports whether action may run while markdown
+// preview is on. Called once, at the top of dispatchAction (app/ui/model.go)
+// — the single choke point every keymap-resolved action passes through,
+// whether it arrived via handleKey's direct path or handleChordSecond's
+// chord path, both of which call dispatchAction. That single call site is
+// enough to cover every action reachable through the keymap; it is NOT
+// enough on its own to cover vim-motion's own screen-position motions
+// (G, gg, zz, H/M/L, count digits), which mutate the cursor directly from
+// the raw key before keymap.Resolve ever runs — handleKey additionally
+// skips the vim-motion interceptor entirely while preview is on (see the
+// comment at that call site) to close that separate path.
+func mdPreviewActionAllowed(action keymap.Action) bool {
+	return mdPreviewAllowedActions[action]
 }

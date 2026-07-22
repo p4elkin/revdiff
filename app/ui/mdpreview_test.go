@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/umputun/revdiff/app/annotation"
 	"github.com/umputun/revdiff/app/diff"
 	"github.com/umputun/revdiff/app/keymap"
 	"github.com/umputun/revdiff/app/ui/sidepane"
@@ -362,4 +364,238 @@ func TestRenderDiff_MarkdownPreviewOn_FileWithoutTOC_FallsBackToNormalDiff(t *te
 	out := m.renderDiff()
 
 	assert.Contains(t, xansi.Strip(out), "# Title", "without mdTOC, renderDiff must fall back to the normal diff render")
+}
+
+// --- Task 5: annotation and cursor keys inert in preview mode ---
+//
+// Preview mode replaces the diff pane's one-row-per-source-line render with a
+// single whole-document glamour render, so m.nav.diffCursor no longer maps to
+// anything on screen. Every key that would create, edit, or navigate to an
+// annotation, or move that cursor, must be a no-op while m.modes.mdPreview is
+// true. See mdPreviewActionAllowed for the fixed allowlist of what still runs.
+
+// namedKeys maps the special (non-rune) key names used by the tests below to
+// their tea.KeyMsg. Anything not listed here is treated by pressKey as a
+// literal single-rune key (tea.KeyRunes) — the same shape as the existing
+// TestModel_MarkdownPreviewToggle_ViaKeypress 'P' press.
+var namedKeys = map[string]tea.KeyMsg{
+	"enter":  {Type: tea.KeyEnter},
+	"esc":    {Type: tea.KeyEsc},
+	"home":   {Type: tea.KeyHome},
+	"end":    {Type: tea.KeyEnd},
+	"pgdown": {Type: tea.KeyPgDown},
+	"pgup":   {Type: tea.KeyPgUp},
+	"ctrl+d": {Type: tea.KeyCtrlD},
+	"ctrl+u": {Type: tea.KeyCtrlU},
+}
+
+// pressKey drives a single key through the full Update path, mirroring
+// TestModel_MarkdownPreviewToggle_ViaKeypress — this exercises the real
+// dispatch chain (handleKey -> vim-motion interceptor gate -> dispatchAction's
+// preview guard -> handlers), not the guard helper in isolation.
+func pressKey(t *testing.T, m Model, key string) Model {
+	t.Helper()
+	msg, ok := namedKeys[key]
+	if !ok {
+		require.Len(t, key, 1, "pressKey only accepts a single-rune key or a name listed in namedKeys")
+		msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
+	}
+	result, _ := m.Update(msg)
+	model, ok2 := result.(Model)
+	require.True(t, ok2, "Update must return a Model")
+	return model
+}
+
+func TestDispatchAction_MdPreviewOn_AnnotationKeysAreInert(t *testing.T) {
+	// covers every unsafe action identified in the Task 5 investigation:
+	// starting/editing an annotation (Enter, 'a' -> ActionConfirm), starting a
+	// file-level annotation ('A'), deleting an annotation ('d'), and opening
+	// the annotation-list jump ('@'). A real annotation is pre-seeded on the
+	// cursor's line so "delete_annotation" has something to (fail to) delete
+	// — otherwise that subtest would trivially pass with no guard at all.
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"confirm (start/edit annotation)", "enter"},
+		{"annotate_file", "A"},
+		{"delete_annotation", "d"},
+		{"annot_list", "@"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := mdPreviewTestModel(mdLines("# Title\n\nline one\nline two\nline three"))
+			m.nav.diffCursor = 2 // "line one", NewNum=3, ChangeType=" "
+			seeded := annotation.Annotation{File: "plan.md", Line: 3, Type: string(diff.ChangeContext), Comment: "existing"}
+			m.store.Add(seeded)
+			m.annot.cursorOnAnnotation = true // so delete_annotation has a real target, matching the normal-mode landing-on-annotation state
+			m.toggleMarkdownPreview()
+			require.True(t, m.modes.mdPreview)
+			require.Equal(t, 1, m.store.Count())
+
+			model := pressKey(t, m, tc.key)
+
+			assert.False(t, model.annot.annotating, "%s must not open the annotation input while previewing", tc.key)
+			assert.False(t, model.overlay.Active(), "%s must not open an overlay while previewing", tc.key)
+			require.Equal(t, 1, model.store.Count(), "%s must not change the annotation store while previewing", tc.key)
+			assert.Equal(t, seeded, model.store.Get("plan.md")[0], "%s must leave the existing annotation byte-for-byte unchanged", tc.key)
+		})
+	}
+}
+
+// cursorMovementTestLines builds a 40-line fixture with a heading (so mdTOC
+// is non-nil) and two real change hunks (ChangeAdd) so next_hunk/prev_hunk
+// have somewhere to actually jump — a fixture of pure context lines would
+// make those two subtests pass trivially even with no guard at all.
+func cursorMovementTestLines() []diff.DiffLine {
+	lines := make([]diff.DiffLine, 40)
+	lines[0] = diff.DiffLine{NewNum: 1, Content: "# Title", ChangeType: diff.ChangeContext}
+	for i := 1; i < len(lines); i++ {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeContext}
+	}
+	lines[5] = diff.DiffLine{NewNum: 6, Content: "added before", ChangeType: diff.ChangeAdd}
+	lines[6] = diff.DiffLine{NewNum: 7, Content: "added before", ChangeType: diff.ChangeAdd}
+	lines[30] = diff.DiffLine{NewNum: 31, Content: "added after", ChangeType: diff.ChangeAdd}
+	lines[31] = diff.DiffLine{NewNum: 32, Content: "added after", ChangeType: diff.ChangeAdd}
+	return lines
+}
+
+func TestDispatchAction_MdPreviewOn_CursorMovementKeysAreInert(t *testing.T) {
+	// broader than the single j/k case the task calls out by name: every
+	// cursor-relative navigation action identified in the investigation
+	// (page/half-page, home/end, hunk nav, and the search-triggering key)
+	// must leave diffCursor untouched too. j and k get their own dedicated
+	// assertion below as literally requested by the task. cursor starts at
+	// 20, strictly between the two hunks built by cursorMovementTestLines,
+	// so next_hunk/prev_hunk each have a real, different target to jump to.
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"down (j)", "j"},
+		{"up (k)", "k"},
+		{"page_down", "pgdown"},
+		{"page_up", "pgup"},
+		{"half_page_down", "ctrl+d"},
+		{"half_page_up", "ctrl+u"},
+		{"home", "home"},
+		{"end", "end"},
+		{"next_hunk", "]"},
+		{"prev_hunk", "["},
+		{"search", "/"}, // starting a search is unsafe: it can reposition the cursor on a match
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := mdPreviewTestModel(cursorMovementTestLines())
+			m.nav.diffCursor = 20
+			m.toggleMarkdownPreview()
+			require.True(t, m.modes.mdPreview)
+
+			model := pressKey(t, m, tc.key)
+
+			assert.Equal(t, 20, model.nav.diffCursor, "%s must not move the source-line cursor while previewing", tc.name)
+			assert.False(t, model.search.active, "%s must not start a search while previewing", tc.name)
+		})
+	}
+}
+
+func TestDispatchAction_MdPreviewOn_JK_CursorUnchanged(t *testing.T) {
+	// literal case called out by the task: j/k are the primary cursor-move
+	// keys and must be a no-op on m.nav.diffCursor while previewing.
+	m := mdPreviewTestModel(mdLines("# Title\n\nline one\nline two\nline three"))
+	m.nav.diffCursor = 1
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	afterDown := pressKey(t, m, "j")
+	assert.Equal(t, 1, afterDown.nav.diffCursor, "j must not move the cursor while previewing")
+
+	afterUp := pressKey(t, afterDown, "k")
+	assert.Equal(t, 1, afterUp.nav.diffCursor, "k must not move the cursor while previewing")
+}
+
+func TestInterceptVimMotion_MdPreviewOn_BypassKeysAreInert(t *testing.T) {
+	// vim-motion's own screen-position motions (G, gg, zz, H/M/L, count
+	// digits) never go through keymap.Resolve/dispatchAction —
+	// interceptVimMotion mutates m.nav.diffCursor directly from the raw key
+	// (see jumpToLineN). Gating only dispatchAction would leave this path
+	// open; handleKey must skip the whole interceptor while previewing.
+	lines := make([]diff.DiffLine, 20)
+	lines[0] = diff.DiffLine{NewNum: 1, Content: "# Title", ChangeType: diff.ChangeContext}
+	for i := 1; i < len(lines); i++ {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeContext}
+	}
+	m := mdPreviewTestModel(lines)
+	m.modes.vimMotion = true
+	m.nav.diffCursor = 0
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	// bare 'G' normally jumps straight to the last line (jumpToLineN), with
+	// no keymap binding involved at all.
+	model := pressKey(t, m, "G")
+
+	assert.Equal(t, 0, model.nav.diffCursor, "vim-motion G must not bypass the preview cursor guard")
+}
+
+func TestScrollDiffViewportLine_MdPreviewOn_ScrollsButCursorUnchanged(t *testing.T) {
+	// the nuance the task calls out explicitly: viewport scrolling
+	// (scroll_diff_down/up, bound to J/K) must keep working while previewing
+	// — the user needs to scroll the rendered document — but
+	// scrollDiffViewportLine also calls pinDiffCursorTo to keep the cursor
+	// visible when it scrolls out of view. pinDiffCursorTo's math
+	// (cursorVisualRange) walks m.file.lines assuming one row per source
+	// line, which is meaningless once the viewport shows the glamour render
+	// instead. Without the mdPreview guard in pinDiffCursorTo (mouse.go),
+	// this allowed key would silently reassign m.nav.diffCursor.
+	lines := make([]diff.DiffLine, 100)
+	lines[0] = diff.DiffLine{NewNum: 1, Content: "# Title", ChangeType: diff.ChangeContext}
+	for i := 1; i < len(lines); i++ {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: fmt.Sprintf("- item %d", i), ChangeType: diff.ChangeContext}
+	}
+	m := mdPreviewTestModel(lines)
+	m.nav.diffCursor = 90 // deep in the file: far from the rendered viewport's own row range
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	m.layout.viewport.SetYOffset(0) // deterministic starting point regardless of Task 4's own toggle-time scroll
+
+	model := pressKey(t, m, "J") // ActionScrollDiffDown
+
+	assert.Positive(t, model.layout.viewport.YOffset, "J must still scroll the preview viewport")
+	assert.Equal(t, 90, model.nav.diffCursor, "scrolling the preview viewport must never reassign the source-line cursor")
+}
+
+func TestMdPreviewToggle_RoundTrip_PreservesCursorPosition(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# Title\n\nline one\nline two\nline three"))
+	m.nav.diffCursor = 3
+	require.False(t, m.modes.mdPreview)
+
+	onModel := pressKey(t, m, "P")
+	require.True(t, onModel.modes.mdPreview)
+	assert.Equal(t, 3, onModel.nav.diffCursor, "entering preview must not move the cursor")
+
+	offModel := pressKey(t, onModel, "P")
+	require.False(t, offModel.modes.mdPreview, "P must still toggle preview back off while previewing")
+	assert.Equal(t, 3, offModel.nav.diffCursor, "leaving preview must restore the cursor to where it was")
+}
+
+func TestMdPreviewToggle_RoundTrip_PreservesPreExistingAnnotation(t *testing.T) {
+	lines := mdLines("# Title\n\nline one\nline two\nline three")
+	m := mdPreviewTestModel(lines)
+
+	// seed an annotation the way normal (non-preview) editing would, on a
+	// real line of the loaded file (line 3, a context line -> Type " ").
+	want := annotation.Annotation{File: "plan.md", Line: 3, Type: string(diff.ChangeContext), Comment: "pre-existing note"}
+	m.store.Add(want)
+	require.True(t, m.store.Has("plan.md", 3, string(diff.ChangeContext)))
+
+	onModel := pressKey(t, m, "P")
+	require.True(t, onModel.modes.mdPreview)
+
+	offModel := pressKey(t, onModel, "P")
+	require.False(t, offModel.modes.mdPreview)
+
+	got := offModel.store.Get("plan.md")
+	require.Len(t, got, 1, "the pre-existing annotation must survive the preview round-trip untouched")
+	assert.Equal(t, want, got[0], "line anchor, type, and comment must be exactly unchanged")
 }

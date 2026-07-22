@@ -1036,7 +1036,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// propagate the interceptor's model on fall-through so state cleared inside
 	// the interceptor (e.g., count dropped after an unrelated key like "5q")
 	// is visible to the standard keymap path that runs next.
-	if m.modes.vimMotion {
+	// Markdown preview additionally disables the interceptor outright: its
+	// screen-position motions (G, gg, zz, H/M/L, ...) mutate m.nav.diffCursor
+	// straight from the raw key, bypassing keymap.Resolve/dispatchAction
+	// entirely, so dispatchAction's mdPreviewActionAllowed guard alone cannot
+	// see or block them — see mdpreview.go.
+	if m.modes.vimMotion && !m.modes.mdPreview {
 		model, cmd, handled := m.interceptVimMotion(msg)
 		if handled {
 			return model, cmd
@@ -1059,11 +1064,28 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.dispatchAction(action)
 }
 
-// dispatchAction routes a resolved keymap action through overlay-open, the
-// global action switch, and the pane-specific nav fallback. It is the unified
-// dispatch path shared by keymap-resolved single keys (handleKey) and by
-// chord-resolved actions (handleChordSecond).
+// dispatchAction is the single choke point every keymap-resolved action
+// passes through — handleKey's direct path and handleChordSecond's chord
+// path both call it. Markdown preview renders the whole document through
+// glamour, which reflows text, so a rendered row no longer maps to a source
+// line — every action that would create/edit/delete/navigate to an
+// annotation or move m.nav.diffCursor must be a no-op while previewing. See
+// mdPreviewActionAllowed (mdpreview.go) for the fixed allowlist of what stays
+// live. The guard is kept in this thin wrapper, rather than inline in
+// dispatchResolvedAction's own switch, purely to keep that already-large
+// function's cyclomatic complexity (gocyclo) unchanged.
 func (m Model) dispatchAction(action keymap.Action) (tea.Model, tea.Cmd) {
+	if m.modes.mdPreview && !mdPreviewActionAllowed(action) {
+		return m, nil
+	}
+	return m.dispatchResolvedAction(action)
+}
+
+// dispatchResolvedAction routes a resolved keymap action through
+// overlay-open, the global action switch, and the pane-specific nav
+// fallback. Factored out of dispatchAction so the markdown-preview guard
+// there adds no branches to this switch — see dispatchAction's doc comment.
+func (m Model) dispatchResolvedAction(action keymap.Action) (tea.Model, tea.Cmd) {
 	if model, cmd, ok := m.handleOverlayOpen(action); ok {
 		return model, cmd
 	}
