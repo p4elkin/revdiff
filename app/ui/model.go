@@ -310,7 +310,6 @@ type loadedFileState struct {
 	canceledLoadPath string                 // path rejected for canceledLoadSeq
 	mdTOC            TOCComponent           // markdown table-of-contents (nil when not applicable)
 	singleFile       bool                   // true when diff contains exactly one file
-	mdPreviewCache   *mdPreviewCache        // memoized preview render (app/ui/mdpreview.go); lazily allocated by toggleMarkdownPreview
 }
 
 // modelConfigState holds immutable or near-immutable session configuration.

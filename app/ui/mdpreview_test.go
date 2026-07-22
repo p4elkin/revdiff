@@ -244,34 +244,6 @@ func TestRenderMarkdownDocument_NarrowWidth_ProseRespectsWidthArtOverflows(t *te
 	}
 }
 
-func TestMdPreviewCache_HitIgnoresChangedLinesWhenFileAndWidthMatch(t *testing.T) {
-	var cache mdPreviewCache
-
-	first := cache.render("plan.md", mdLines("# One"), 80)
-	second := cache.render("plan.md", mdLines("# Something else entirely"), 80)
-
-	assert.Equal(t, first, second, "same file and width must be served from cache, ignoring the new lines")
-}
-
-func TestMdPreviewCache_WidthChangeInvalidatesCache(t *testing.T) {
-	var cache mdPreviewCache
-	doc := "Some paragraph text that is long enough to visibly wrap differently at two widths, padded further still.\n"
-
-	narrow := cache.render("plan.md", mdLines(doc), 20)
-	wide := cache.render("plan.md", mdLines(doc), 80)
-
-	assert.NotEqual(t, narrow, wide, "a viewport width change must invalidate the cache and re-render")
-}
-
-func TestMdPreviewCache_FileChangeInvalidatesCache(t *testing.T) {
-	var cache mdPreviewCache
-
-	aOut := cache.render("a.md", mdLines("# A only"), 80)
-	bOut := cache.render("b.md", mdLines("# B only"), 80)
-
-	assert.NotEqual(t, aOut, bOut, "a different file name at the same width must not reuse the other file's render")
-}
-
 // mdPreviewTestModel builds a Model for the mode-wiring tests: a single
 // full-context markdown file loaded, with mdTOC set exactly the way
 // handleFileLoaded (app/ui/loaders.go) would set it for a single-file,
@@ -296,7 +268,6 @@ func TestToggleMarkdownPreview_RefusedWhenTOCNil(t *testing.T) {
 	m.toggleMarkdownPreview()
 
 	assert.False(t, m.modes.mdPreview, "toggle must be refused when mdTOC is nil")
-	assert.Nil(t, m.file.mdPreviewCache, "no cache should be allocated on a refused toggle")
 }
 
 func TestToggleMarkdownPreview_FlipsStateWhenTOCPresent(t *testing.T) {
@@ -344,12 +315,11 @@ func TestRenderDiff_MarkdownPreviewOn_RendersPreview(t *testing.T) {
 	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
 	m.toggleMarkdownPreview()
 	require.True(t, m.modes.mdPreview)
-	require.NotNil(t, m.file.mdPreviewCache, "toggling on must allocate the render cache")
 
 	out := m.renderDiff()
 
-	want := m.file.mdPreviewCache.render("plan.md", m.file.lines, m.layout.viewport.Width)
-	assert.Equal(t, want, out, "renderDiff must dispatch to the cached markdown preview render")
+	want := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width)
+	assert.Equal(t, want, out, "renderDiff must dispatch to the markdown preview render")
 	assert.NotContains(t, xansi.Strip(out), "# Title", "glamour must style away the raw '#' heading marker")
 }
 
@@ -557,7 +527,10 @@ func TestScrollDiffViewportLine_MdPreviewOn_ScrollsButCursorUnchanged(t *testing
 	m.nav.diffCursor = 90 // deep in the file: far from the rendered viewport's own row range
 	m.toggleMarkdownPreview()
 	require.True(t, m.modes.mdPreview)
-	m.layout.viewport.SetYOffset(0) // deterministic starting point regardless of Task 4's own toggle-time scroll
+	// entering preview resets the viewport to the top rather than scrolling to a
+	// diff-line-derived offset — assert that here instead of forcing it, so this
+	// test also pins the toggle-on scroll behavior.
+	require.Equal(t, 0, m.layout.viewport.YOffset, "entering preview must reset the viewport to the top")
 
 	model := pressKey(t, m, "J") // ActionScrollDiffDown
 
@@ -682,4 +655,175 @@ func TestRenderDiff_MarkdownPreviewOff_NonMarkdownFile_DoublyGated(t *testing.T)
 		"renderDiff must fall back to the normal diff render when mdTOC is nil, even if mdPreview is true — "+
 			"the early-return branch requires BOTH conditions together")
 	assert.NotContains(t, off, "mdpreviewmermaidplaceholder", "mode-off output must show no markdown-preview internals")
+}
+
+// --- Review fixes: mouse read-only guard, reload staleness, toggle scroll/off ---
+
+// mdPreviewMouseLines builds a 40-line markdown fixture with two headings (so
+// ParseTOC yields two TOC entries) and otherwise plain context lines. The two
+// headings give clickTree / TOC-wheel a real, non-current line to (try to)
+// jump the source cursor onto, so the read-only guard is exercised instead of
+// vacuously passing on a single-entry TOC.
+func mdPreviewMouseLines() []diff.DiffLine {
+	lines := make([]diff.DiffLine, 40)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "text", ChangeType: diff.ChangeContext}
+	}
+	lines[0] = diff.DiffLine{NewNum: 1, Content: "# Heading One", ChangeType: diff.ChangeContext}
+	lines[20] = diff.DiffLine{NewNum: 21, Content: "## Heading Two", ChangeType: diff.ChangeContext}
+	return lines
+}
+
+// mdPreviewMouseModel builds a single-file markdown Model with a visible TOC
+// pane and concrete layout geometry so hitTest routes clicks/wheels to the
+// right zone (x<38 -> TOC, x>=38 -> diff), matching mouseTestModel's setup.
+func mdPreviewMouseModel(t *testing.T, lines []diff.DiffLine) Model {
+	t.Helper()
+	m := testModel([]string{"plan.md"}, map[string][]diff.DiffLine{"plan.md": lines})
+	m.file.name = "plan.md"
+	m.file.lines = lines
+	m.file.singleFile = true
+	m.file.mdTOC = sidepane.ParseTOC(lines, "plan.md")
+	require.NotNil(t, m.file.mdTOC, "fixture sanity: markdown lines with headings must produce a TOC")
+	m.layout.focus = paneDiff
+	m.layout.viewport.Width = 80
+	m.layout.viewport.Height = 30
+	return m
+}
+
+func TestHandleMouse_MdPreviewOn_ClickInDiffDoesNotMoveCursor(t *testing.T) {
+	// preview is read-only: a left-click in the diff pane computes a diff-line
+	// index from a preview-render row and (without the guard) reassigns the
+	// source cursor. clickDiff must be inert while previewing.
+	m := mdPreviewMouseModel(t, mdPreviewMouseLines())
+	m.nav.diffCursor = 20
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	m.layout.viewport.SetYOffset(0) // deterministic click math regardless of toggle-time scroll
+
+	// y=12, diffTopRow=2, YOffset=0 -> row 10; without the guard clickDiff would
+	// move the cursor to diff line 10.
+	result, _ := m.Update(leftPressAt(60, 12))
+	model := result.(Model)
+
+	assert.Equal(t, 20, model.nav.diffCursor,
+		"a click in the diff pane must not move the source cursor while previewing")
+}
+
+func TestHandleMouse_MdPreviewOn_ClickInTOCDoesNotMoveCursor(t *testing.T) {
+	// clicking a TOC entry routes clickTree -> syncDiffToTOCCursor, which
+	// reassigns the source cursor and scrolls via diff-line math. The keyboard
+	// TOC keys (n/N/p) are swallowed in preview; the click must be inert too.
+	m := mdPreviewMouseModel(t, mdPreviewMouseLines())
+	m.nav.diffCursor = 10
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	// x=5 -> TOC pane, y=2, treeTopRow=1 -> visible row 1 = "Heading Two" (line 20).
+	result, _ := m.Update(leftPressAt(5, 2))
+	model := result.(Model)
+
+	assert.Equal(t, 10, model.nav.diffCursor,
+		"clicking a TOC entry must not move the source cursor while previewing")
+}
+
+func TestHandleMouse_MdPreviewOn_WheelOverTOCDoesNotMoveCursor(t *testing.T) {
+	// wheeling over the TOC pane routes handleWheel's hitTree branch ->
+	// syncDiffToTOCCursor, same cursor reassignment as clickTree. Must be inert
+	// in preview, matching the swallowed n/N/p keys.
+	m := mdPreviewMouseModel(t, mdPreviewMouseLines())
+	m.nav.diffCursor = 10
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	result, _ := m.Update(wheelMsg(tea.MouseButtonWheelDown, 5, 3, false))
+	model := result.(Model)
+
+	assert.Equal(t, 10, model.nav.diffCursor,
+		"wheeling over the TOC must not move the source cursor while previewing")
+}
+
+func TestHandleMouse_MdPreviewOn_WheelOverDiffScrollsButCursorUnchanged(t *testing.T) {
+	// positive control: wheel over the diff pane must still scroll the preview
+	// (viewport YOffset), exactly like the J key, without pinning/mutating the
+	// source cursor (pinDiffCursorTo is guarded). Not a bug reproduction —
+	// guards against regressing the allowed scroll path.
+	lines := make([]diff.DiffLine, 100)
+	lines[0] = diff.DiffLine{NewNum: 1, Content: "# Heading", ChangeType: diff.ChangeContext}
+	for i := 1; i < len(lines); i++ {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: fmt.Sprintf("- item %d", i), ChangeType: diff.ChangeContext}
+	}
+	m := mdPreviewMouseModel(t, lines)
+	m.nav.diffCursor = 90
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	m.layout.viewport.SetContent(m.renderDiff())
+	m.layout.viewport.SetYOffset(0)
+
+	model := updateWheelAndFlush(t, m, wheelMsg(tea.MouseButtonWheelDown, 60, 10, false))
+
+	assert.Positive(t, model.layout.viewport.YOffset, "wheel over the diff must still scroll the preview viewport")
+	assert.Equal(t, 90, model.nav.diffCursor,
+		"scrolling the preview viewport must not reassign the source cursor")
+}
+
+func TestRenderMarkdownPreview_ReflectsChangedLinesUnderSameFileAndWidth(t *testing.T) {
+	// reload staleness (the R keep-open loop): the same file re-loaded at the
+	// same width used to be served from a render cache keyed on file+width only,
+	// returning the pre-edit render. With the cache gone, renderMarkdownPreview
+	// re-renders from the current lines every time.
+	m := mdPreviewTestModel(mdLines("# One\n\noriginal body text"))
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	first := xansi.Strip(m.renderMarkdownPreview())
+	require.Contains(t, first, "original body text", "fixture sanity: the initial render must contain the initial content")
+
+	// simulate an R reload: same file name, same width, new content.
+	m.file.lines = mdLines("# One\n\ncompletely different body")
+
+	second := xansi.Strip(m.renderMarkdownPreview())
+	assert.Contains(t, second, "completely different body",
+		"a reload under the same file+width must re-render the new content, not a stale cached render")
+	assert.NotContains(t, second, "original body text",
+		"the pre-reload content must not persist after the lines change")
+}
+
+func TestToggleMarkdownPreview_On_ResetsViewportToTop(t *testing.T) {
+	// toggle-on scroll (bug): toggleMarkdownPreview used to call
+	// syncViewportToCursor, whose YOffset math walks m.file.lines in diff-line
+	// coordinates — meaningless against the glamour render. Opening preview with
+	// a scrolled cursor on a long file jumped to an arbitrary offset. Entering
+	// preview must reset the viewport to the top instead.
+	lines := make([]diff.DiffLine, 200)
+	lines[0] = diff.DiffLine{NewNum: 1, Content: "# Title", ChangeType: diff.ChangeContext}
+	for i := 1; i < len(lines); i++ {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: fmt.Sprintf("line %d", i), ChangeType: diff.ChangeContext}
+	}
+	m := mdPreviewTestModel(lines)
+	m.nav.diffCursor = 150
+	m.syncViewportToCursor() // scroll the normal diff so the starting YOffset is non-zero
+	require.Positive(t, m.layout.viewport.YOffset,
+		"fixture sanity: a deep cursor on a long file must scroll the diff off the top before entering preview")
+
+	on := pressKey(t, m, "P")
+	require.True(t, on.modes.mdPreview)
+
+	assert.Equal(t, 0, on.layout.viewport.YOffset,
+		"entering preview must reset the viewport to the top, not to a diff-line-derived offset")
+}
+
+func TestToggleMarkdownPreview_TurnsOffEvenWhenTOCNil(t *testing.T) {
+	// the ON gate (mdTOC != nil) must not block the OFF transition. Not
+	// reachable today (preview only in single-file markdown mode) but a latent
+	// trap: a file switch that clears mdTOC while preview is on would otherwise
+	// strand the mode with no exit key.
+	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	m.file.mdTOC = nil // simulate mdTOC cleared while preview is on
+
+	off := pressKey(t, m, "P")
+	assert.False(t, off.modes.mdPreview, "P must turn preview OFF even when mdTOC is nil")
 }

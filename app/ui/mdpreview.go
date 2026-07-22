@@ -284,67 +284,41 @@ func renderMarkdownDocument(lines []diff.DiffLine, width int) string {
 	return spliceMermaidArt(out, arts)
 }
 
-// mdPreviewCache holds the last markdown-preview render, keyed on the source
-// file it was rendered from and the viewport width it targeted — a width
-// change (pane resize, tree toggle) must invalidate it, since glamour's
-// word-wrap depends on width. This is deliberately not a field on Model
-// (that wiring belongs to the mode-toggle task); a caller holds one instance
-// and passes it into render on every call.
-type mdPreviewCache struct {
-	valid bool
-	file  string
-	width int
-	out   string
-}
-
-// render returns the cached preview for file/width when both match the
-// previous call, and otherwise (re)renders via renderMarkdownDocument and
-// refreshes the cache. lines is only consulted on a miss — a cache hit
-// intentionally does not re-inspect lines, so callers must invalidate (or
-// use a fresh cache) whenever the file's content actually changes under an
-// unchanged name, e.g. on reload.
-func (c *mdPreviewCache) render(file string, lines []diff.DiffLine, width int) string {
-	if c.valid && c.file == file && c.width == width {
-		return c.out
-	}
-	out := renderMarkdownDocument(lines, width)
-	c.valid = true
-	c.file = file
-	c.width = width
-	c.out = out
-	return out
-}
-
 // toggleMarkdownPreview flips markdown preview mode on/off for the currently
-// loaded file. Refused (no state change) unless m.file.mdTOC is non-nil —
-// that field is set only for a single, full-context markdown file (see the
-// gate in loaders.go), which is exactly the condition under which a
+// loaded file. Turning it ON is refused (no state change) unless m.file.mdTOC
+// is non-nil — that field is set only for a single, full-context markdown file
+// (see the gate in loaders.go), which is exactly the condition under which a
 // whole-document render is safe (no partially-shown table — see the plan's
-// Overview). The mode defaults to off.
+// Overview). Turning it OFF is always allowed: gating the OFF transition on
+// mdTOC as well would strand the mode with no exit key if a file switch
+// cleared mdTOC while preview was on. The mode defaults to off.
 //
-// Enabling it lazily allocates the render cache the first time, so repeated
-// toggles on the same file reuse the cached glamour/mermaid output instead of
-// re-rendering on every press.
+// On the ON transition the viewport is reset to the top. It now shows the
+// whole-document glamour render, whose rows do not map to m.file.lines, so the
+// cursor-follow scroll math (syncViewportToCursor -> cursorVisualRange, all in
+// diff-line coordinates) is meaningless here. On the OFF transition content
+// and cursor are both back in diff-line space, so the normal
+// keep-cursor-visible scroll is correct again.
 func (m *Model) toggleMarkdownPreview() {
-	if m.file.mdTOC == nil {
+	if !m.modes.mdPreview && m.file.mdTOC == nil {
 		return
 	}
 	m.modes.mdPreview = !m.modes.mdPreview
-	if m.modes.mdPreview && m.file.mdPreviewCache == nil {
-		m.file.mdPreviewCache = &mdPreviewCache{}
+	if m.modes.mdPreview {
+		m.layout.viewport.SetContent(m.renderDiff())
+		m.layout.viewport.GotoTop()
+		return
 	}
 	m.syncViewportToCursor()
 }
 
-// renderMarkdownPreview returns the cached (or freshly rendered) markdown
-// preview for the currently loaded file at the current viewport width. Falls
-// back to an uncached render when the cache has not been allocated yet —
-// production always allocates it in toggleMarkdownPreview before mdPreview
-// can be true, but this keeps the render path itself safe on its own.
+// renderMarkdownPreview renders the currently loaded file as a markdown
+// preview at the current viewport width. It re-renders on every call, with no
+// cache: the render only fires on a P toggle or a viewport content refresh,
+// never per frame, so the one saved glamour+mermaid pass is not worth the
+// staleness risk of a file+width-keyed cache surviving an R reload of the same
+// file at the same width.
 func (m Model) renderMarkdownPreview() string {
-	if m.file.mdPreviewCache != nil {
-		return m.file.mdPreviewCache.render(m.file.name, m.file.lines, m.layout.viewport.Width)
-	}
 	return renderMarkdownDocument(m.file.lines, m.layout.viewport.Width)
 }
 

@@ -15,7 +15,7 @@ what the patch touches, and how to carry it onto a new upstream release.
 ## New files added by the patch
 
 - `app/ui/mdpreview.go` — almost all patch logic lives here by design (fence extraction,
-  glamour rendering, render cache, the preview-mode action allowlist, `toggleMarkdownPreview`).
+  glamour rendering, the preview-mode action allowlist, `toggleMarkdownPreview`).
 - `app/ui/mdpreview_test.go` — its tests.
 
 A clean rebase never conflicts on these two files — they don't exist upstream. All conflict
@@ -35,13 +35,10 @@ current HEAD of `md-preview`; they will drift after every rebase — treat them 
   - line 233: help-section entry in `defaultDescriptions()`
   - line 294: `"P": ActionTogglePreview` in `defaultBindings()`
 - `app/ui/model.go`
-  - line 307: `mdPreviewCache *mdPreviewCache` field on `loadedFileState` (not on `modeState` —
-    see the plan's Task 4 ⚠️ note on gofmt column alignment)
-  - line 355: `mdPreview bool` field on `modeState`
-  - line 1113: `keymap.ActionTogglePreview` added to the toggle-grouping `case` that routes to
+  - `mdPreview bool` field on `modeState`
+  - `keymap.ActionTogglePreview` added to the toggle-grouping `case` that routes to
     `handleViewToggle`
-  - line 1432: `case keymap.ActionTogglePreview: m.toggleMarkdownPreview()` inside
-    `handleViewToggle`
+  - `case keymap.ActionTogglePreview: m.toggleMarkdownPreview()` inside `handleViewToggle`
 - `app/ui/diffview.go`
   - line 280-282: early-return branch in `renderDiff()` — `if m.modes.mdPreview &&
     m.file.mdTOC != nil { return m.renderMarkdownPreview() }`, placed beside the existing
@@ -49,10 +46,9 @@ current HEAD of `md-preview`; they will drift after every rebase — treat them 
 - `app/ui/view.go`
   - line 459: `{"▤", m.modes.mdPreview}` added to `statusModeIcons()`
 
-That is 9 hunks across 4 files (the plan's Task 4 text calls this "seven sites" counting by
-checklist item, not by literal diff hunk — `keymap.go`'s enum/validActions edit and
-`model.go`'s two dispatch-case edits are each one checklist item covering two hunks). Use the
-line list above, not the number seven, as the actual hunk map.
+That is 9 hunks across 4 files. The plan's Task 4 text counts by checklist item, not by literal
+diff hunk (e.g. `keymap.go`'s enum + validActions edit is one checklist item but two hunks), so
+its site count differs — use the itemized list above as the actual hunk map.
 
 **Task 5 wiring (making annotation/cursor keys inert during preview — required additional
 edits beyond Task 4's file list, see the plan's Task 5 section for why):**
@@ -66,7 +62,12 @@ edits beyond Task 4's file list, see the plan's Task 5 section for why):**
     touches the old single `dispatchAction` body must land inside `dispatchResolvedAction`
     instead
 - `app/ui/mouse.go`
-  - line 451: `if m.modes.mdPreview { return false }` at the top of `pinDiffCursorTo`
+  - `if m.modes.mdPreview { return false }` at the top of `pinDiffCursorTo` (keeps an allowed
+    diff-pane scroll — J/K or wheel — from pinning/mutating the cursor)
+  - `if m.modes.mdPreview { return m, nil }` in `handleMouse`'s left-click branch (a click in
+    either pane is read-only in preview — no `clickDiff`/`clickTree` cursor move)
+  - `if m.modes.mdPreview { return m, nil }` in `handleWheel`'s `hitTree` branch (TOC wheel must
+    not drive `syncDiffToTOCCursor`, matching the swallowed n/N/p keys)
 
 **Test-only, mechanical, not part of the feature itself:**
 
@@ -80,8 +81,8 @@ edits beyond Task 4's file list, see the plan's Task 5 section for why):**
 
 `app/ui/diffview.go` and `app/ui/model.go` are the most actively developed files upstream and
 the most likely to conflict — this was flagged going in (see the plan's "Patch discipline"
-section) and confirmed empirically: `model.go` alone carries 6 of the patch's 10 existing-file
-hunks.
+section) and confirmed empirically: `model.go` alone carries 5 of the patch's 14 existing-file
+hunks (keymap 4, model 5, diffview 1, mouse 3, view 1).
 
 ## Dependencies added
 
