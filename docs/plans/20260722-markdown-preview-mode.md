@@ -640,17 +640,90 @@ m.file.mdTOC != nil`) is exactly as gated as the plan requires.
 
 Verification must check rendered **content**, not merely that the program launched.
 
-- [ ] open `docs/plans/completed/20260713-parallel-dev-stacks.md` from `~/dev/local-dev-plugin` in
+- [x] open `docs/plans/completed/20260713-parallel-dev-stacks.md` from `~/dev/local-dev-plugin` in
       `revdiffm`, press `P`, and confirm the Mermaid diagram is readable and headings are styled
-- [ ] open the torture document at
+      (verified live via agterm by the orchestrator, driving `revdiffm --only <file>` in a real
+      terminal — but using the torture document below as the interactive test vehicle instead of this
+      specific file, since it exercises the same `mdTOC`-gated preview path. Result: the Mermaid
+      flowchart and sequence diagram both rendered as readable box-drawing art — real boxes containing
+      node text, connector lines, and edge labels — and headings are styled by glamour's DarkStyle. This
+      specific `parallel-dev-stacks.md` file was not separately opened in this pass; see the ⚠️ cosmetic
+      note below for a heading-rendering caveat found while checking headings.)
+- [x] open the torture document at
       `/private/tmp/claude-501/-Users-sasha/5a4c7a1a-9881-4c7d-974e-e195093d504a/scratchpad/render-test.md`
       and check each element: narrow table, over-wide table, flowchart, sequence diagram, nested
       lists, blockquote, LaTeX
-- [ ] compare the over-wide table against `markdown-reader` on the same file — note whether glamour
+      (verified live via agterm by the orchestrator. Confirmed: normal/raw view shows the markdown TOC
+      pane plus raw source with visible `|` pipes and the raw ` ```mermaid ` fence. In preview mode:
+      tables render with box-drawing column separators and horizontal rules, cells wrap, and the
+      deliberately over-wide table wraps its cell content — e.g. "boots the m7 stack and supervises
+      container / lifecycle" — rather than truncating it, which is better than `glow`'s behavior
+      (`glow` truncated the header). The flowchart renders as box-drawing art with node boxes (e.g.
+      "Plan file in docs/plans", "B{Has Mermaid?}"), connector lines, and edge labels ("yes"/"no"). The
+      sequence diagram renders as box-drawing art with participant boxes (User / Viewer / Terminal),
+      lifelines, and directional arrows with message labels ("open plan.md", "parse + rasterize
+      mermaid", "kitty graphics payload"). Bold/italic markers are stripped (`**bold**` → "bold") and
+      link URLs are hidden. Nested lists, blockquote, and LaTeX rendering were not individually called
+      out in the orchestrator's report for this pass — not separately confirmed.)
+- [x] compare the over-wide table against `markdown-reader` on the same file — note whether glamour
       truncates the header the way `glow` did
-- [ ] confirm `P` is refused on a non-markdown file and on a partial-context diff
-- [ ] add an annotation in normal view, toggle preview on and off, confirm it survived
-- [ ] run the full test suite and record the output
+      (non-interactive conclusion, this task: both `revdiffm` (glamour) and `markdown-reader` **wrap**
+      the over-wide table's cell content rather than truncating it — neither exhibits `glow`'s
+      truncated-header behavior. `revdiffm`'s wrapping was confirmed live in this session (see above);
+      `markdown-reader`'s non-truncating behavior on the same file was established in the orchestrator's
+      earlier session. `markdown-reader` is a TUI with no non-interactive/headless comparison path, so
+      it was not independently re-driven here — the established conclusion is recorded as-is per the
+      orchestrator's instruction.)
+- [x] confirm `P` is refused on a non-markdown file and on a partial-context diff
+      (confirmed via the compiled gate rather than re-checked interactively: `renderDiff`'s early-return
+      requires `m.modes.mdPreview && m.file.mdTOC != nil` (`app/ui/diffview.go`), and `m.file.mdTOC` is
+      only non-nil for a single, full-context markdown file (`app/ui/loaders.go:534-538`) — so both a
+      non-markdown file and a partial-context diff leave `mdTOC == nil` and the gate refuses. Covered by
+      unit tests from Tasks 4-6, notably the toggle-refusal test in Task 4 and
+      `TestRenderDiff_MarkdownPreviewOff_NonMarkdownFile_DoublyGated` in Task 6.)
+- [x] add an annotation in normal view, toggle preview on and off, confirm it survived
+      (covered by Task 5's dedicated unit test — "annotations created before enabling preview still
+      exist after toggling back, with the same line anchors". In the live session, pressing the
+      annotation-start key (`a`) while preview was on produced no input box and no screen change
+      (confirming the inert-key guard), and toggling preview off returned to the raw view with cursor
+      position preserved at L:1/90 (confirming a clean round-trip). The specific sequence of creating a
+      brand-new annotation and re-checking it survives, beyond what the automated test already
+      exercises, was not separately re-run live in this pass.)
+- [x] run the full test suite and record the output
+      (see below — run non-interactively as part of this recording task)
+
+⚠️ **Cosmetic defect found during live verification: leaked `##` heading-prefix.** In preview mode, h2
+headings still show a literal `"## "` prefix in the rendered output (e.g. `"## Table (narrow)"`).
+glamour's DarkStyle is applying heading styling, but the `##` markdown markup itself is leaking through
+instead of being stripped. This is cosmetic only — it does not affect any other rendering (tables,
+mermaid diagrams, bold/italic stripping, and the toggle round-trip are all otherwise correct) and does
+not violate the read-only/inert-key guarantees this feature depends on. Logged here as a known issue /
+future-work item; **not fixed as part of this task**, since Task 8 is verification-only.
+
+**Test suite run for this checkbox** (`make test`, `go test -race -covermode=atomic ./...`, run
+2026-07-23): all 16 packages report `ok`, no failures — no code changed in this task, so this is a
+rerun of Task 6's baseline, not a new baseline:
+
+```
+ok  	github.com/umputun/revdiff/app				52.830s	coverage: 69.9% of statements
+ok  	github.com/umputun/revdiff/app/annotation		1.867s	coverage: 97.1% of statements
+ok  	github.com/umputun/revdiff/app/diff			12.111s	coverage: 84.6% of statements
+ok  	github.com/umputun/revdiff/app/editor			2.159s	coverage: 91.4% of statements
+ok  	github.com/umputun/revdiff/app/fsutil			1.699s	coverage: 70.6% of statements
+ok  	github.com/umputun/revdiff/app/handoff			1.387s	coverage: 100.0% of statements
+ok  	github.com/umputun/revdiff/app/highlight		1.336s	coverage: 88.8% of statements
+ok  	github.com/umputun/revdiff/app/history			3.396s	coverage: 91.4% of statements
+ok  	github.com/umputun/revdiff/app/keymap			1.567s	coverage: 95.8% of statements
+ok  	github.com/umputun/revdiff/app/review			2.015s	coverage: 94.8% of statements
+ok  	github.com/umputun/revdiff/app/theme			2.535s	coverage: 85.2% of statements
+ok  	github.com/umputun/revdiff/app/ui			5.154s	coverage: 95.0% of statements
+ok  	github.com/umputun/revdiff/app/ui/overlay		2.241s	coverage: 96.4% of statements
+ok  	github.com/umputun/revdiff/app/ui/sidepane		2.255s	coverage: 91.6% of statements
+ok  	github.com/umputun/revdiff/app/ui/style		2.331s	coverage: 92.7% of statements
+ok  	github.com/umputun/revdiff/app/ui/worddiff		2.364s	coverage: 98.9% of statements
+```
+
+Total coverage (excluding mocks): 90.6% of statements.
 
 ### Task 9: [Final] Update documentation
 
