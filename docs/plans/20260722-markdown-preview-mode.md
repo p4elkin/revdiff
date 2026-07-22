@@ -630,10 +630,10 @@ m.file.mdTOC != nil`) is exactly as gated as the plan requires.
 **Files:**
 - Create: `PATCH.md`
 
-- [ ] build the patched binary and install it as `revdiffm` (not `revdiff`, so the brew build is left
+- [x] build the patched binary and install it as `revdiffm` (not `revdiff`, so the brew build is left
       alone and nothing is shadowed)
-- [ ] confirm the brew `revdiff` still runs and is unaffected
-- [ ] write `PATCH.md`: which upstream tag the branch sits on, the seven hunk locations, the rebuild
+- [x] confirm the brew `revdiff` still runs and is unaffected
+- [x] write `PATCH.md`: which upstream tag the branch sits on, the seven hunk locations, the rebuild
       command, and the rebase procedure
 
 ### Task 8: Verify acceptance criteria
