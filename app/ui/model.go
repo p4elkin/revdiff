@@ -310,6 +310,7 @@ type loadedFileState struct {
 	canceledLoadPath string                 // path rejected for canceledLoadSeq
 	mdTOC            TOCComponent           // markdown table-of-contents (nil when not applicable)
 	singleFile       bool                   // true when diff contains exactly one file
+	mdPreviewCache   *mdPreviewCache        // memoized preview render (app/ui/mdpreview.go); lazily allocated by toggleMarkdownPreview
 }
 
 // modelConfigState holds immutable or near-immutable session configuration.
@@ -357,6 +358,7 @@ type modeState struct {
 	compact        bool           // true when diffs are fetched with small context around changes
 	compactContext int            // number of context lines around changes when compact is enabled
 	vimMotion      bool           // true when the --vim-motion preset is active (gates the vim-motion interceptor in handleKey)
+	mdPreview      bool           // true when markdown preview mode is on (read-only rendered view); default off
 }
 
 // navigationState holds cursor and navigation-adjacent state.
@@ -1091,7 +1093,8 @@ func (m Model) dispatchAction(action keymap.Action) (tea.Model, tea.Cmd) {
 	case keymap.ActionMarkReviewed:
 		return m.handleMarkReviewed()
 	case keymap.ActionToggleCollapsed, keymap.ActionToggleCompact, keymap.ActionToggleWrap, keymap.ActionToggleTree,
-		keymap.ActionToggleLineNums, keymap.ActionToggleBlame, keymap.ActionToggleWordDiff, keymap.ActionToggleUntracked:
+		keymap.ActionToggleLineNums, keymap.ActionToggleBlame, keymap.ActionToggleWordDiff, keymap.ActionToggleUntracked,
+		keymap.ActionTogglePreview:
 		return m.handleViewToggle(action)
 	case keymap.ActionNextHunk, keymap.ActionPrevHunk:
 		return m.handleHunkNav(action == keymap.ActionNextHunk)
@@ -1417,6 +1420,8 @@ func (m Model) handleViewToggle(action keymap.Action) (tea.Model, tea.Cmd) {
 		m.toggleCollapsedMode()
 	case keymap.ActionToggleWrap:
 		m.toggleWrapMode()
+	case keymap.ActionTogglePreview:
+		m.toggleMarkdownPreview()
 	case keymap.ActionToggleTree:
 		m.toggleTreePane()
 	case keymap.ActionToggleLineNums:

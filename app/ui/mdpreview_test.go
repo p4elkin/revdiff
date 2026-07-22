@@ -5,11 +5,14 @@ import (
 	"testing"
 
 	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
+	tea "github.com/charmbracelet/bubbletea"
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/umputun/revdiff/app/diff"
+	"github.com/umputun/revdiff/app/keymap"
+	"github.com/umputun/revdiff/app/ui/sidepane"
 )
 
 // mdLines turns a plain document string into []diff.DiffLine the way a full-context
@@ -265,4 +268,98 @@ func TestMdPreviewCache_FileChangeInvalidatesCache(t *testing.T) {
 	bOut := cache.render("b.md", mdLines("# B only"), 80)
 
 	assert.NotEqual(t, aOut, bOut, "a different file name at the same width must not reuse the other file's render")
+}
+
+// mdPreviewTestModel builds a Model for the mode-wiring tests: a single
+// full-context markdown file loaded, with mdTOC set exactly the way
+// handleFileLoaded (app/ui/loaders.go) would set it for a single-file,
+// full-context markdown load — the gate toggleMarkdownPreview checks.
+func mdPreviewTestModel(lines []diff.DiffLine) Model {
+	m := testModel([]string{"plan.md"}, map[string][]diff.DiffLine{"plan.md": lines})
+	m.file.name = "plan.md"
+	m.file.lines = lines
+	m.file.singleFile = true
+	m.file.mdTOC = sidepane.ParseTOC(lines, "plan.md")
+	m.layout.focus = paneDiff
+	m.layout.viewport.Width = 80
+	m.layout.viewport.Height = 20
+	return m
+}
+
+func TestToggleMarkdownPreview_RefusedWhenTOCNil(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
+	m.file.mdTOC = nil // not eligible: e.g. a non-markdown file or a partial diff
+	require.False(t, m.modes.mdPreview)
+
+	m.toggleMarkdownPreview()
+
+	assert.False(t, m.modes.mdPreview, "toggle must be refused when mdTOC is nil")
+	assert.Nil(t, m.file.mdPreviewCache, "no cache should be allocated on a refused toggle")
+}
+
+func TestToggleMarkdownPreview_FlipsStateWhenTOCPresent(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
+	require.False(t, m.modes.mdPreview)
+
+	m.toggleMarkdownPreview()
+	assert.True(t, m.modes.mdPreview, "toggle must flip the mode on when mdTOC is non-nil")
+
+	m.toggleMarkdownPreview()
+	assert.False(t, m.modes.mdPreview, "a second toggle must flip it back off")
+}
+
+func TestModel_MarkdownPreviewToggle_ViaKeypress(t *testing.T) {
+	// end-to-end through Update: keymap resolves 'P' -> dispatchAction's toggle
+	// group -> handleViewToggle -> toggleMarkdownPreview, mirroring
+	// TestModel_WrapToggle for the 'w' action.
+	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
+	require.False(t, m.modes.mdPreview)
+
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	model := result.(Model)
+	assert.True(t, model.modes.mdPreview)
+
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	model = result.(Model)
+	assert.False(t, model.modes.mdPreview)
+}
+
+func TestKeymapResolvesP_ToToggleMarkdownPreview(t *testing.T) {
+	km := keymap.Default()
+	assert.Equal(t, keymap.ActionTogglePreview, km.Resolve("P"))
+}
+
+func TestRenderDiff_MarkdownPreviewOff_RendersNormalDiff(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
+	require.False(t, m.modes.mdPreview)
+
+	out := m.renderDiff()
+
+	assert.Contains(t, xansi.Strip(out), "# Title", "mode off must render the raw markdown source, unstyled by glamour")
+}
+
+func TestRenderDiff_MarkdownPreviewOn_RendersPreview(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	require.NotNil(t, m.file.mdPreviewCache, "toggling on must allocate the render cache")
+
+	out := m.renderDiff()
+
+	want := m.file.mdPreviewCache.render("plan.md", m.file.lines, m.layout.viewport.Width)
+	assert.Equal(t, want, out, "renderDiff must dispatch to the cached markdown preview render")
+	assert.NotContains(t, xansi.Strip(out), "# Title", "glamour must style away the raw '#' heading marker")
+}
+
+func TestRenderDiff_MarkdownPreviewOn_FileWithoutTOC_FallsBackToNormalDiff(t *testing.T) {
+	// defensive: mdPreview left on from a previous file, but the currently
+	// loaded file is no longer eligible (e.g. switched to a non-markdown
+	// file). renderDiff's own gate must not trust the stale mode bit alone.
+	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
+	m.modes.mdPreview = true
+	m.file.mdTOC = nil
+
+	out := m.renderDiff()
+
+	assert.Contains(t, xansi.Strip(out), "# Title", "without mdTOC, renderDiff must fall back to the normal diff render")
 }

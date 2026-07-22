@@ -52,6 +52,7 @@ const (
 	ActionToggleCollapsed  Action = "toggle_collapsed"
 	ActionToggleCompact    Action = "toggle_compact"
 	ActionToggleWrap       Action = "toggle_wrap"
+	ActionTogglePreview    Action = "toggle_markdown_preview"
 	ActionToggleTree       Action = "toggle_tree"
 	ActionToggleLineNums   Action = "toggle_line_numbers"
 	ActionToggleBlame      Action = "toggle_blame"
@@ -90,7 +91,7 @@ var validActions = map[Action]bool{
 	ActionConfirm: true, ActionAnnotateFile: true, ActionDeleteAnnotation: true, ActionAnnotList: true,
 	ActionNextAnnotation: true, ActionPrevAnnotation: true,
 	ActionToggleCollapsed: true, ActionToggleCompact: true, ActionToggleWrap: true, ActionToggleTree: true,
-	ActionToggleLineNums: true, ActionToggleBlame: true, ActionToggleWordDiff: true, ActionToggleHunk: true,
+	ActionToggleLineNums: true, ActionToggleBlame: true, ActionToggleWordDiff: true, ActionToggleHunk: true, ActionTogglePreview: true,
 	ActionMarkReviewed: true, ActionFilterUnreviewed: true, ActionFilter: true, ActionToggleUntracked: true,
 	ActionQuit: true, ActionDiscardQuit: true, ActionHelp: true, ActionDismiss: true, ActionThemeSelect: true,
 	ActionInfo:             true,
@@ -232,6 +233,7 @@ func defaultDescriptions() []HelpEntry {
 		{ActionToggleCollapsed, "toggle collapsed view", "View"},
 		{ActionToggleCompact, "toggle compact diff view", "View"},
 		{ActionToggleWrap, "toggle word wrap", "View"},
+		{ActionTogglePreview, "toggle markdown preview", "View"},
 		{ActionToggleTree, "toggle tree pane", "View"},
 		{ActionToggleLineNums, "toggle line numbers", "View"},
 		{ActionToggleBlame, "toggle blame gutter", "View"},
@@ -293,6 +295,7 @@ func defaultBindings() map[string]Action {
 		"v":      ActionToggleCollapsed,
 		"C":      ActionToggleCompact,
 		"w":      ActionToggleWrap,
+		"P":      ActionTogglePreview,
 		"t":      ActionToggleTree,
 		"L":      ActionToggleLineNums,
 		"B":      ActionToggleBlame,

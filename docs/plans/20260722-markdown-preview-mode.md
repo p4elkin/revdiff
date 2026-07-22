@@ -63,7 +63,7 @@ This fork is rebased onto every upstream release by hand, and conflicts happen i
 in new files. Therefore:
 
 - Put essentially all logic in the new file `app/ui/mdpreview.go`.
-- Keep edits to existing files to the five small hunks listed in Task 4. Do not refactor surrounding
+- Keep edits to existing files to the seven small hunks listed in Task 4. Do not refactor surrounding
   code, do not reformat, do not "improve" nearby lines. Every extra changed line is a future conflict.
 - `app/ui/diffview.go` and `app/ui/model.go` are actively developed upstream and are the most likely
   conflict sites. Touch the minimum.
@@ -367,31 +367,106 @@ still `ok`, no new failures), and `golangci-lint run` (`0 issues.`, after fixing
 findings: `if w < x { w = x }` → `max(w, x)`, and three `strings.Split` range loops → `strings.SplitSeq`)
 all passed.
 
-### Task 4: Mode wiring — the five hunks
+### Task 4: Mode wiring — the seven hunks
 
 Keep each edit minimal; see Patch discipline above. Follow the existing `toggle_wrap` action as the
-template, it uses exactly these five sites.
+template. Tracing `ActionToggleWrap` end to end (not just the checklist below) showed it actually
+touches **seven** sites, not five: the two checklist items below that read "add ... in
+`app/ui/model.go`" are each two separate edits (a registration list plus the actual case), matching
+`ActionToggleWrap`'s own footprint. This section heading and the Patch discipline line above were
+corrected from "five" to match.
 
 **Files:**
 - Modify: `app/keymap/keymap.go`
+- Modify: `app/keymap/keymap_test.go`
 - Modify: `app/ui/model.go`
 - Modify: `app/ui/diffview.go`
 - Modify: `app/ui/view.go`
+- Modify: `app/ui/view_test.go` (pre-existing narrow-width status-bar test, see note below)
 - Modify: `app/ui/mdpreview.go`
-- Modify: `app/keymap/keymap_test.go`
+- Modify: `app/ui/mdpreview_test.go`
 
-- [ ] add `ActionToggleMarkdownPreview` constant to the `Action` enum in `app/keymap/keymap.go`
-- [ ] bind `P` to it in the default keymap, and add the help-section entry
-- [ ] add `mdPreview bool` to `modeState` in `app/ui/model.go`
-- [ ] add the dispatch case calling `m.toggleMarkdownPreview()` in `app/ui/model.go`
-- [ ] implement `toggleMarkdownPreview()` in `app/ui/mdpreview.go`, refusing to enable when
+- [x] add `ActionToggleMarkdownPreview` constant to the `Action` enum in `app/keymap/keymap.go`
+- [x] bind `P` to it in the default keymap, and add the help-section entry
+- [x] add `mdPreview bool` to `modeState` in `app/ui/model.go`
+- [x] add the dispatch case calling `m.toggleMarkdownPreview()` in `app/ui/model.go`
+- [x] implement `toggleMarkdownPreview()` in `app/ui/mdpreview.go`, refusing to enable when
       `m.file.mdTOC == nil`
-- [ ] add the early-return branch in `renderDiff` (`app/ui/diffview.go`), beside the existing
+- [x] add the early-return branch in `renderDiff` (`app/ui/diffview.go`), beside the existing
       `m.modes.collapsed.enabled` branch
-- [ ] add the status-bar mode icon in `app/ui/view.go`
-- [ ] write a test that the toggle is refused when `m.file.mdTOC == nil`
-- [ ] write a test that the keymap resolves `P` to the new action
-- [ ] run tests — must pass before task 5
+- [x] add the status-bar mode icon in `app/ui/view.go`
+- [x] write a test that the toggle is refused when `m.file.mdTOC == nil`
+- [x] write a test that the keymap resolves `P` to the new action
+- [x] run tests — must pass before task 5
+
+⚠️ **Go const identifier renamed from `ActionToggleMarkdownPreview` to `ActionTogglePreview` — the
+action string stays `"toggle_markdown_preview"`.** `app/keymap/keymap.go`'s `Action` const block and
+its `validActions` map are gofmt column-aligned, and the plan's original 27-character identifier was
+longer than every existing name in that block, so gofmt would have re-padded all ~50 unrelated lines
+around it (confirmed empirically: tried the long name first, `gofmt -w` produced a 56-insertion/
+52-deletion whitespace-only diff across the whole const block). A 19-character name
+(`ActionTogglePreview`) fits inside the existing column width and adds exactly one line with no
+collateral reformatting — directly serving the Patch-discipline goal of touching the minimum number of
+lines in a file that rebases by hand. The user-facing and config-file-facing string is unaffected: it
+is still `toggle_markdown_preview`, matched in `keymap.go`'s default binding, help entry, and
+`keymap_test.go`.
+
+⚠️ **The render cache field (`*mdPreviewCache`) lives on `loadedFileState` (`m.file`), not on
+`modeState` as the plan's "New state" section suggested.** Same gofmt-alignment reasoning as above:
+`modeState`'s existing field-comment columns are sized for `bool`/`int`/`collapsedState` (widest type
+name 14 chars); `*mdPreviewCache` is 15 chars and would have widened every line's alignment.
+`loadedFileState`'s columns are already sized for `map[int]diff.BlameLine` (23 chars) and
+`singleColLineNum` (16 chars), so `mdPreviewCache *mdPreviewCache` fits with zero collateral reformat.
+This placement is also arguably the better fit: `mdTOC` (the render cache's row-neighbor) is already a
+per-loaded-file computed artifact on `loadedFileState`, and the cache is exactly that too — a
+memoization of "what the currently loaded file renders as," parallel to `mdTOC`'s "what the currently
+loaded file's headings are." The `mdPreview bool` toggle itself stays on `modeState`, per the plan,
+since it genuinely is a user-togglable view-mode flag like `wrap`/`collapsed`/`lineNumbers`.
+
+⚠️ **The cache pointer is lazily allocated inside `toggleMarkdownPreview()`, not eagerly in `NewModel`.**
+`mdPreviewCache.render` has a pointer receiver so its memoization survives across `Model`'s otherwise
+value-receiver call chain (`renderDiff`, `View`, etc. all take `Model` by value — only a field whose
+*value* is itself a pointer shares its target across those copies). `toggleMarkdownPreview` has a
+pointer receiver and is the only path that ever sets `modes.mdPreview = true`, so allocating
+`&mdPreviewCache{}` there the first time (guarded by a nil check, so re-toggling reuses the same cache)
+guarantees the pointer is non-nil before the render path can ever need it, without touching `NewModel`.
+`renderMarkdownPreview()` (the render path itself) additionally falls back to an uncached
+`renderMarkdownDocument` call if the pointer is somehow still nil — defensive, not required by any
+production path, but it keeps the render helper safe on its own rather than relying on the invariant
+holding everywhere a test might set `modes.mdPreview` directly.
+
+⚠️ **`model.go:1087`'s toggle-grouping `case` does apply, and was extended.** That switch arm exists
+only to route a batch of view-mode toggle actions to `handleViewToggle`, which then re-switches on the
+specific action; it has no other behavior of its own. `toggleMarkdownPreview()` is a plain state-flip
+with no `tea.Cmd` to return, the same shape as `toggleWrapMode`/`toggleTreePane`/`toggleLineNumbers`,
+which are exactly the actions already routed through this case. `ActionTogglePreview` was added to both
+the outer grouping `case` and the corresponding inner `case` in `handleViewToggle` (mirroring
+`ActionToggleWrap`'s two-site footprint there).
+
+⚠️ **Icon chosen: `▤` (U+25A4 SQUARE WITH HORIZONTAL FILL).** Does not collide with the existing
+`▼◉↩≋⊟⊂#b±✓∅` set (confirmed by direct comparison). Reads as a small filled/ruled document, a
+reasonable mnemonic for "rendered document view."
+
+⚠️ **Adding the icon required a one-line, one-value fix to a pre-existing test,
+`TestModel_StatusBarFilenameTruncationWideChars` in `app/ui/view_test.go` (not one of the seven
+hunks, but a direct, mechanical consequence of one of them).** That test pins `m.layout.width = 45` and
+asserts the rendered status bar fits in `45 - 2` columns. Empirically that width was already the exact
+boundary before this change (verified by reverting the icon edit and rerunning: status width was
+already 43, i.e. zero slack) — the name-truncation logic has a `max(..., 4)` floor below which the
+filename cannot shrink further, so once the mode-icon row grows by any amount (here, 2 columns: one new
+icon plus its separator), the same fixed test width can no longer fit and the assertion legitimately
+fails, without any change to the truncation logic itself (`statusBarText`'s `available` computation
+already measures the actual rendered `statusModeIcons()` width dynamically — this is not a hardcoded
+budget that silently drifted, it is a test literal that was already at its limit). Fixed by bumping the
+test's `m.layout.width` from 45 to 47, restoring the original slack margin; behavior asserted by the
+test (CJK display-width-aware truncation, not rune-count truncation) is unchanged and still exercised
+at the same relative boundary condition.
+
+⚠️ **Typed-nil guard verified present.** `app/main.go`'s `ParseTOC` closure (used in production) and
+`app/ui/model_test.go`'s `testParseTOCFactory` (used by every test that goes through `NewModel`,
+including this task's) both collapse a typed-nil `*sidepane.TOC` into a true nil `TOCComponent`
+interface value before it reaches `m.file.mdTOC`. `m.file.mdTOC != nil` is therefore a sound gate, as
+the gotchas note promised — no dead-guard trap here.
 
 ### Task 5: Make annotation keys inert in preview mode
 
@@ -425,7 +500,7 @@ template, it uses exactly these five sites.
 - [ ] build the patched binary and install it as `revdiffm` (not `revdiff`, so the brew build is left
       alone and nothing is shadowed)
 - [ ] confirm the brew `revdiff` still runs and is unaffected
-- [ ] write `PATCH.md`: which upstream tag the branch sits on, the five hunk locations, the rebuild
+- [ ] write `PATCH.md`: which upstream tag the branch sits on, the seven hunk locations, the rebuild
       command, and the rebase procedure
 
 ### Task 8: Verify acceptance criteria

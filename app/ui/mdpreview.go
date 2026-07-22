@@ -313,3 +313,36 @@ func (c *mdPreviewCache) render(file string, lines []diff.DiffLine, width int) s
 	c.out = out
 	return out
 }
+
+// toggleMarkdownPreview flips markdown preview mode on/off for the currently
+// loaded file. Refused (no state change) unless m.file.mdTOC is non-nil —
+// that field is set only for a single, full-context markdown file (see the
+// gate in loaders.go), which is exactly the condition under which a
+// whole-document render is safe (no partially-shown table — see the plan's
+// Overview). The mode defaults to off.
+//
+// Enabling it lazily allocates the render cache the first time, so repeated
+// toggles on the same file reuse the cached glamour/mermaid output instead of
+// re-rendering on every press.
+func (m *Model) toggleMarkdownPreview() {
+	if m.file.mdTOC == nil {
+		return
+	}
+	m.modes.mdPreview = !m.modes.mdPreview
+	if m.modes.mdPreview && m.file.mdPreviewCache == nil {
+		m.file.mdPreviewCache = &mdPreviewCache{}
+	}
+	m.syncViewportToCursor()
+}
+
+// renderMarkdownPreview returns the cached (or freshly rendered) markdown
+// preview for the currently loaded file at the current viewport width. Falls
+// back to an uncached render when the cache has not been allocated yet —
+// production always allocates it in toggleMarkdownPreview before mdPreview
+// can be true, but this keeps the render path itself safe on its own.
+func (m Model) renderMarkdownPreview() string {
+	if m.file.mdPreviewCache != nil {
+		return m.file.mdPreviewCache.render(m.file.name, m.file.lines, m.layout.viewport.Width)
+	}
+	return renderMarkdownDocument(m.file.lines, m.layout.viewport.Width)
+}

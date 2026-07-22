@@ -395,6 +395,7 @@ func (m Model) statusModeIcons() string {
 		{"±", m.modes.wordDiff},
 		{reviewIcon, m.tree.ReviewedCount() > 0 || m.tree.UnreviewedFilterActive()},
 		{"∅", m.modes.showUntracked},
+		{"▤", m.modes.mdPreview},
 	}
 
 	mutedSeq := string(m.resolver.Color(style.ColorKeyMutedFg))

@@ -38,7 +38,7 @@ func TestDefault_allExpectedBindings(t *testing.T) {
 		{"a", ActionConfirm}, {"enter", ActionConfirm},
 		{"A", ActionAnnotateFile}, {"d", ActionDeleteAnnotation}, {"@", ActionAnnotList}, {"ctrl+e", ActionOpenEditor},
 		{"}", ActionNextAnnotation}, {"{", ActionPrevAnnotation}, {"O", ActionFlushOutput},
-		{"v", ActionToggleCollapsed}, {"C", ActionToggleCompact}, {"w", ActionToggleWrap}, {"t", ActionToggleTree},
+		{"v", ActionToggleCollapsed}, {"C", ActionToggleCompact}, {"w", ActionToggleWrap}, {"P", ActionTogglePreview}, {"t", ActionToggleTree},
 		{"L", ActionToggleLineNums}, {"B", ActionToggleBlame}, {"W", ActionToggleWordDiff},
 		{".", ActionToggleHunk}, {" ", ActionMarkReviewed}, {"f", ActionFilter}, {"F", ActionFilterUnreviewed},
 		{"u", ActionToggleUntracked},
@@ -286,6 +286,29 @@ func TestActionToggleCompact_HelpEntry(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "ActionToggleCompact should have a help entry")
+}
+
+func TestActionTogglePreview_IsValid(t *testing.T) {
+	assert.True(t, IsValidAction(ActionTogglePreview))
+}
+
+func TestActionTogglePreview_DefaultBinding(t *testing.T) {
+	km := Default()
+	assert.Equal(t, ActionTogglePreview, km.Resolve("P"))
+}
+
+func TestActionTogglePreview_HelpEntry(t *testing.T) {
+	entries := defaultDescriptions()
+	var found bool
+	for _, e := range entries {
+		if e.Action == ActionTogglePreview {
+			assert.Equal(t, "toggle markdown preview", e.Description)
+			assert.Equal(t, "View", e.Section)
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "ActionTogglePreview should have a help entry")
 }
 
 func TestActionOpenEditor_IsValid(t *testing.T) {
