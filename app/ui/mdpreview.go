@@ -1,9 +1,13 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 
 	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
+	"github.com/charmbracelet/glamour"
+	glamourStyles "github.com/charmbracelet/glamour/styles"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/umputun/revdiff/app/diff"
 )
@@ -47,6 +51,17 @@ func mdFencePrefix(s string) (rune, int) {
 // fence text verbatim — see renderMermaidBlock. This function never returns
 // an error and never panics.
 func renderMermaidFences(lines []diff.DiffLine) string {
+	return joinWithMermaidFences(lines, renderMermaidBlock)
+}
+
+// joinWithMermaidFences is the shared fence-scanning walk behind
+// renderMermaidFences and mermaidPlaceholderDocument. renderBlock is called
+// once per complete mermaid fence (body lines, opening fence line, closing
+// fence line) and its return value is written verbatim in place of the
+// fence — renderMermaidFences passes renderMermaidBlock (inline rendered
+// art), mermaidPlaceholderDocument passes a callback that defers rendering
+// and substitutes a placeholder instead (see renderMarkdownDocument for why).
+func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string, openLine, closeLine string) string) string {
 	var out strings.Builder
 
 	var fenceChar rune // 0 when outside any fence
@@ -89,7 +104,7 @@ func renderMermaidFences(lines []diff.DiffLine) string {
 		case fenceChar != 0 && ch == fenceChar && n >= fenceLen && strings.TrimSpace(trimmed[n:]) == "":
 			// closing fence
 			if fenceLang == "mermaid" {
-				out.WriteString(renderMermaidBlock(fenceBody, lines[fenceStart].Content, content))
+				out.WriteString(renderBlock(fenceBody, lines[fenceStart].Content, content))
 			} else {
 				writeLine(content)
 			}
@@ -155,4 +170,146 @@ func renderMermaidBlock(body []string, openLine, closeLine string) (result strin
 		return verbatim()
 	}
 	return rendered + "\n"
+}
+
+// mdPreviewStyle is the single fixed glamour style used for the whole
+// document. This is a personal patch on a local clone (see the plan), not an
+// upstream feature, so there is deliberately no style generator deriving
+// colors from revdiff's 23 theme fields — one bundled style, picked once.
+var mdPreviewStyle = glamourStyles.DarkStyleConfig
+
+// mdPreviewMinWidth is the floor applied to the requested render width
+// before handing it to glamour. glamour does not panic on width <= 0 (word
+// wrap degrades to "no wrapping" internally), but a positive floor keeps
+// prose reasonably readable instead of collapsing to a one-character-per-line
+// render on a transient zero-width layout state.
+const mdPreviewMinWidth = 8
+
+// mermaidPlaceholder returns the sentinel text substituted for the idx'th
+// mermaid diagram while the document is handed to glamour. It is plain
+// alphanumeric text with no markdown or glamour/x-ansi word-wrap break
+// characters (space, comma, period, semicolon, hyphen, plus, pipe — see
+// x/ansi.Wordwrap) in it, so it always survives glamour's internal word-wrap
+// pass as a single atomic, unsplit token and can be found again afterward.
+func mermaidPlaceholder(idx int) string {
+	return fmt.Sprintf("mdpreviewmermaidplaceholder%dmdpreviewmermaidplaceholder", idx)
+}
+
+// mermaidPlaceholderDocument builds the document handed to glamour: every
+// mermaid fence is replaced by a placeholder token (see mermaidPlaceholder),
+// isolated in its own paragraph by surrounding blank lines so glamour cannot
+// merge it into an adjacent line of prose. The rendered (or verbatim
+// fallback) art for each diagram is collected in order in arts, ready for
+// spliceMermaidArt to substitute back in after glamour has rendered doc.
+//
+// The art itself never appears in doc — see renderMarkdownDocument for why:
+// glamour's document-level word-wrap pass reflows the entire rendered
+// buffer, including the contents of any fenced code block nested inside it,
+// so putting the art directly in doc (even inside a code fence) is not
+// sufficient to protect it.
+func mermaidPlaceholderDocument(lines []diff.DiffLine) (doc string, arts []string) {
+	idx := 0
+	doc = joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
+		arts = append(arts, renderMermaidBlock(body, openLine, closeLine))
+		placeholder := mermaidPlaceholder(idx)
+		idx++
+		return "\n" + placeholder + "\n\n"
+	})
+	return doc, arts
+}
+
+// spliceMermaidArt walks rendered line by line and replaces the single
+// output line matching each placeholder (after stripping glamour's ANSI
+// styling and surrounding pad/margin whitespace) with the corresponding
+// entry of arts, verbatim and unstyled. This is what makes the diagram
+// reach the screen byte-exact: the art itself is never passed through
+// glamour, only located and spliced in after the fact.
+//
+// A placeholder glamour did not place alone on its own line (should not
+// happen given mermaidPlaceholderDocument's isolation and mermaidPlaceholder
+// being word-wrap-atomic — see there) is left as visible plain text rather
+// than silently dropping the diagram or panicking.
+func spliceMermaidArt(rendered string, arts []string) string {
+	if len(arts) == 0 {
+		return rendered
+	}
+	lines := strings.Split(rendered, "\n")
+	for i, line := range lines {
+		stripped := strings.TrimSpace(ansi.Strip(line))
+		for idx, art := range arts {
+			if stripped != mermaidPlaceholder(idx) {
+				continue
+			}
+			lines[i] = strings.TrimSuffix(art, "\n")
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderMarkdownDocument turns lines (the full, ordered source of a single
+// markdown file) into ANSI-styled text ready for the diff viewport: mermaid
+// fences are rendered via mermaid-ascii and spliced in after glamour has
+// rendered the rest of the document, so the art is never subject to
+// glamour's own word-wrap (see mermaidPlaceholderDocument for why a fenced
+// code block alone is not enough).
+//
+// width is glamour's word-wrap target for prose, headings and tables — it is
+// floored at mdPreviewMinWidth but otherwise passed straight through. A
+// fenced code block's content (and so the spliced-in art) is never
+// constrained by this width in glamour's own renderer; the same is true
+// here, deliberately: box-drawing art has a natural minimum width, and
+// truncating or reflowing it to fit a narrow viewport would corrupt the
+// diagram's shape rather than just make it small. A narrow viewport is
+// expected to scroll horizontally for the art, not to receive a clipped or
+// re-wrapped diagram.
+//
+// A glamour construction or render error (should not happen with the fixed
+// built-in style used here) falls back to the mermaid-substituted plain
+// document so the file remains at least readable.
+func renderMarkdownDocument(lines []diff.DiffLine, width int) string {
+	doc, arts := mermaidPlaceholderDocument(lines)
+
+	w := max(width, mdPreviewMinWidth)
+
+	r, err := glamour.NewTermRenderer(glamour.WithStyles(mdPreviewStyle), glamour.WithWordWrap(w))
+	if err != nil {
+		return doc
+	}
+	out, err := r.Render(doc)
+	if err != nil {
+		return doc
+	}
+	return spliceMermaidArt(out, arts)
+}
+
+// mdPreviewCache holds the last markdown-preview render, keyed on the source
+// file it was rendered from and the viewport width it targeted — a width
+// change (pane resize, tree toggle) must invalidate it, since glamour's
+// word-wrap depends on width. This is deliberately not a field on Model
+// (that wiring belongs to the mode-toggle task); a caller holds one instance
+// and passes it into render on every call.
+type mdPreviewCache struct {
+	valid bool
+	file  string
+	width int
+	out   string
+}
+
+// render returns the cached preview for file/width when both match the
+// previous call, and otherwise (re)renders via renderMarkdownDocument and
+// refreshes the cache. lines is only consulted on a miss — a cache hit
+// intentionally does not re-inspect lines, so callers must invalidate (or
+// use a fresh cache) whenever the file's content actually changes under an
+// unchanged name, e.g. on reload.
+func (c *mdPreviewCache) render(file string, lines []diff.DiffLine, width int) string {
+	if c.valid && c.file == file && c.width == width {
+		return c.out
+	}
+	out := renderMarkdownDocument(lines, width)
+	c.valid = true
+	c.file = file
+	c.width = width
+	c.out = out
+	return out
 }

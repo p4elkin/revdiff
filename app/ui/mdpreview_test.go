@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -147,4 +148,121 @@ func TestRenderMermaidFences_SkipsDividerLines(t *testing.T) {
 	}
 	got := renderMermaidFences(lines)
 	assert.Equal(t, "before\nafter\n", got, "divider rows carry no document content and must be skipped")
+}
+
+// wideMermaidSrc renders to art whose natural width (46 runes, verified by
+// TestRenderMarkdownDocument_MermaidArtSurvivesGlamourWithoutReflow's own
+// sanity check below) exceeds every narrow width used in this file's tests,
+// so those tests actually exercise the anti-reflow behavior instead of
+// vacuously passing because the diagram happened to already fit.
+const wideMermaidSrc = "graph TD\n    A[This is a moderately long label for node A] --> " +
+	"B[This is a moderately long label for node B]"
+
+func TestRenderMarkdownDocument_TableRendersWithAlignedBorders(t *testing.T) {
+	doc := "| a | b |\n|---|---|\n| 1 | 2 |\n"
+
+	got := renderMarkdownDocument(mdLines(doc), 80)
+	stripped := xansi.Strip(got)
+
+	assert.NotContains(t, stripped, "|---|", "raw markdown table syntax must not survive rendering")
+	assert.NotContains(t, stripped, "| a | b |", "raw pipe-delimited source row must not survive rendering")
+	assert.Contains(t, stripped, "│", "rendered table should use an aligned column separator")
+	assert.Contains(t, stripped, "─", "rendered table should use a horizontal border rule")
+	assert.Contains(t, stripped, "a", "cell content should still be present")
+	assert.Contains(t, stripped, "1", "cell content should still be present")
+}
+
+func TestRenderMarkdownDocument_MermaidArtSurvivesGlamourWithoutReflow(t *testing.T) {
+	want, err := mermaidcmd.RenderDiagram(wideMermaidSrc, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, want)
+
+	maxArtWidth := 0
+	for l := range strings.SplitSeq(want, "\n") {
+		if n := len([]rune(l)); n > maxArtWidth {
+			maxArtWidth = n
+		}
+	}
+	const narrowWidth = 20
+	require.Greater(t, maxArtWidth, narrowWidth,
+		"test fixture sanity: the diagram must be wider than narrowWidth or this test cannot detect reflow")
+
+	doc := "before\n\n```mermaid\n" + wideMermaidSrc + "\n```\n\nafter\n"
+
+	// deliberately narrower than the diagram's own natural width, so an
+	// implementation that lets glamour reflow the art (e.g. relying on a
+	// plain ```mermaid fence alone, without splicing the art in after
+	// glamour has rendered everything else) would break this diagram into
+	// multiple re-wrapped lines and fail this assertion.
+	got := renderMarkdownDocument(mdLines(doc), narrowWidth)
+	stripped := xansi.Strip(got)
+
+	assert.Contains(t, stripped, want,
+		"the diagram must reach the output byte-exact: unwrapped, unreflowed, untruncated")
+	assert.Contains(t, stripped, "before")
+	assert.Contains(t, stripped, "after")
+}
+
+func TestRenderMarkdownDocument_NarrowWidth_ProseRespectsWidthArtOverflows(t *testing.T) {
+	want, err := mermaidcmd.RenderDiagram(wideMermaidSrc, nil)
+	require.NoError(t, err)
+
+	doc := "# Heading\n\n" +
+		"Some long paragraph text that should wrap because glamour word wraps normal " +
+		"prose at the configured width, this sentence is long on purpose to force wrapping.\n\n" +
+		"```mermaid\n" + wideMermaidSrc + "\n```\n"
+
+	const width = 20
+
+	var got string
+	assert.NotPanics(t, func() {
+		got = renderMarkdownDocument(mdLines(doc), width)
+	})
+	stripped := xansi.Strip(got)
+
+	// decision: box-drawing art has a natural minimum width, and truncating
+	// or reflowing it to force it under a narrow viewport would corrupt its
+	// shape rather than just make it small — so the diagram is allowed to
+	// overflow a narrow width exactly as mermaid-ascii rendered it. Prose,
+	// which has no such shape to preserve, must still respect the width.
+	assert.Contains(t, stripped, want, "the diagram is allowed to overflow a narrow width, unmodified")
+
+	artLines := make(map[string]bool)
+	for l := range strings.SplitSeq(want, "\n") {
+		artLines[l] = true
+	}
+	for l := range strings.SplitSeq(stripped, "\n") {
+		if artLines[l] {
+			continue // the diagram is exempt from the width constraint — see above
+		}
+		assert.LessOrEqualf(t, len([]rune(l)), width, "non-diagram line exceeds the requested width: %q", l)
+	}
+}
+
+func TestMdPreviewCache_HitIgnoresChangedLinesWhenFileAndWidthMatch(t *testing.T) {
+	var cache mdPreviewCache
+
+	first := cache.render("plan.md", mdLines("# One"), 80)
+	second := cache.render("plan.md", mdLines("# Something else entirely"), 80)
+
+	assert.Equal(t, first, second, "same file and width must be served from cache, ignoring the new lines")
+}
+
+func TestMdPreviewCache_WidthChangeInvalidatesCache(t *testing.T) {
+	var cache mdPreviewCache
+	doc := "Some paragraph text that is long enough to visibly wrap differently at two widths, padded further still.\n"
+
+	narrow := cache.render("plan.md", mdLines(doc), 20)
+	wide := cache.render("plan.md", mdLines(doc), 80)
+
+	assert.NotEqual(t, narrow, wide, "a viewport width change must invalidate the cache and re-render")
+}
+
+func TestMdPreviewCache_FileChangeInvalidatesCache(t *testing.T) {
+	var cache mdPreviewCache
+
+	aOut := cache.render("a.md", mdLines("# A only"), 80)
+	bOut := cache.render("b.md", mdLines("# B only"), 80)
+
+	assert.NotEqual(t, aOut, bOut, "a different file name at the same width must not reuse the other file's render")
 }

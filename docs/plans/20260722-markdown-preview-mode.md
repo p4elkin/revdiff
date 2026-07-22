@@ -273,16 +273,99 @@ structurally but not by a red-then-green panic test. See final report for the sa
 - Modify: `app/ui/mdpreview.go`
 - Modify: `app/ui/mdpreview_test.go`
 
-- [ ] write a failing test that a document with a table renders to output containing aligned column
+- [x] write a failing test that a document with a table renders to output containing aligned column
       borders rather than raw pipe characters
-- [ ] write a failing test that rendered Mermaid art survives glamour without being re-wrapped or
+- [x] write a failing test that rendered Mermaid art survives glamour without being re-wrapped or
       reflowed (this is the likely failure — glamour wraps text, and diagram art must not be wrapped)
-- [ ] write a failing test for width handling: rendering at a narrow width must not panic and must not
+- [x] write a failing test for width handling: rendering at a narrow width must not panic and must not
       produce lines wider than the viewport
-- [ ] implement the glamour render with a fixed style, feeding it the mermaid-substituted document
-- [ ] implement the render cache keyed on file name plus viewport width
-- [ ] write a test that a width change invalidates the cache
-- [ ] run tests — must pass before task 4
+- [x] implement the glamour render with a fixed style, feeding it the mermaid-substituted document
+- [x] implement the render cache keyed on file name plus viewport width
+- [x] write a test that a width change invalidates the cache
+- [x] run tests — must pass before task 4
+
+⚠️ **A fenced code block alone does not protect the art — confirmed empirically, and this changed the
+design from what "Technical Details" implied.** The obvious plan ("emit the rendered art inside a
+```text fence so glamour treats it as preformatted") was tried first and fails. Reading
+`glamour@v1.0.0/ansi/codeblock.go` shows `CodeBlockElement.Render` never word-wraps — true, but
+misleading: `glamour@v1.0.0/ansi/blockelement.go`'s `BlockElement.Finish` (used for the Document
+element, which every top-level block including a code fence renders into) always runs
+`x/ansi.Wordwrap` over the **entire accumulated document buffer** before writing it out, with no
+awareness of which byte ranges came from a code fence versus prose. This is not configurable through
+any style field — `Document`'s `Margin: true` is a Go literal in `elements.go`. A spike test (rendering
+a fenced code block containing wide box-drawing art at width 40) proved this concretely: the second
+line of a 3-line diagram came back split across 3 output lines. So embedding art in a fence and relying
+on `WithWordWrap` guarantees nothing.
+
+**Solution actually implemented — render around the art, not through it.** `mermaidPlaceholderDocument`
+replaces each mermaid fence with a plain, isolated sentinel paragraph (`mermaidPlaceholder`, alphanumeric
+only, no markdown or `x/ansi.Wordwrap` break characters `" ,.;-+|"` — a hyphen is *always* a break
+character regardless of the passed set, confirmed by reading `x/ansi/wrap.go`) — so the token survives
+`ansi.Wordwrap` as a single atomic word, never split mid-token, and does not merge into adjacent prose
+because it is wrapped in its own blank-line-separated paragraph. `renderMarkdownDocument` renders that
+placeholder document with glamour, then `spliceMermaidArt` finds the one output line matching each
+placeholder (after `ansi.Strip` + `TrimSpace`, to ignore glamour's own color codes and pad/margin
+whitespace) and replaces that line wholesale with the raw diagram text — verbatim, never passed through
+glamour at all. `renderMermaidFences` (Task 2, still directly tested by the Task 2 suite) was refactored
+into a 3-line wrapper around a new shared walk, `joinWithMermaidFences`, parameterized on what to do
+with each mermaid fence — `renderMermaidFences` still inlines the art directly (used by nothing yet,
+kept for the Task 2 tests and as a plain-text fallback), `mermaidPlaceholderDocument` substitutes the
+placeholder instead. No Task 2 test was touched; all still pass unchanged after the refactor.
+
+**Proof the test would actually catch a regression**: reverted `renderMarkdownDocument` locally to the
+naive `doc := renderMermaidFences(lines)` (art inlined, fed straight to glamour, no placeholder/splice),
+re-ran just the two width/reflow tests, watched them fail with the diagram visibly broken across
+multiple re-wrapped lines (e.g. `│ This is a` / `moderately long` / `label for node A │` — a 3-line
+diagram box split into what should have been one line, now several), then restored the real
+implementation and confirmed green again. Diagram fixture: `wideMermaidSrc`, two nodes with long labels,
+natural width 46 runes — wider than every narrow width used in these tests (20), so the reflow tests
+are not vacuous.
+
+**Width decision**: `renderMarkdownDocument`'s `width` parameter is glamour's word-wrap target for
+prose/headings/tables (floored at `mdPreviewMinWidth = 8`, purely defensive — glamour itself does not
+panic at width ≤ 0, `x/ansi.Wordwrap`'s `limit < 1` case just returns the input unwrapped, confirmed by
+reading `x/ansi/wrap.go` and by a spike test sweeping widths 0/-5/1/5/20/80, none of which panicked).
+Spliced-in diagram art is **never** constrained by this width — same as glamour's own code-block
+rendering, which the plan's Technical Details already noted is not word-wrapped. Decision, made
+explicit here per the task's instruction to decide and document rather than leave implicit: box-drawing
+art has a natural minimum width, and truncating or reflowing it to fit a narrow viewport would corrupt
+its shape rather than just shrink it, so a narrow viewport is expected to let the diagram overflow
+horizontally (Task 4's viewport wiring will need horizontal scroll for this — already true today for
+wide diff lines, not a new requirement). `TestRenderMarkdownDocument_NarrowWidth_ProseRespectsWidthArtOverflows`
+asserts both halves of this: every non-diagram line stays within the requested width, and the diagram
+line(s) are allowed past it, with a sanity check that the fixture diagram is actually wider than the
+tested width (so the assertion is not accidentally vacuous).
+
+**Style**: one fixed built-in style, `glamour/styles.DarkStyleConfig`, unmodified — no per-repo-theme
+derivation, per the plan's explicit ruling-out of that. Since the art is spliced in after glamour has
+already finished rendering (never passed through glamour's own code-block styling), no code-block
+margin/indent tuning was needed either, which simplified the original plan further: the fixed style
+needs zero customization for this feature to work correctly.
+
+**ANSI nesting (gotchas.md)**: read before writing any of this. Not directly applicable here — the
+gotchas note is about embedding a `lipgloss.Render()`-produced *substring* inside an already
+lipgloss-rendered *parent* (its full reset breaks the outer background). glamour's output here is not
+nested inside another lipgloss render; it *is* the entire pane content handed to `viewport.SetContent`,
+the same relationship the existing chroma-highlighted diff content already has to the viewport. Checked
+glamour's raw ANSI output directly (spike test, `%q`-dumped): every styled run is a matched
+`\x1b[...m...\x1b[0m` pair, never left open across a line boundary, so it composes safely with whatever
+pane-level background/border treatment Task 4's wiring applies on top (`extendLineBg`/`padContentBg`
+emit their own color codes for padding rather than relying on inherited SGR state, the same way they
+already do for chroma output).
+
+**Vendoring**: `go get glamour@v1.0.0` resolved cleanly, no forced v2. Vendored module count went from
+62 (after Task 2) to 71 (+9 — glamour itself plus `aymerick/douceur`, `charmbracelet/x/exp/slice`,
+`gorilla/css`, `microcosm-cc/bluemonday`, `muesli/reflow`, `yuin/goldmark`, `yuin/goldmark-emoji`, close
+to the ~8 estimated in Technical Details), vendor directory size from 49M to 51M. `go get` also bumped
+three already-present transitive deps to satisfy glamour's own requirements:
+`golang.org/x/crypto` v0.23.0→v0.36.0, `golang.org/x/net` v0.25.0→v0.38.0, and newly added
+`golang.org/x/term` v0.36.0 (glamour imports it directly for `term.IsTerminal`/`termenv.HasDarkBackground`
+auto-style detection, a code path this feature never calls since it always passes an explicit fixed
+style). `go build ./...`, `go test -race -covermode=atomic ./...` (all 16 previously-`ok` packages —
+Task 1's plan text says 14 but the actual baseline list has 16 `ok` entries plus 3 `[no test files]` —
+still `ok`, no new failures), and `golangci-lint run` (`0 issues.`, after fixing two `modernize` lint
+findings: `if w < x { w = x }` → `max(w, x)`, and three `strings.Split` range loops → `strings.SplitSeq`)
+all passed.
 
 ### Task 4: Mode wiring — the five hunks
 
