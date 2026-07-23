@@ -286,7 +286,7 @@ structurally but not by a red-then-green panic test. See final report for the sa
 
 ⚠️ **A fenced code block alone does not protect the art — confirmed empirically, and this changed the
 design from what "Technical Details" implied.** The obvious plan ("emit the rendered art inside a
-```text fence so glamour treats it as preformatted") was tried first and fails. Reading
+fenced `text` block so glamour treats it as preformatted") was tried first and fails. Reading
 `glamour@v1.0.0/ansi/codeblock.go` shows `CodeBlockElement.Render` never word-wraps — true, but
 misleading: `glamour@v1.0.0/ansi/blockelement.go`'s `BlockElement.Finish` (used for the Document
 element, which every top-level block including a code fence renders into) always runs
