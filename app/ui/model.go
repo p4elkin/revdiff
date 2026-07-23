@@ -293,23 +293,24 @@ const (
 // metadata (adds/removes, blame, line numbering) into a single coherent
 // object, making the synchronization invariant explicit.
 type loadedFileState struct {
-	name             string                 // currently displayed file path
-	oldName          string                 // rename origin of the displayed file, empty for non-renames
-	lines            []diff.DiffLine        // parsed diff lines
-	highlighted      []string               // pre-computed highlighted content, parallel to lines
-	intraRanges      [][]worddiff.Range     // per-line intra-line word-diff ranges, parallel to lines
-	adds             int                    // cached count of added lines
-	removes          int                    // cached count of removed lines
-	blameData        map[int]diff.BlameLine // blame info keyed by 1-based new line number
-	blameAuthorLen   int                    // max author display width for blame gutter
-	lineNumWidth     int                    // digit width for line number columns
-	singleColLineNum bool                   // true for full-context files: one line-number column
-	loadSeq          uint64                 // monotonic counter to identify the latest load request
-	requestedPath    string                 // path of the outstanding request, empty after it completes
-	canceledLoadSeq  uint64                 // same-sequence request canceled by returning to the displayed file
-	canceledLoadPath string                 // path rejected for canceledLoadSeq
-	mdTOC            TOCComponent           // markdown table-of-contents (nil when not applicable)
-	singleFile       bool                   // true when diff contains exactly one file
+	name                string                 // currently displayed file path
+	oldName             string                 // rename origin of the displayed file, empty for non-renames
+	lines               []diff.DiffLine        // parsed diff lines
+	highlighted         []string               // pre-computed highlighted content, parallel to lines
+	intraRanges         [][]worddiff.Range     // per-line intra-line word-diff ranges, parallel to lines
+	adds                int                    // cached count of added lines
+	removes             int                    // cached count of removed lines
+	blameData           map[int]diff.BlameLine // blame info keyed by 1-based new line number
+	blameAuthorLen      int                    // max author display width for blame gutter
+	lineNumWidth        int                    // digit width for line number columns
+	singleColLineNum    bool                   // true for full-context files: one line-number column
+	loadSeq             uint64                 // monotonic counter to identify the latest load request
+	requestedPath       string                 // path of the outstanding request, empty after it completes
+	canceledLoadSeq     uint64                 // same-sequence request canceled by returning to the displayed file
+	canceledLoadPath    string                 // path rejected for canceledLoadSeq
+	mdTOC               TOCComponent           // markdown table-of-contents (nil when not applicable, or when the markdown file has no headings)
+	markdownPreviewable bool                   // true for a single full-context markdown file — the real gate for preview mode (mdTOC is nil for heading-less markdown, so it cannot serve as this gate)
+	singleFile          bool                   // true when diff contains exactly one file
 }
 
 // modelConfigState holds immutable or near-immutable session configuration.

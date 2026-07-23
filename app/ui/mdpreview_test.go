@@ -166,7 +166,7 @@ const wideMermaidSrc = "graph TD\n    A[This is a moderately long label for node
 func TestRenderMarkdownDocument_TableRendersWithAlignedBorders(t *testing.T) {
 	doc := "| a | b |\n|---|---|\n| 1 | 2 |\n"
 
-	got := renderMarkdownDocument(mdLines(doc), 80)
+	got := renderMarkdownDocument(mdLines(doc), 80, false)
 	stripped := xansi.Strip(got)
 
 	assert.NotContains(t, stripped, "|---|", "raw markdown table syntax must not survive rendering")
@@ -199,7 +199,7 @@ func TestRenderMarkdownDocument_MermaidArtSurvivesGlamourWithoutReflow(t *testin
 	// plain ```mermaid fence alone, without splicing the art in after
 	// glamour has rendered everything else) would break this diagram into
 	// multiple re-wrapped lines and fail this assertion.
-	got := renderMarkdownDocument(mdLines(doc), narrowWidth)
+	got := renderMarkdownDocument(mdLines(doc), narrowWidth, false)
 	stripped := xansi.Strip(got)
 
 	assert.Contains(t, stripped, want,
@@ -221,7 +221,7 @@ func TestRenderMarkdownDocument_NarrowWidth_ProseRespectsWidthArtOverflows(t *te
 
 	var got string
 	assert.NotPanics(t, func() {
-		got = renderMarkdownDocument(mdLines(doc), width)
+		got = renderMarkdownDocument(mdLines(doc), width, false)
 	})
 	stripped := xansi.Strip(got)
 
@@ -244,6 +244,85 @@ func TestRenderMarkdownDocument_NarrowWidth_ProseRespectsWidthArtOverflows(t *te
 	}
 }
 
+func TestRenderMarkdownDocument_ProseMatchingOldPlaceholder_NotReplaced(t *testing.T) {
+	// The pre-nonce placeholder was a fixed string. A document paragraph exactly
+	// equal to it collided with the splice step and got replaced by the real
+	// diagram's art. With a per-render nonce the placeholder is unguessable, so
+	// this prose line must survive untouched while the real mermaid fence still
+	// renders and splices in.
+	const oldStaticPlaceholder = "mdpreviewmermaidplaceholder0mdpreviewmermaidplaceholder"
+	want, err := mermaidcmd.RenderDiagram("graph TD\n    A --> B", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, want)
+
+	doc := "intro\n\n" + oldStaticPlaceholder + "\n\n```mermaid\ngraph TD\n    A --> B\n```\n\noutro\n"
+	got := renderMarkdownDocument(mdLines(doc), 80, false)
+	stripped := xansi.Strip(got)
+
+	assert.Contains(t, stripped, oldStaticPlaceholder,
+		"a prose line equal to the old static placeholder must not be replaced by diagram art")
+	assert.Contains(t, stripped, want,
+		"the real mermaid diagram must still be rendered and spliced in")
+}
+
+func TestRenderMarkdownDocument_TwoDiagrams_LandInOrderOnOwnPlaceholders(t *testing.T) {
+	// consume-left-to-right: two distinct diagrams must each land on their own
+	// placeholder, in document order — no value splices twice, and the order is
+	// preserved.
+	srcA := "graph TD\n    A1 --> A2"
+	srcB := "graph LR\n    B1 --> B2"
+	artA, err := mermaidcmd.RenderDiagram(srcA, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, artA)
+	artB, err := mermaidcmd.RenderDiagram(srcB, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, artB)
+	require.NotEqual(t, artA, artB, "fixture sanity: the two diagrams must render to distinct art")
+
+	doc := "top\n\n```mermaid\n" + srcA + "\n```\n\nmid\n\n```mermaid\n" + srcB + "\n```\n\nbot\n"
+	got := renderMarkdownDocument(mdLines(doc), 80, false)
+	stripped := xansi.Strip(got)
+
+	iA := strings.Index(stripped, artA)
+	iB := strings.Index(stripped, artB)
+	require.GreaterOrEqual(t, iA, 0, "first diagram art must be present")
+	require.GreaterOrEqual(t, iB, 0, "second diagram art must be present")
+	assert.Less(t, iA, iB, "each diagram's art must land on its own placeholder, in document order")
+}
+
+func TestRenderMarkdownPreview_NoColors_ProducesNoANSI(t *testing.T) {
+	// --no-colors / REVDIFF_NO_COLORS must reach the preview: pressing P with
+	// colors disabled must not emit any ANSI escape sequence. Uses content that
+	// glamour would normally color (heading, bold, list, table) so a colored
+	// render would definitely contain "\x1b[".
+	doc := "# Heading\n\n**bold** and normal text\n\n- item one\n- item two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n"
+	m := mdPreviewTestModel(mdLines(doc))
+	m.cfg.noColors = true
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	got := m.renderMarkdownPreview()
+	assert.NotContains(t, got, "\x1b[",
+		"with --no-colors, the markdown preview must emit no ANSI escape sequences")
+	// content must still render (not be empty or dropped)
+	assert.Contains(t, got, "Heading", "heading text must survive the no-color render")
+	assert.Contains(t, got, "item one", "list content must survive the no-color render")
+}
+
+func TestRenderMarkdownPreview_Colors_ProducesANSI(t *testing.T) {
+	// the default (colors on) path must still emit ANSI styling — proves the
+	// no-color assertion above is not vacuous.
+	doc := "# Heading\n\nsome text"
+	m := mdPreviewTestModel(mdLines(doc))
+	m.cfg.noColors = false
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	got := m.renderMarkdownPreview()
+	assert.Contains(t, got, "\x1b[",
+		"the default (colors on) markdown preview must emit ANSI styling")
+}
+
 // mdPreviewTestModel builds a Model for the mode-wiring tests: a single
 // full-context markdown file loaded, with mdTOC set exactly the way
 // handleFileLoaded (app/ui/loaders.go) would set it for a single-file,
@@ -253,6 +332,7 @@ func mdPreviewTestModel(lines []diff.DiffLine) Model {
 	m.file.name = "plan.md"
 	m.file.lines = lines
 	m.file.singleFile = true
+	m.file.markdownPreviewable = true // a single full-context markdown file, the way loaders.go sets it
 	m.file.mdTOC = sidepane.ParseTOC(lines, "plan.md")
 	m.layout.focus = paneDiff
 	m.layout.viewport.Width = 80
@@ -260,14 +340,15 @@ func mdPreviewTestModel(lines []diff.DiffLine) Model {
 	return m
 }
 
-func TestToggleMarkdownPreview_RefusedWhenTOCNil(t *testing.T) {
+func TestToggleMarkdownPreview_RefusedWhenNotPreviewable(t *testing.T) {
 	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
-	m.file.mdTOC = nil // not eligible: e.g. a non-markdown file or a partial diff
+	m.file.markdownPreviewable = false // not eligible: e.g. a non-markdown file or a partial diff
+	m.file.mdTOC = nil
 	require.False(t, m.modes.mdPreview)
 
 	m.toggleMarkdownPreview()
 
-	assert.False(t, m.modes.mdPreview, "toggle must be refused when mdTOC is nil")
+	assert.False(t, m.modes.mdPreview, "toggle must be refused when the file is not previewable")
 }
 
 func TestToggleMarkdownPreview_FlipsStateWhenTOCPresent(t *testing.T) {
@@ -279,6 +360,30 @@ func TestToggleMarkdownPreview_FlipsStateWhenTOCPresent(t *testing.T) {
 
 	m.toggleMarkdownPreview()
 	assert.False(t, m.modes.mdPreview, "a second toggle must flip it back off")
+}
+
+func TestToggleMarkdownPreview_HeadinglessMarkdown_TogglesOnAndRenders(t *testing.T) {
+	// A single full-context markdown file with NO '#' headings: ParseTOC returns
+	// nil (no TOC entries), but the file is still a valid single full-context
+	// markdown document. Preview must open and render — the old gate on
+	// mdTOC != nil wrongly refused it, because mdTOC also encodes "has headings".
+	// Drive the real load path so markdownPreviewable is set by loaders.go.
+	lines := mdLines("just some prose here\n\n- a list item\n- another list item\n\nclosing prose")
+	m := testModel([]string{"notes.md"}, map[string][]diff.DiffLine{"notes.md": lines})
+	m.file.singleFile = true
+
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "notes.md", lines: lines, seq: m.file.loadSeq})
+	m = result.(Model)
+	require.Nil(t, m.file.mdTOC, "fixture sanity: heading-less markdown must yield a nil TOC")
+
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview, "heading-less markdown must still enter preview")
+
+	out := m.renderDiff()
+	assert.Equal(t, m.renderMarkdownPreview(), out,
+		"renderDiff must dispatch to the markdown preview render for heading-less markdown")
+	assert.NotContains(t, xansi.Strip(out), "- a list item",
+		"glamour must style the raw list markers away, proving the preview actually rendered")
 }
 
 func TestModel_MarkdownPreviewToggle_ViaKeypress(t *testing.T) {
@@ -318,7 +423,7 @@ func TestRenderDiff_MarkdownPreviewOn_RendersPreview(t *testing.T) {
 
 	out := m.renderDiff()
 
-	want := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width)
+	want := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
 	assert.Equal(t, want, out, "renderDiff must dispatch to the markdown preview render")
 	assert.NotContains(t, xansi.Strip(out), "# Title", "glamour must style away the raw '#' heading marker")
 }
@@ -329,11 +434,12 @@ func TestRenderDiff_MarkdownPreviewOn_FileWithoutTOC_FallsBackToNormalDiff(t *te
 	// file). renderDiff's own gate must not trust the stale mode bit alone.
 	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
 	m.modes.mdPreview = true
+	m.file.markdownPreviewable = false
 	m.file.mdTOC = nil
 
 	out := m.renderDiff()
 
-	assert.Contains(t, xansi.Strip(out), "# Title", "without mdTOC, renderDiff must fall back to the normal diff render")
+	assert.Contains(t, xansi.Strip(out), "# Title", "when not previewable, renderDiff must fall back to the normal diff render")
 }
 
 // --- Task 5: annotation and cursor keys inert in preview mode ---
@@ -636,15 +742,16 @@ func TestRenderDiff_MarkdownPreviewOff_NonMarkdownFile_DoublyGated(t *testing.T)
 	}
 	m := mdPreviewTestModel(lines)
 	m.file.name = "main.go"
-	m.file.mdTOC = nil // a non-markdown file never gets mdTOC populated (see the gate in loaders.go)
+	m.file.markdownPreviewable = false // a non-markdown file is never previewable (see the gate in loaders.go)
+	m.file.mdTOC = nil
 	require.False(t, m.modes.mdPreview)
 
 	off := m.renderDiff()
 	assert.Contains(t, off, "package main", "mode off must render the raw source unchanged")
 
 	// doubly-gated: force the flag on directly, bypassing
-	// toggleMarkdownPreview's own mdTOC-nil refusal, to prove renderDiff's own
-	// early-return branch also requires mdTOC != nil and falls back
+	// toggleMarkdownPreview's own not-previewable refusal, to prove renderDiff's
+	// own early-return branch also requires markdownPreviewable and falls back
 	// byte-for-byte to the exact same normal render even if mdPreview is
 	// somehow left true.
 	forced := m
@@ -652,8 +759,8 @@ func TestRenderDiff_MarkdownPreviewOff_NonMarkdownFile_DoublyGated(t *testing.T)
 	forcedOut := forced.renderDiff()
 
 	assert.Equal(t, off, forcedOut,
-		"renderDiff must fall back to the normal diff render when mdTOC is nil, even if mdPreview is true — "+
-			"the early-return branch requires BOTH conditions together")
+		"renderDiff must fall back to the normal diff render when the file is not previewable, even if mdPreview "+
+			"is true — the early-return branch requires BOTH conditions together")
 	assert.NotContains(t, off, "mdpreviewmermaidplaceholder", "mode-off output must show no markdown-preview internals")
 }
 
@@ -683,6 +790,7 @@ func mdPreviewMouseModel(t *testing.T, lines []diff.DiffLine) Model {
 	m.file.name = "plan.md"
 	m.file.lines = lines
 	m.file.singleFile = true
+	m.file.markdownPreviewable = true // a single full-context markdown file, the way loaders.go sets it
 	m.file.mdTOC = sidepane.ParseTOC(lines, "plan.md")
 	require.NotNil(t, m.file.mdTOC, "fixture sanity: markdown lines with headings must produce a TOC")
 	m.layout.focus = paneDiff
@@ -822,10 +930,11 @@ func TestToggleMarkdownPreview_TurnsOffEvenWhenTOCNil(t *testing.T) {
 	m.toggleMarkdownPreview()
 	require.True(t, m.modes.mdPreview)
 
-	m.file.mdTOC = nil // simulate mdTOC cleared while preview is on
+	m.file.markdownPreviewable = false // simulate the file becoming ineligible while preview is on
+	m.file.mdTOC = nil
 
 	off := pressKey(t, m, "P")
-	assert.False(t, off.modes.mdPreview, "P must turn preview OFF even when mdTOC is nil")
+	assert.False(t, off.modes.mdPreview, "P must turn preview OFF even when the file is no longer previewable")
 }
 
 // --- Review phase 4: layout-change scroll + status/TOC display during preview ---

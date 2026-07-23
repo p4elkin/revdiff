@@ -551,9 +551,13 @@ func (m Model) handleFileLoaded(msg fileLoadedMsg) (tea.Model, tea.Cmd) {
 
 	m.file.singleColLineNum = m.isFullContext(msg.lines)
 
-	// detect markdown full-context mode and build TOC
+	// detect markdown full-context mode and build TOC. markdownPreviewable is the
+	// gate for preview mode: a single, full-context markdown file. mdTOC is a
+	// narrower thing — it is nil when that markdown file has no headings — so it
+	// cannot double as the preview gate (see toggleMarkdownPreview).
+	m.file.markdownPreviewable = m.file.singleFile && m.isMarkdownFile(msg.file) && m.file.singleColLineNum
 	m.file.mdTOC = nil
-	if m.file.singleFile && m.isMarkdownFile(msg.file) && m.file.singleColLineNum {
+	if m.file.markdownPreviewable {
 		m.file.mdTOC = m.parseTOC(msg.lines, msg.file)
 	}
 	switch {

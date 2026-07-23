@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	glamourStyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 
 	"github.com/umputun/revdiff/app/diff"
 	"github.com/umputun/revdiff/app/keymap"
@@ -174,11 +177,21 @@ func renderMermaidBlock(body []string, openLine, closeLine string) (result strin
 	return rendered + "\n"
 }
 
-// mdPreviewStyle is the single fixed glamour style used for the whole
-// document. This is a personal patch on a local clone (see the plan), not an
-// upstream feature, so there is deliberately no style generator deriving
-// colors from revdiff's 23 theme fields — one bundled style, picked once.
+// mdPreviewStyle is the fixed glamour style used for the whole document in the
+// normal (colored) preview. This is a personal patch on a local clone (see the
+// plan), not an upstream feature, so there is deliberately no style generator
+// deriving colors from revdiff's 23 theme fields — one bundled style, picked
+// once. When --no-colors is in effect the preview uses mdPreviewStyleNoColor
+// instead (see renderMarkdownDocument).
 var mdPreviewStyle = glamourStyles.DarkStyleConfig
+
+// mdPreviewStyleNoColor is glamour's ASCII/notty style: it carries no color,
+// bold, or underline attributes at all, so it renders as plain text with ASCII
+// markers (e.g. a leading "# " on headings, "**" around bold, "|" table
+// separators) instead of color. Combined with the Ascii color profile in
+// renderMarkdownDocument, it guarantees the no-colors preview emits zero ANSI
+// escape sequences, honoring --no-colors / REVDIFF_NO_COLORS.
+var mdPreviewStyleNoColor = glamourStyles.ASCIIStyleConfig
 
 // mdPreviewMinWidth is the floor applied to the requested render width
 // before handing it to glamour. glamour does not panic on width <= 0 (word
@@ -187,14 +200,34 @@ var mdPreviewStyle = glamourStyles.DarkStyleConfig
 // render on a transient zero-width layout state.
 const mdPreviewMinWidth = 8
 
+// mermaidNonce returns a short random hex token unique to one
+// renderMarkdownDocument call, used to build placeholders the source document
+// cannot predict (see mermaidPlaceholder). Production code may use crypto/rand
+// (unlike the workflow scripts). On the practically-impossible event of a
+// crypto/rand read failure it returns a fixed token: the placeholder is then
+// only as collision-resistant as the pre-nonce static string, which still
+// renders correctly — it just loses the extra guarantee against a document
+// that contains the token verbatim.
+func mermaidNonce() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "0000000000000000"
+	}
+	return hex.EncodeToString(b[:])
+}
+
 // mermaidPlaceholder returns the sentinel text substituted for the idx'th
-// mermaid diagram while the document is handed to glamour. It is plain
-// alphanumeric text with no markdown or glamour/x-ansi word-wrap break
+// mermaid diagram while the document is handed to glamour. nonce is a random
+// per-render token (see mermaidNonce) so the placeholder is effectively
+// uncollidable: the source document cannot contain a token built from a nonce
+// it never saw, so a paragraph of prose can never be mistaken for a
+// placeholder. The token is plain alphanumeric (letters, decimal digits, and
+// hex nonce chars 0-9a-f) with no markdown or glamour/x-ansi word-wrap break
 // characters (space, comma, period, semicolon, hyphen, plus, pipe — see
 // x/ansi.Wordwrap) in it, so it always survives glamour's internal word-wrap
 // pass as a single atomic, unsplit token and can be found again afterward.
-func mermaidPlaceholder(idx int) string {
-	return fmt.Sprintf("mdpreviewmermaidplaceholder%dmdpreviewmermaidplaceholder", idx)
+func mermaidPlaceholder(nonce string, idx int) string {
+	return fmt.Sprintf("mdpvw%sN%dN%s", nonce, idx, nonce)
 }
 
 // mermaidPlaceholderDocument builds the document handed to glamour: every
@@ -209,40 +242,51 @@ func mermaidPlaceholder(idx int) string {
 // buffer, including the contents of any fenced code block nested inside it,
 // so putting the art directly in doc (even inside a code fence) is not
 // sufficient to protect it.
-func mermaidPlaceholderDocument(lines []diff.DiffLine) (doc string, arts []string) {
+func mermaidPlaceholderDocument(lines []diff.DiffLine, nonce string) (doc string, arts []string) {
 	idx := 0
 	doc = joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
 		arts = append(arts, renderMermaidBlock(body, openLine, closeLine))
-		placeholder := mermaidPlaceholder(idx)
+		placeholder := mermaidPlaceholder(nonce, idx)
 		idx++
 		return "\n" + placeholder + "\n\n"
 	})
 	return doc, arts
 }
 
-// spliceMermaidArt walks rendered line by line and replaces the single
-// output line matching each placeholder (after stripping glamour's ANSI
-// styling and surrounding pad/margin whitespace) with the corresponding
-// entry of arts, verbatim and unstyled. This is what makes the diagram
-// reach the screen byte-exact: the art itself is never passed through
-// glamour, only located and spliced in after the fact.
+// spliceMermaidArt replaces, for each art in order, the FIRST not-yet-consumed
+// rendered line equal to that art's placeholder (after stripping glamour's ANSI
+// styling and surrounding pad/margin whitespace) with the art itself, verbatim
+// and unstyled. This is what makes the diagram reach the screen byte-exact: the
+// art itself is never passed through glamour, only located and spliced in after
+// the fact. nonce must be the same token mermaidPlaceholderDocument used.
+//
+// Matches are consumed: once a rendered line is used for one placeholder it
+// cannot be reused for another, so a single value can never splice twice. This
+// (together with the per-render nonce making placeholders uncollidable — see
+// mermaidPlaceholder) is why a prose line can never steal a diagram's slot and
+// one diagram can never overwrite two lines.
 //
 // A placeholder glamour did not place alone on its own line (should not
 // happen given mermaidPlaceholderDocument's isolation and mermaidPlaceholder
 // being word-wrap-atomic — see there) is left as visible plain text rather
 // than silently dropping the diagram or panicking.
-func spliceMermaidArt(rendered string, arts []string) string {
+func spliceMermaidArt(rendered, nonce string, arts []string) string {
 	if len(arts) == 0 {
 		return rendered
 	}
 	lines := strings.Split(rendered, "\n")
-	for i, line := range lines {
-		stripped := strings.TrimSpace(ansi.Strip(line))
-		for idx, art := range arts {
-			if stripped != mermaidPlaceholder(idx) {
+	consumed := make([]bool, len(lines))
+	for idx, art := range arts {
+		placeholder := mermaidPlaceholder(nonce, idx)
+		for i, line := range lines {
+			if consumed[i] {
+				continue
+			}
+			if strings.TrimSpace(ansi.Strip(line)) != placeholder {
 				continue
 			}
 			lines[i] = strings.TrimSuffix(art, "\n")
+			consumed[i] = true
 			break
 		}
 	}
@@ -269,12 +313,33 @@ func spliceMermaidArt(rendered string, arts []string) string {
 // A glamour construction or render error (should not happen with the fixed
 // built-in style used here) falls back to the mermaid-substituted plain
 // document so the file remains at least readable.
-func renderMarkdownDocument(lines []diff.DiffLine, width int) string {
-	doc, arts := mermaidPlaceholderDocument(lines)
+//
+// noColors selects the render style: the colored DarkStyleConfig by default,
+// or the ASCII/notty style plus the Ascii color profile when --no-colors is in
+// effect (so the preview emits no ANSI, matching the rest of the UI). The
+// mermaid art is already plain box-drawing text spliced in after glamour, so
+// it is unaffected by either path. Also NOTE (wide mermaid art): the art is
+// deliberately never re-wrapped or truncated to fit the width, and the preview
+// render path does not apply horizontal scroll (applyHorizontalScroll is a
+// per-diff-line transform that this whole-document render bypasses), so a
+// diagram wider than the pane is clipped — widen the terminal to see it. See
+// PATCH.md "Known limitations".
+func renderMarkdownDocument(lines []diff.DiffLine, width int, noColors bool) string {
+	nonce := mermaidNonce()
+	doc, arts := mermaidPlaceholderDocument(lines, nonce)
 
 	w := max(width, mdPreviewMinWidth)
 
-	r, err := glamour.NewTermRenderer(glamour.WithStyles(mdPreviewStyle), glamour.WithWordWrap(w))
+	opts := []glamour.TermRendererOption{glamour.WithStyles(mdPreviewStyle), glamour.WithWordWrap(w)}
+	if noColors {
+		opts = []glamour.TermRendererOption{
+			glamour.WithStyles(mdPreviewStyleNoColor),
+			glamour.WithWordWrap(w),
+			glamour.WithColorProfile(termenv.Ascii),
+		}
+	}
+
+	r, err := glamour.NewTermRenderer(opts...)
 	if err != nil {
 		log.Printf("[WARN] create glamour renderer: %v", err)
 		return doc
@@ -284,17 +349,20 @@ func renderMarkdownDocument(lines []diff.DiffLine, width int) string {
 		log.Printf("[WARN] render markdown preview: %v", err)
 		return doc
 	}
-	return spliceMermaidArt(out, arts)
+	return spliceMermaidArt(out, nonce, arts)
 }
 
 // toggleMarkdownPreview flips markdown preview mode on/off for the currently
-// loaded file. Turning it ON is refused (no state change) unless m.file.mdTOC
-// is non-nil — that field is set only for a single, full-context markdown file
-// (see the gate in loaders.go), which is exactly the condition under which a
-// whole-document render is safe (no partially-shown table — see the plan's
-// Overview). Turning it OFF is always allowed: gating the OFF transition on
-// mdTOC as well would strand the mode with no exit key if a file switch
-// cleared mdTOC while preview was on. The mode defaults to off.
+// loaded file. Turning it ON is refused (no state change) unless
+// m.file.markdownPreviewable is set — that flag marks a single, full-context
+// markdown file (see the gate in loaders.go), which is exactly the condition
+// under which a whole-document render is safe (no partially-shown table — see
+// the plan's Overview). It is deliberately NOT gated on m.file.mdTOC: mdTOC is
+// nil for a heading-less markdown file, which is still a valid full-context
+// document that must be previewable. Turning it OFF is always allowed: gating
+// the OFF transition too would strand the mode with no exit key if a file
+// switch cleared markdownPreviewable while preview was on. The mode defaults
+// to off.
 //
 // On the ON transition the viewport is reset to the top. It now shows the
 // whole-document glamour render, whose rows do not map to m.file.lines, so the
@@ -303,7 +371,7 @@ func renderMarkdownDocument(lines []diff.DiffLine, width int) string {
 // and cursor are both back in diff-line space, so the normal
 // keep-cursor-visible scroll is correct again.
 func (m *Model) toggleMarkdownPreview() {
-	if !m.modes.mdPreview && m.file.mdTOC == nil {
+	if !m.modes.mdPreview && !m.file.markdownPreviewable {
 		return
 	}
 	m.modes.mdPreview = !m.modes.mdPreview
@@ -322,7 +390,11 @@ func (m *Model) toggleMarkdownPreview() {
 // staleness risk of a file+width-keyed cache surviving an R reload of the same
 // file at the same width.
 func (m Model) renderMarkdownPreview() string {
-	return renderMarkdownDocument(m.file.lines, m.layout.viewport.Width)
+	// KNOWN LIMITATION: wide mermaid diagrams may be clipped in preview; widen
+	// the terminal. This whole-document render bypasses applyHorizontalScroll
+	// (a per-diff-line transform), so scroll_left/right cannot pan the art —
+	// see PATCH.md "Known limitations".
+	return renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
 }
 
 // mdPreviewAllowedActions is the fixed allowlist of keymap actions that stay

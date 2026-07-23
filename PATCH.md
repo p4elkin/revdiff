@@ -36,12 +36,21 @@ current HEAD of `md-preview`; they will drift after every rebase — treat them 
   - line 294: `"P": ActionTogglePreview` in `defaultBindings()`
 - `app/ui/model.go`
   - `mdPreview bool` field on `modeState`
+  - `markdownPreviewable bool` field on `loadedFileState` — the real gate for preview mode (a
+    single, full-context markdown file). It exists because `mdTOC` is nil for a heading-less
+    markdown file, so `mdTOC != nil` wrongly refused preview for valid heading-less docs.
   - `keymap.ActionTogglePreview` added to the toggle-grouping `case` that routes to
     `handleViewToggle`
   - `case keymap.ActionTogglePreview: m.toggleMarkdownPreview()` inside `handleViewToggle`
+- `app/ui/loaders.go`
+  - in `handleFileLoaded`, beside the existing `mdTOC` computation: sets
+    `m.file.markdownPreviewable = m.file.singleFile && m.isMarkdownFile(msg.file) &&
+    m.file.singleColLineNum` (the same three conditions that gate `mdTOC`, minus the
+    has-headings requirement). This makes `loaders.go` a newly-touched file for the patch, so a
+    rebase moving that block will surface a fresh conflict here.
 - `app/ui/diffview.go`
-  - line 280-282: early-return branch in `renderDiff()` — `if m.modes.mdPreview &&
-    m.file.mdTOC != nil { return m.renderMarkdownPreview() }`, placed beside the existing
+  - line ~280: early-return branch in `renderDiff()` — `if m.modes.mdPreview &&
+    m.file.markdownPreviewable { return m.renderMarkdownPreview() }`, placed beside the existing
     `m.modes.collapsed.enabled` branch
 - `app/ui/view.go`
   - line 459: `{"▤", m.modes.mdPreview}` added to `statusModeIcons()`
@@ -108,6 +117,26 @@ previewing — same root cause as Task 5, caught at three more sites):**
 the most likely to conflict — this was flagged going in (see the plan's "Patch discipline"
 section) and confirmed empirically: `model.go` alone carries 5 of the patch's 17 existing-file
 hunks (keymap 4, model 5, diffview 1, mouse 3, view 3, diffnav 1).
+
+## Known limitations
+
+These are accepted, documented gaps in the preview mode — not bugs to fix under patch discipline.
+
+- **Wide mermaid diagrams are clipped in preview; widen the terminal to see them.** A diagram
+  wider than the diff pane is cut off at the right edge and cannot be scrolled into view.
+  The preview render (`renderMarkdownDocument` / `renderMarkdownPreview` in `app/ui/mdpreview.go`)
+  produces one whole-document glamour render and hands it straight to the viewport. It does not
+  flow through `applyHorizontalScroll`, which is a per-diff-line transform used by the normal and
+  collapsed diff render paths (`renderDiffLine`, `renderCollapsedDiff`). So `scroll_left` /
+  `scroll_right` have nothing to act on here, and they are deliberately left OUT of
+  `mdPreviewAllowedActions`. Wiring real horizontal scroll in would mean applying ANSI-aware
+  per-line slicing to the entire render (including the spliced-in box-drawing art) and reworking
+  how the wide art interacts with the lipgloss pane width — a render-path change out of scope for
+  this fork. The art is intentionally never re-wrapped or truncated to fit (see the anti-reflow
+  design in `renderMarkdownDocument`'s doc comment), so the only current remedy for a clipped
+  diagram is a wider terminal.
+- **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
+  "Review phase 4 wiring" above.
 
 ## Dependencies added
 
