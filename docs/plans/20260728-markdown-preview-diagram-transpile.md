@@ -617,20 +617,31 @@ are stubs that report not-handled.
 - Modify: `app/ui/mdpreview_transpile.go`
 - Modify: `app/ui/mdpreview_transpile_test.go`
 
-- [ ] write failing tests for `parseStateTransition`: with and without a label, and both colon
+- [x] write failing tests for `parseStateTransition`: with and without a label, and both colon
       spacings parsing identically
-- [ ] write failing test `TestTranspileStateDiagram_MultipleStartAndEndPseudoStates_FoldToTwoNodes`
+- [x] write failing test `TestTranspileStateDiagram_MultipleStartAndEndPseudoStates_FoldToTwoNodes`
       using the real 5-transition corpus shape — assert exactly one `(start)` and one `(end)`
-- [ ] write failing tests for `parseStateDecl`: `state "desc" as X`, `state X <<fork>>`, `state X`
-- [ ] write failing test that a stateDiagram `direction` statement is dropped
-- [ ] write failing test that a state description is appended to the box
-- [ ] write failing test that composite blocks flatten with `contains` edges, including nesting
-- [ ] write failing test that note blocks are skipped in both the `: text` and `end note` forms
-- [ ] write failing table test over the six verbatim corpus labels with their expected shortened
-      forms
-- [ ] implement `stateTranspiler` with `blockHeader` / `line`, plus `parseStateTransition`,
+- [x] write failing tests for `parseStateDecl`: `state "desc" as X`, `state X <<fork>>`, `state X`
+- [x] write failing test that a stateDiagram `direction` statement is dropped
+- [x] write failing test that a state description is appended to the box
+- [x] write failing test that composite blocks flatten with `contains` edges, including nesting
+- [x] write failing test that note blocks are skipped in both the `: text` and `end note` forms
+- [x] write failing table test over the six verbatim corpus labels with their expected shortened
+      forms — ⚠️ one row ("open · C1 (Request)", from
+      `mx/publication-requests/docs/architecture/2026-07-10-workflow-policy-brain-sketch.md`) does
+      NOT match the plan's own "Edge label" section worked example. That section states this label
+      shortens to `open·C1`; running the actual, already-implemented (Task 2/3) `mermaidEdgeLabel`
+      against the verbatim corpus text produces `open···C1` (three dots), because the raw label
+      already contains a literal "·" surrounded by two spaces, and both of those spaces — not just
+      the ones the plan's mental model pictured — convert to "·" too. Verified by direct execution,
+      not by re-deriving the arithmetic by hand. This is not a stateDiagram-specific bug and not
+      something Task 4 should patch: `mermaidEdgeLabel` is shared, already tested, and already used
+      by the shipped classDiagram transpiler, so changing its behavior now is out of this task's
+      scope. The test pins the real, verified output (`open···C1`) with a comment explaining the
+      discrepancy, rather than asserting the plan's unverified figure.
+- [x] implement `stateTranspiler` with `blockHeader` / `line`, plus `parseStateTransition`,
       `parseStateDecl`, `stateNodeKey`
-- [ ] run `make test` and `make lint` — both must pass before Task 5
+- [x] run `make test` and `make lint` — both must pass before Task 5
 
 ### Task 5: Integration against the real renderer
 

@@ -23,10 +23,10 @@ import (
 // mermaidcmd.RenderDiagram call in mdpreview.go. Task 3 implements
 // classTranspiler (see its own doc comment below, and the plan's "Grammar
 // handled — classDiagram" section), so classDiagram fences now transpile.
-// stateTranspiler (Task 4) is still a stub: transpileMermaid recognizes
-// stateDiagram-v2 but reports "not handled" for it, so that kind — the one
-// not yet wired — still takes today's exact fallback path, same as every
-// fence type that already worked before this patch.
+// Task 4 implements stateTranspiler the same way (see its own doc comment
+// below, and the plan's "Grammar handled — stateDiagram-v2" section), so
+// stateDiagram-v2 (and plain stateDiagram) fences now transpile too — every
+// diagram kind this patch set out to cover is wired in.
 
 // mermaidUnconstrainedWidth is passed wherever no real viewport width is
 // available (renderMermaidFences's callers — see its doc comment for why
@@ -677,6 +677,22 @@ func scanMermaidBlocks(source string, h mermaidBlockHandler) {
 	}
 }
 
+// mermaidHasAnyPrefix reports whether text starts with any of prefixes. This
+// is the shared prefix-matching loop behind both classIgnoredStatement and
+// stateIgnoredStatement: the two diagram types drop a different set of
+// statement keywords, but the matching logic itself — try each prefix,
+// report true on the first hit — is identical, so it lives here once rather
+// than as two near-duplicate loops (see this file's package doc comment on
+// why the two transpilers must not duplicate their shared plumbing).
+func mermaidHasAnyPrefix(text string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // classIgnoredStatementPrefixes lists classDiagram statement keywords that
 // carry no information the flowchart-source builder needs: styling/metadata
 // directives (style, cssClass, classDef), doc/interaction directives (note,
@@ -702,12 +718,7 @@ func classIgnoredStatement(text string) bool {
 	if strings.Contains(text, "()--") {
 		return true
 	}
-	for _, prefix := range classIgnoredStatementPrefixes {
-		if strings.HasPrefix(text, prefix) {
-			return true
-		}
-	}
-	return false
+	return mermaidHasAnyPrefix(text, classIgnoredStatementPrefixes)
 }
 
 // classMemberSpaceParen matches the FIRST whitespace character that is
@@ -1202,18 +1213,389 @@ func (c *classTranspiler) ensureTitle(key string) {
 	}
 }
 
+// --- stateDiagram-v2 transpiler ---
+//
+// stateTranspiler implements mermaidBlockHandler for stateDiagram-v2 (and
+// plain stateDiagram — mermaid accepts both keywords for the same grammar,
+// see the plan's Grammar section) source, accumulating nodes and edges into
+// a shared flowchartBuilder as scanMermaidBlocks walks the diagram body —
+// see this file's package doc comment for the overall transpile approach,
+// and the plan's "Grammar handled — stateDiagram-v2" section for the full
+// grammar covered here. Structurally this mirrors classTranspiler (a
+// currentX/xStack pair tracking whatever block is currently open, an
+// ensureTitle fallback, a statement dispatcher tried in a fixed order), but
+// the two are NOT merged into one handler: a stateDiagram composite block
+// means something different from a classDiagram class body (flattened
+// "contains" edges vs. member/label lines), and stateDiagram alone has the
+// "[*]" pseudo-state fold and the note-block skip, neither of which
+// classDiagram grammar has any equivalent of. Forcing one handler to cover
+// both would need per-diagram-type branches threaded through every method —
+// exactly the coupling two small, separate types avoid.
+type stateTranspiler struct {
+	b *flowchartBuilder
+
+	// currentComposite is the key of the composite state body currently
+	// open (between a "state Foo {" header and its matching "}"), or "" at
+	// the top level. compositeStack mirrors classTranspiler.classStack: one
+	// entry — the PREVIOUS currentComposite — is pushed per blockHeader call
+	// and popped per matching "}" line, so closing a nested composite
+	// restores whichever ancestor composite (or none) was open before it.
+	currentComposite string
+	compositeStack   []string
+
+	// inNote is true while a multi-line "note left/right of X" (no inline
+	// colon) is open, until a line matching "end note" closes it — see
+	// startNoteIfAny. The single-line "note ... of X : text" form never sets
+	// this: it is recognized and dropped within the one line that carries
+	// it.
+	inNote bool
+}
+
+// newStateTranspiler creates a stateTranspiler that accumulates into b.
+func newStateTranspiler(b *flowchartBuilder) *stateTranspiler {
+	return &stateTranspiler{b: b}
+}
+
+// blockHeader implements mermaidBlockHandler: a "state Foo {" header opens a
+// named block (its contents dispatch to line, one level deeper, and are
+// flattened with "contains" edges back to Foo — see attributeToComposite);
+// any other header is transparent, exactly as if the block were not there —
+// there is no other bracketed construct in stateDiagram-v2 grammar, but
+// scanMermaidBlocks is shared plumbing and must tolerate an unrecognized
+// header defensively, same as classTranspiler.blockHeader does for the same
+// reason.
+func (s *stateTranspiler) blockHeader(header string, _ int) bool {
+	s.compositeStack = append(s.compositeStack, s.currentComposite)
+
+	key, title, annotation, ok := stateDeclFromStatement(header)
+	if !ok {
+		return false
+	}
+	s.applyStateDecl(key, title, annotation)
+	s.currentComposite = key
+	return true
+}
+
+// line implements mermaidBlockHandler: a block's closing "}" restores
+// whatever composite was open before it (or none); a line while a
+// multi-line note is open is note body and is dropped until "end note"
+// closes it; everything else is a top-level (or composite-body) statement.
+func (s *stateTranspiler) line(text string, _ int) {
+	if text == "}" {
+		if n := len(s.compositeStack); n > 0 {
+			s.currentComposite = s.compositeStack[n-1]
+			s.compositeStack = s.compositeStack[:n-1]
+		}
+		return
+	}
+	if s.inNote {
+		if text == "end note" {
+			s.inNote = false
+		}
+		return
+	}
+	s.statement(text)
+}
+
+// statement handles one stateDiagram-v2 line that is not a block header, a
+// block close, or note body: a dropped "direction" statement, an ignored
+// statement kind, a note open (single-line dropped inline, multi-line opens
+// s.inNote), a "state ..." declaration, a transition, the "A : description"
+// colon form, or — if none of those match — a line this patch cannot parse,
+// silently omitted per the plan's Failure modes table. The order matters the
+// same way it does in classTranspiler.statement: the transition and
+// declaration checks must run BEFORE the generic colon-description fallback,
+// or "Draft --> InReview : submit" would be misread as an "identifier :
+// description" statement keyed on the whole "Draft --> InReview" text.
+func (s *stateTranspiler) statement(text string) {
+	if strings.HasPrefix(text, "direction") || stateIgnoredStatement(text) {
+		return
+	}
+	if s.startNoteIfAny(text) {
+		return
+	}
+	if key, title, annotation, ok := stateDeclFromStatement(text); ok {
+		s.applyStateDecl(key, title, annotation)
+		return
+	}
+	if fromRaw, toRaw, label, ok := parseStateTransition(text); ok {
+		s.statementTransition(fromRaw, toRaw, label)
+		return
+	}
+	if key, after, ok := splitOnFirstColon(text); ok && key != "" {
+		s.ensureTitle(key)
+		s.attributeToComposite(key)
+		s.b.addLabelLine(key, mermaidSafeText(after))
+	}
+}
+
+// applyStateDecl records one "state ..." declaration's title and optional
+// fork/join/choice annotation, and — since a "state Foo { ... }" composite
+// header is itself a declaration reached through the same parse (see
+// blockHeader) — attributes Foo to whatever composite currently encloses IT,
+// before Foo becomes the new current composite. Shared by blockHeader and
+// statement so the "declare, annotate, attribute" sequence is written once,
+// not once per caller.
+func (s *stateTranspiler) applyStateDecl(key, title, annotation string) {
+	s.attributeToComposite(key)
+	s.b.setTitle(key, title)
+	if annotation != "" {
+		s.b.addLabelLine(key, annotation)
+	}
+}
+
+// statementTransition folds both endpoints' pseudo-state tokens (see
+// stateNodeKey), gives each a default title the first time it is seen (a
+// state can be introduced purely by appearing in a transition, with no
+// "state X" declaration anywhere — the real corpus norm), attributes both to
+// the currently open composite if any, and records the edge. stateDiagram
+// has one arrow and no relation table (unlike classDiagram's fourteen), so
+// there is no arrow-to-label lookup here: label is already whatever text
+// followed the transition's colon, straight from parseStateTransition.
+func (s *stateTranspiler) statementTransition(fromRaw, toRaw, label string) {
+	fromKey := stateNodeKey(fromRaw, false)
+	toKey := stateNodeKey(toRaw, true)
+
+	s.ensureTitle(fromKey)
+	s.ensureTitle(toKey)
+	s.attributeToComposite(fromKey)
+	s.attributeToComposite(toKey)
+	s.b.addEdge(fromKey, toKey, label)
+}
+
+// ensureTitle gives key a default title the first time it is referenced with
+// no title of its own — see classTranspiler.ensureTitle's doc comment for
+// why this fallback matters (a state can be introduced purely by a
+// transition endpoint, never declared). The two folded pseudo-state keys are
+// special-cased to their fixed "(start)"/"(end)" labels rather than falling
+// through to mermaidSafeText: sanitizing the raw "\x00start"/"\x00end" keys
+// would not even be meaningful (they are synthetic, never user text), and
+// sanitizing the literal "[*]" token instead (mermaidSafeText maps "[" and
+// "]" to parens) would render the confusing "(*)" rather than the readable
+// "(start)"/"(end)" the plan specifies.
+func (s *stateTranspiler) ensureTitle(key string) {
+	n := s.b.node(key)
+	if n.title != "" {
+		return
+	}
+	switch key {
+	case stateStartKey:
+		n.title = stateStartLabel
+	case stateEndKey:
+		n.title = stateEndLabel
+	default:
+		n.title = mermaidSafeText(key)
+	}
+}
+
+// attributeToComposite records a "contains" edge from the composite state
+// currently open (if any) to key — see the plan's "Composite blocks are
+// flattened" note. This can be called on every mention of key inside the
+// composite, not just the first: flowchartBuilder.addEdge's own from+to+
+// label dedup (see its doc comment) collapses repeats to the single edge the
+// plan describes, so no separate "have I attributed this one yet"
+// bookkeeping is needed here. The two folded pseudo-state keys are excluded:
+// they are diagram-global (every "[*]" anywhere in the source folds to the
+// same two nodes — see stateNodeKey), not real children scoped to any one
+// composite, so attributing the shared node to whichever composite happens
+// to mention it would misrepresent containment for every OTHER mention of
+// the same pseudo-state elsewhere in the diagram.
+func (s *stateTranspiler) attributeToComposite(key string) {
+	if s.currentComposite == "" || key == s.currentComposite {
+		return
+	}
+	if key == stateStartKey || key == stateEndKey {
+		return
+	}
+	s.b.addEdge(s.currentComposite, key, "contains")
+}
+
+// startNoteIfAny recognizes a "note ..." statement — mermaid's
+// "note right of X : text" (single-line, dropped in place) and
+// "note left of X" (multi-line, opened here and closed later by a lone
+// "end note" line — see the line method). The two forms are distinguished
+// by whether the line carries a colon at all: the single-line form always
+// does (it is the note text's own separator), the multi-line opener never
+// does (its text follows on later lines instead). Reports false for any line
+// that is not a note statement at all, so callers can fall through to the
+// rest of the dispatch.
+func (s *stateTranspiler) startNoteIfAny(text string) bool {
+	if !strings.HasPrefix(text, "note") {
+		return false
+	}
+	if _, _, hasInlineText := strings.Cut(text, ":"); !hasInlineText {
+		s.inNote = true
+	}
+	return true
+}
+
+// stateStartKey and stateEndKey are the synthetic node keys every "[*]"
+// pseudo-state transition endpoint folds to — see the plan's "[*] folding is
+// essential" note: mermaid treats every left-side "[*]" as the SAME start
+// pseudo-state and every right-side one as the SAME end, so a real corpus
+// diagram's several "[*]" mentions must collapse to exactly two nodes, not
+// one disconnected stub per mention. The leading NUL byte can never collide
+// with a real state name (a plain identifier) and the ids are synthetic
+// anyway — see flowchartBuilder's own doc comment on synthetic ids.
+// stateStartLabel and stateEndLabel are the two nodes' rendered titles:
+// shape syntax like "(( ))" is unsupported by the vendored renderer and
+// parens are inert (see mermaidSafeText), so a literal "start"/"end" would
+// be indistinguishable from a real state genuinely named that; wrapping in
+// parens keeps the two readable AND distinguishable from any real state
+// name mermaid itself would allow.
+const (
+	stateStartKey   = "\x00start"
+	stateEndKey     = "\x00end"
+	stateStartLabel = "(start)"
+	stateEndLabel   = "(end)"
+)
+
+// statePseudoState is the literal token mermaid uses for the start/end
+// pseudo-state on either side of a stateDiagram-v2 transition.
+const statePseudoState = "[*]"
+
+// stateNodeKey folds raw — one transition endpoint's raw token, exactly as
+// captured by parseStateTransition — into its final node key. Every
+// occurrence of the literal "[*]" token folds to stateStartKey when it is a
+// transition's SOURCE (isTarget false) or stateEndKey when it is a
+// transition's TARGET (isTarget true) — the two folds are deliberately
+// different keys because mermaid itself treats a left-side "[*]" and a
+// right-side one as different pseudo-states (see the const block above).
+// Any other token is returned completely unchanged: a real state name is
+// never folded or otherwise altered here.
+func stateNodeKey(raw string, isTarget bool) string {
+	if raw != statePseudoState {
+		return raw
+	}
+	if isTarget {
+		return stateEndKey
+	}
+	return stateStartKey
+}
+
+// stateIgnoredStatementPrefixes lists stateDiagram-v2 statement keywords that
+// carry no information the flowchart-source builder needs: styling/metadata
+// directives ("classDef", "class " — applying a CSS class to a state, not a
+// classDiagram declaration — and "style"), and accessibility/title
+// directives ("accTitle", "accDescr", "title"). Checked BEFORE the generic
+// colon-description fallback (splitOnFirstColon) runs, because several of
+// these ("classDef highlight fill:red", "style Foo fill:#fff", "accTitle:
+// Lifecycle") carry a colon of their own and would otherwise misparse as an
+// "identifier : description" statement — the same hazard
+// classIgnoredStatementPrefixes exists to prevent for classDiagram's own
+// version of the same directive names. A concurrency separator (a lone "--"
+// line inside a composite's parallel regions) needs no entry here at all: it
+// contains no "-->" and no ":", so it already falls through every check in
+// statement without matching any of them, and is silently dropped for free.
+var stateIgnoredStatementPrefixes = []string{
+	"classDef", "class ", "style", "accTitle", "accDescr", "title",
+}
+
+// stateIgnoredStatement reports whether text is one of the stateDiagram-v2
+// statement kinds this patch deliberately drops rather than transpiles — see
+// stateIgnoredStatementPrefixes.
+func stateIgnoredStatement(text string) bool {
+	return mermaidHasAnyPrefix(text, stateIgnoredStatementPrefixes)
+}
+
+// stateTransitionPattern matches a stateDiagram-v2 transition: group 1 the
+// raw "from" token, group 2 the raw "to" token, group 3 the optional label
+// text. Both real-corpus colon spacings parse identically —
+// "Draft --> InReview : submit" and "[*] --> Draft: open" — because group 2
+// is [^\s:]+ (stops at the first whitespace OR colon, so it never swallows
+// part of an optional trailing label) and the "\s*" immediately after it
+// absorbs any space before an optional colon, however much or little of it
+// the author wrote. Group 3 is ".*" to the end of line, deliberately
+// unconstrained: a real label is a whole sentence with its own internal
+// spaces, parens, and punctuation (see mermaidEdgeLabel, which is what
+// actually shortens it later, at emission time).
+var stateTransitionPattern = regexp.MustCompile(`^\s*(\S+)\s*-->\s*([^\s:]+)\s*(?::\s*(.*))?$`)
+
+// parseStateTransition parses one stateDiagram-v2 transition line. ok is
+// false when line does not contain the "-->" arrow at all — the signal both
+// blockHeader's negative case and statement's dispatch order rely on to
+// treat text as something other than a transition.
+func parseStateTransition(line string) (fromRaw, toRaw, label string, ok bool) {
+	m := stateTransitionPattern.FindStringSubmatch(line)
+	if m == nil {
+		return "", "", "", false
+	}
+	return m[1], m[2], m[3], true
+}
+
+// stateAnnotationPattern matches a trailing "<<word>>" annotation on a
+// "state X <<fork>>" / "<<join>>" / "<<choice>>" declaration — mermaid's
+// fork/join/choice syntax. It must be located and stripped from the
+// declaration BEFORE the state's own identifier is extracted, since it
+// trails the whole line rather than standing alone the way a classDiagram
+// body's stereotype line does.
+var stateAnnotationPattern = regexp.MustCompile(`^(.*\S)\s+(<<\s*.+?\s*>>)$`)
+
+// stateAliasPattern matches mermaid's `"long description" as X` declaration
+// alias shape: group 1 the quoted display text (the node TITLE), group 2 the
+// identifier that follows "as" (the node KEY, used for transition matching —
+// never sanitized, same reasoning as parseClassDecl's bracket-alias key).
+var stateAliasPattern = regexp.MustCompile(`^"(.*)"\s+as\s+(\S+)$`)
+
+// parseStateDecl parses the text after a "state " keyword — covering all
+// three shapes the plan's Grammar section lists: `state "desc" as X`
+// (alias), `state X <<fork>>` (an ordinary box carrying the annotation as a
+// label line — mermaid's fork/join/choice states render as an ordinary box
+// here, never a diamond, same treatment `<<choice>>` gets per the plan), and
+// bare `state X`. key is "" when rest is empty after trimming, signaling
+// "nothing to declare" to the caller (mirrors parseClassDecl's own
+// empty-key convention).
+//
+// annotation is "" unless a trailing "<<word>>" was present, in which case
+// it is already rendered "«word»" via classStereotype — reused here rather
+// than duplicated: the "<<word>>" -> "«word»" notation is generic mermaid
+// syntax, not classDiagram-specific, and a fork/join/choice annotation uses
+// the exact same shape a classDiagram stereotype does. Calling the existing,
+// already-tested helper is what keeps this a shared-spine reuse rather than
+// a second near-identical regexp + rewrite the dupl linter (threshold 100)
+// would flag between the two transpilers.
+func parseStateDecl(rest string) (key, title, annotation string) {
+	rest = strings.TrimSpace(rest)
+
+	if m := stateAnnotationPattern.FindStringSubmatch(rest); m != nil {
+		if label, ok := classStereotype(m[2]); ok {
+			annotation = label
+		}
+		rest = m[1]
+	}
+
+	if m := stateAliasPattern.FindStringSubmatch(rest); m != nil {
+		return strings.TrimSpace(m[2]), mermaidSafeText(strings.TrimSpace(m[1])), annotation
+	}
+
+	return rest, mermaidSafeText(rest), annotation
+}
+
+// stateDeclFromStatement recognizes a "state ..." declaration — bare
+// statement OR block-header form, since scanMermaidBlocks already strips a
+// block header's trailing "{" before either stateTranspiler.statement or
+// stateTranspiler.blockHeader ever sees the text, so both reach this same
+// helper with identical input (mirrors classDeclFromStatement, which does
+// the same for "class ..."). ok is false when text does not start with
+// "state " at all, or parseStateDecl could not extract a usable key.
+func stateDeclFromStatement(text string) (key, title, annotation string, ok bool) {
+	rest, isState := strings.CutPrefix(text, "state ")
+	if !isState {
+		return "", "", "", false
+	}
+	key, title, annotation = parseStateDecl(rest)
+	return key, title, annotation, key != ""
+}
+
 // transpileMermaid dispatches on source's own diagram kind (see
-// mermaidDiagramKind) to produce synthetic flowchart source for the two
-// diagram types this patch adds support for. classDiagram is fully wired
-// (Task 3): classTranspiler walks the source via scanMermaidBlocks into a
-// paneWidth-aware flowchartBuilder, and a builder that ends up empty (every
-// statement was a comment or something this patch ignores) falls back to
-// "not handled" exactly like an unrecognized kind — see flowchartBuilder's
-// empty doc comment. stateDiagram-v2 is still a stub (Task 4):
-// stateTranspiler is not implemented yet, so that kind — recognized in the
-// sense the plan's Task 2 scope calls for, but not yet transpiled — takes
-// today's exact path through renderMermaidSource, same as the 206 fences
-// that already worked before this patch.
+// mermaidDiagramKind) to produce synthetic flowchart source for the diagram
+// types this patch adds support for. classDiagram is fully wired (Task 3):
+// classTranspiler walks the source via scanMermaidBlocks into a
+// paneWidth-aware flowchartBuilder. stateDiagram-v2 and plain stateDiagram
+// are fully wired too (Task 4), the same way, via stateTranspiler. Either
+// way, a builder that ends up empty (every statement was a comment or
+// something this patch ignores) falls back to "not handled" exactly like an
+// unrecognized kind — see flowchartBuilder's empty doc comment.
 func transpileMermaid(source string, paneWidth int) (string, bool) {
 	switch mermaidDiagramKind(source) {
 	case "classDiagram":
@@ -1223,8 +1605,13 @@ func transpileMermaid(source string, paneWidth int) (string, bool) {
 			return "", false
 		}
 		return b.source(), true
-	case "stateDiagram-v2":
-		return "", false
+	case "stateDiagram", "stateDiagram-v2":
+		b := newFlowchartBuilder(paneWidth)
+		scanMermaidBlocks(source, newStateTranspiler(b))
+		if b.empty() {
+			return "", false
+		}
+		return b.source(), true
 	default:
 		return "", false
 	}

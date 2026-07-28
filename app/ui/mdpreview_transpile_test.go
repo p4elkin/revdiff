@@ -840,6 +840,313 @@ func TestTranspileClassDiagram_NineteenMembers_CappedWithOverflowRow(t *testing.
 	assert.Contains(t, got, "... +7 more")
 }
 
+// --- stateDiagram-v2 transpiler: parseStateTransition ---
+
+func TestParseStateTransition_Table(t *testing.T) {
+	tests := []struct {
+		name      string
+		line      string
+		wantFrom  string
+		wantTo    string
+		wantLabel string
+	}{
+		{"no label", "Draft --> InReview", "Draft", "InReview", ""},
+		// Both colon spacings occur in the real corpus (publication-request.md
+		// uses the spaced form, live-copy.md's diagram uses the tight one)
+		// and must parse identically.
+		{"spaced colon label", "Draft --> InReview : submit", "Draft", "InReview", "submit"},
+		{"tight colon label", "[*] --> Draft: open", "[*]", "Draft", "open"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fromRaw, toRaw, label, ok := parseStateTransition(tc.line)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantFrom, fromRaw)
+			assert.Equal(t, tc.wantTo, toRaw)
+			assert.Equal(t, tc.wantLabel, label)
+		})
+	}
+}
+
+func TestParseStateTransition_NotATransition_NoArrow(t *testing.T) {
+	_, _, _, ok := parseStateTransition("state Foo")
+	assert.False(t, ok)
+}
+
+// --- stateDiagram-v2 transpiler: [*] folding ---
+
+func TestTranspileStateDiagram_MultipleStartAndEndPseudoStates_FoldToTwoNodes(t *testing.T) {
+	// Verbatim shape from the real corpus (publication-request.md's lifecycle
+	// diagram): two distinct left-side "[*]" transitions and three distinct
+	// right-side ones. Mermaid treats every left-side "[*]" as the SAME
+	// start pseudo-state and every right-side one as the SAME end — without
+	// the fold, this exact shape produces five disconnected stub nodes
+	// instead of two shared ones (see the plan's "[*] folding is essential"
+	// note).
+	source := "stateDiagram-v2\n" +
+		"    [*] --> Draft\n" +
+		"    [*] --> InReview\n" +
+		"    Published --> [*]\n" +
+		"    Rejected --> [*]\n" +
+		"    Withdrawn --> [*]\n"
+
+	got, ok := transpileMermaid(source, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.Equal(t, 1, strings.Count(got, "(start)"), "all left-side [*] mentions must fold to exactly one start node")
+	assert.Equal(t, 1, strings.Count(got, "(end)"), "all right-side [*] mentions must fold to exactly one end node")
+}
+
+func TestStateNodeKey_Table(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		isTarget bool
+		want     string
+	}{
+		{"pseudo-state as source folds to start", "[*]", false, stateStartKey},
+		{"pseudo-state as target folds to end", "[*]", true, stateEndKey},
+		{"real state name as source is unchanged", "Draft", false, "Draft"},
+		{"real state name as target is unchanged", "Draft", true, "Draft"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, stateNodeKey(tc.raw, tc.isTarget))
+		})
+	}
+}
+
+// --- stateDiagram-v2 transpiler: parseStateDecl ---
+
+func TestParseStateDecl_QuotedAlias(t *testing.T) {
+	key, title, annotation := parseStateDecl(`"Long description" as X`)
+	assert.Equal(t, "X", key)
+	assert.Equal(t, "Long description", title)
+	assert.Empty(t, annotation)
+}
+
+func TestParseStateDecl_ForkAnnotation(t *testing.T) {
+	key, title, annotation := parseStateDecl("Fork1 <<fork>>")
+	assert.Equal(t, "Fork1", key)
+	assert.Equal(t, "Fork1", title)
+	assert.Equal(t, "«fork»", annotation, "fork/join/choice render as an ordinary box with the annotation as a label line, same as classDiagram's stereotype notation")
+}
+
+func TestParseStateDecl_JoinAnnotation(t *testing.T) {
+	key, title, annotation := parseStateDecl("Join1 <<join>>")
+	assert.Equal(t, "Join1", key)
+	assert.Equal(t, "Join1", title)
+	assert.Equal(t, "«join»", annotation)
+}
+
+func TestParseStateDecl_Bare(t *testing.T) {
+	key, title, annotation := parseStateDecl("Active")
+	assert.Equal(t, "Active", key)
+	assert.Equal(t, "Active", title)
+	assert.Empty(t, annotation)
+}
+
+// --- stateDiagram-v2 transpiler: direction dropped ---
+
+func TestTranspileStateDiagram_DirectionStatement_DroppedHeaderAlwaysFlowchartTD(t *testing.T) {
+	source := "stateDiagram-v2\n" +
+		"    direction LR\n" +
+		"    A --> B\n"
+	got, ok := transpileMermaid(source, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.True(t, strings.HasPrefix(got, "flowchart TD\n"))
+	assert.NotContains(t, got, "direction")
+}
+
+// --- stateDiagram-v2 transpiler: state description appended to the box ---
+
+func TestStateTranspiler_ColonDescription_AppendedAsLabelLine(t *testing.T) {
+	source := "stateDiagram-v2\n" +
+		"    Active : the request is being actively worked\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	n := b.nodes["Active"]
+	require.NotNil(t, n)
+	assert.Equal(t, "Active", n.title)
+	assert.Equal(t, []string{"the request is being actively worked"}, n.labelLines)
+}
+
+// --- stateDiagram-v2 transpiler: composite blocks flatten with contains edges ---
+
+func TestStateTranspiler_CompositeBlock_FlattensWithContainsEdge(t *testing.T) {
+	source := "stateDiagram-v2\n" +
+		"    state Active {\n" +
+		"        Working --> Paused\n" +
+		"    }\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	require.Contains(t, b.nodes, "Active")
+	require.Contains(t, b.nodes, "Working")
+	require.Contains(t, b.nodes, "Paused")
+
+	var containsFromActive []string
+	for _, e := range b.edges {
+		if e.from == "Active" && e.label == "contains" {
+			containsFromActive = append(containsFromActive, e.to)
+		}
+	}
+	assert.ElementsMatch(t, []string{"Working", "Paused"}, containsFromActive,
+		"both states first seen inside the composite must get a contains edge from it")
+}
+
+func TestStateTranspiler_NestedCompositeBlocks_ContainsEdgesAtEachLevel(t *testing.T) {
+	source := "stateDiagram-v2\n" +
+		"    state Outer {\n" +
+		"        state Inner {\n" +
+		"            A --> B\n" +
+		"        }\n" +
+		"    }\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	hasEdge := func(from, to, label string) bool {
+		for _, e := range b.edges {
+			if e.from == from && e.to == to && e.label == label {
+				return true
+			}
+		}
+		return false
+	}
+	assert.True(t, hasEdge("Outer", "Inner", "contains"), "Inner must be attributed to Outer, the composite open when Inner's own header is parsed")
+	assert.True(t, hasEdge("Inner", "A", "contains"), "A must be attributed to Inner, not Outer, once nesting has moved one level deeper")
+	assert.True(t, hasEdge("Inner", "B", "contains"))
+	assert.False(t, hasEdge("Outer", "A", "contains"), "A is not a DIRECT child of Outer — only Inner is")
+}
+
+func TestStateTranspiler_ClosingBrace_RestoresOuterCompositeAfterNestedCloses(t *testing.T) {
+	// A state declared AFTER a nested composite closes, but still inside the
+	// outer one, must attribute to the OUTER composite, not to the just-closed
+	// inner one and not to the top level — this is what proves the "}"
+	// handling restores the right stack entry rather than merely resetting to
+	// "".
+	source := "stateDiagram-v2\n" +
+		"    state Outer {\n" +
+		"        state Inner {\n" +
+		"            A --> B\n" +
+		"        }\n" +
+		"        C --> D\n" +
+		"    }\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	hasEdge := func(from, to, label string) bool {
+		for _, e := range b.edges {
+			if e.from == from && e.to == to && e.label == label {
+				return true
+			}
+		}
+		return false
+	}
+	assert.True(t, hasEdge("Outer", "C", "contains"))
+	assert.True(t, hasEdge("Outer", "D", "contains"))
+}
+
+// --- stateDiagram-v2 transpiler: notes skipped in both forms ---
+
+func TestStateTranspiler_SingleLineNote_Skipped(t *testing.T) {
+	source := "stateDiagram-v2\n" +
+		"    Active --> Done\n" +
+		`    note right of Active : this note must not create a node` + "\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	assert.Len(t, b.nodes, 2, "the single-line note must not add a third node")
+}
+
+func TestStateTranspiler_MultiLineNote_SkippedUntilEndNote(t *testing.T) {
+	source := "stateDiagram-v2\n" +
+		"    Active --> Done\n" +
+		"    note left of Active\n" +
+		"        this line is note body\n" +
+		"        A --> B\n" + // even a transition-shaped line inside the note body must not be parsed
+		"    end note\n" +
+		"    Done --> [*]\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	assert.NotContains(t, b.nodes, "A", "a transition-shaped line inside an open note must be swallowed as note body, not parsed")
+	assert.NotContains(t, b.nodes, "B")
+	require.Contains(t, b.nodes, "Done", "parsing must resume normally after \"end note\" closes the note")
+	require.Contains(t, b.nodes, stateEndKey, "the transition after the note must still be parsed")
+}
+
+// --- stateDiagram-v2 transpiler: ignored statements ---
+
+func TestStateTranspiler_IgnoredStatements_ClassDefStyleAccTitleDoNotCorruptDiagram(t *testing.T) {
+	source := "stateDiagram-v2\n" +
+		"    Active --> Done\n" +
+		"    classDef highlight fill:#f00\n" +
+		"    style Active fill:#fff\n" +
+		"    class Active highlight\n" +
+		"    accTitle: Lifecycle\n" +
+		"    title My State Diagram\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	assert.Len(t, b.nodes, 2, "only Active and Done may become nodes")
+}
+
+func TestStateTranspiler_ConcurrencySeparator_Ignored(t *testing.T) {
+	source := "stateDiagram-v2\n" +
+		"    state Active {\n" +
+		"        [*] --> NumLockOff\n" +
+		"        --\n" +
+		"        [*] --> CapsLockOff\n" +
+		"    }\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	assert.NotContains(t, b.nodes, "--")
+	require.Contains(t, b.nodes, "NumLockOff")
+	require.Contains(t, b.nodes, "CapsLockOff")
+}
+
+// --- stateDiagram-v2 transpiler: six verbatim corpus labels ---
+
+func TestStateTranspiler_SixVerbatimCorpusLabels_ShortenedForms(t *testing.T) {
+	// One transition label from each of the six real stateDiagram-v2 corpus
+	// files the plan's Overview counts ("stateDiagram-v2 6"). Each label is
+	// embedded in a full transition line and run through parseStateTransition
+	// then the shared mermaidEdgeLabel, exactly as flowchartBuilder.source
+	// would at emission time.
+	//
+	// Row 3 ("open · C1 (Request)") is the one label in this set that
+	// ALREADY carries a literal middle dot in its raw corpus text. The
+	// cut-at-paren step leaves "open · C1"; the space-to-middle-dot step then
+	// converts BOTH spaces surrounding that pre-existing dot too, yielding
+	// three consecutive dots rather than a single one. That is still safe —
+	// a run of "·" characters cannot bleed an arrow through it any more than
+	// one can — and it is the genuine, verified output of the existing
+	// shared mermaidEdgeLabel (unchanged since Task 2/3), not a
+	// stateDiagram-specific rule this task introduces.
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"publication-request.md: submit", "submit (pins version, starts workflow)", "submit"},
+		{"architecture-proposal.md: resolve", "resolve {outcome}  (act without claiming)", "resolve"},
+		{"workflow-policy-brain-sketch.md: open · C1", "open · C1 (Request)", "open···C1"},
+		{"live-copy.md: reattach", "reattach (rebase / keep-base)", "reattach"},
+		{"workflow-rest-layered/architecture.md: decision==approve", "decision==approve<br/>AND publicationDate in future", "decision==approve"},
+		{"four-eyes-api-interactions.md: resolve", "resolve (approve/reject/abort)", "resolve"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "A --> B : " + tc.input
+			_, _, label, ok := parseStateTransition(line)
+			require.True(t, ok)
+			assert.Equal(t, tc.want, mermaidEdgeLabel(label, mermaidLabelMaxRunes))
+		})
+	}
+}
+
 // --- transpileMermaid ---
 
 func TestTranspileMermaid_ClassDiagram_NowTranspilesToFlowchart(t *testing.T) {
@@ -853,10 +1160,26 @@ func TestTranspileMermaid_ClassDiagram_NowTranspilesToFlowchart(t *testing.T) {
 	assert.Contains(t, got, "n0[Foo]")
 }
 
-func TestTranspileMermaid_StateDiagramV2_RecognizedButNotHandled(t *testing.T) {
+func TestTranspileMermaid_StateDiagramV2_NowTranspilesToFlowchart(t *testing.T) {
+	// Task 2 pinned stateDiagram-v2 as "recognized but not handled" — that
+	// was only ever describing Task 2's deliberately temporary stub state
+	// (see classDiagram's equivalent pin above, replaced the same way in
+	// Task 3). Task 4 wires stateTranspiler in, so this same minimal source
+	// now DOES transpile; this test replaces the earlier "not handled" pin.
 	got, ok := transpileMermaid("stateDiagram-v2\n    [*] --> A", mermaidUnconstrainedWidth)
-	assert.False(t, ok)
-	assert.Empty(t, got)
+	require.True(t, ok)
+	assert.True(t, strings.HasPrefix(got, "flowchart TD\n"))
+	assert.Contains(t, got, "(start)")
+}
+
+func TestTranspileMermaid_StateDiagramWithoutV2Suffix_AlsoRecognized(t *testing.T) {
+	// Mermaid accepts both "stateDiagram" and "stateDiagram-v2" for the same
+	// grammar (the plan's Grammar section lists both) — transpileMermaid's
+	// switch must match both keywords, not just the "-v2" one every real
+	// corpus fence happens to use.
+	got, ok := transpileMermaid("stateDiagram\n    [*] --> A", mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.True(t, strings.HasPrefix(got, "flowchart TD\n"))
 }
 
 func TestTranspileMermaid_UnrecognizedKind_NotHandled(t *testing.T) {
