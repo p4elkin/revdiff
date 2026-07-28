@@ -692,13 +692,136 @@ are stubs that report not-handled.
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify every requirement in the Overview is implemented
-- [ ] verify each row of the Failure modes table by test or by inspection, and note which
-- [ ] run the full suite: `make test`
-- [ ] run `make lint` clean — the complexity and duplication ceilings are what this design was
+- [x] verify every requirement in the Overview is implemented
+- [x] verify each row of the Failure modes table by test or by inspection, and note which
+- [x] run the full suite: `make test`
+- [x] run `make lint` clean — the complexity and duplication ceilings are what this design was
       shaped around, so this is a real gate
-- [ ] check coverage of the new file against the project standard
-- [ ] confirm the Probe findings table has no empty cells
+- [x] check coverage of the new file against the project standard
+- [x] confirm the Probe findings table has no empty cells
+
+#### Verification record
+
+**Overview requirements, checked one by one:**
+
+- classDiagram fences now render as box art (not verbatim). Confirmed by
+  `TestRenderMermaidFences_ClassDiagram_NoLongerFallsBackVerbatim` and
+  `TestRenderMermaidSource_ClassDiagram_RendersRealBoxArt`
+  (`app/ui/mdpreview_transpile_test.go`).
+- stateDiagram-v2 fences now render as box art. Confirmed by
+  `TestRenderMermaidFences_StateDiagram_NoLongerFallsBackVerbatim` and
+  `TestRenderMermaidSource_StateDiagram_RendersRealBoxArt`.
+- erDiagram and gantt still fall back verbatim (the plan's scope line). Confirmed by
+  `TestRenderMermaidFences_ErDiagram_StillFallsBackVerbatim` and
+  `TestRenderMermaidFences_Gantt_StillFallsBackVerbatim`.
+- quadrantChart still falls back verbatim. Before this task it was only exercised at the
+  `mermaidDiagramKind` extraction level, not through the full fallback pipeline — added
+  `TestRenderMermaidFences_QuadrantChart_StillFallsBackVerbatim` to close that gap (it takes the
+  same shared `default:` branch in `transpileMermaid`, `app/ui/mdpreview_transpile.go:1632`, as the
+  now-adjacent erDiagram/gantt tests).
+- The 206 already-working fence types (`graph`, `flowchart`, `sequenceDiagram`) take a
+  byte-identical path through the new hook. Confirmed by
+  `TestRenderMermaidSource_Graph_ByteIdenticalToDirectRenderDiagram`,
+  `_Flowchart_...`, and `_SequenceDiagram_...`.
+- `renderMermaidFences` keeps its one-argument signature; width threads through
+  `mermaidPlaceholderDocument` to `renderMermaidBlock`/`renderMermaidSource`. Confirmed by
+  inspection: `app/ui/mdpreview.go:66-70` (unconstrained sentinel, unchanged signature) and
+  `app/ui/mdpreview.go:267-276` (`mermaidPlaceholderDocument` takes and forwards `paneWidth`), plus
+  `TestFlowchartBuilder_Source_AdaptiveCapUsesRealPaneWidth` and
+  `TestRenderMarkdownDocument_ClassDiagramArtSurvivesGlamourWithoutReflow` exercising the threaded
+  value end to end.
+- One-line hook at the call site. Confirmed by inspection: `app/ui/mdpreview.go:188` calls
+  `renderMermaidSource` instead of `mermaidcmd.RenderDiagram` directly (the line number moved from
+  173 to 188 once Task 2 added the `paneWidth` parameter to the surrounding function signature —
+  this plan's own Solution Overview section still cites the pre-Task-2 line number, which is stale
+  prose, not a checkbox item).
+
+**Failure modes table, row by row:**
+
+| # | condition | verified by |
+|---|---|---|
+| 1 | kind not recognized → original source, today's behaviour | test: `TestTranspileMermaid_UnrecognizedKind_NotHandled`, `TestRenderMermaidFences_ErDiagram_StillFallsBackVerbatim`, `_Gantt_...`, `_QuadrantChart_...` |
+| 2 | recognized kind, builder empty → original source, renderer rejects, verbatim | test (added this task — previously untested and the only two `if b.empty()` branches in `transpileMermaid` were uncovered): `TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled`, `_StateDiagram_...`, and full-pipeline `TestRenderMermaidFences_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim` |
+| 3 | recognized kind, some lines unparseable → those dropped, rest renders | test: `TestClassTranspiler_IgnoredStatements_NoteStyleClickClassDefDoNotCorruptDiagram`, `TestStateTranspiler_IgnoredStatements_ClassDefStyleAccTitleDoNotCorruptDiagram` |
+| 4 | transpile succeeds, render still errors → verbatim | inspection only. No adversarial input tried during this task's audit reaches this branch — the transpiler's exhaustive sanitizing (see "Sanitizing" tables) makes every emitted flowchart source provably valid to the vendored parser in every case exercised. The branch exists as defense in depth (`renderMermaidSource`'s `err != nil` check, `app/ui/mdpreview_transpile.go:1658`), not as a reachable behavior this task could reproduce |
+| 5 | panic in our code or theirs → existing `recover()`, verbatim | inspection only for the recover itself (no test forces an actual panic to prove `recover()` catches it) + test in the opposite direction: `TestRenderMermaidSource_AdversarialSources_NeverPanic` proves the known-hazardous inputs it tries do not need to rely on `recover()` at all, which is stronger evidence of robustness but not a direct test of the recover path |
+| 6 | render returns whitespace only → existing blank check, verbatim | inspection only. The check (`app/ui/mdpreview.go:189`) is shared, pre-existing code, identical regardless of diagram kind; not re-derived or modified by this plan, and no test in this file specifically forces a classDiagram/stateDiagram-v2 transpile to render as whitespace-only |
+| 7 | widest layout level 4+ nodes at 80-col pane → cap floors, clips | test: `TestMermaidLabelCap_AdaptiveTable_80ColumnPane` (k=4 case) at the formula level, plus the Probe findings table's row 1 measuring the real clip on the actual renderer |
+| 8 | 3+ parallel edges between one pair → renders, drops one label | test only proves no panic (`TestRenderMermaidSource_AdversarialSources_NeverPanic`'s "three parallel edges" case). The specific "drops one label" claim is verified only by the Probe findings intro paragraph (external throwaway probe program, Task 1), not by any test in this repo |
+| 9 | art wider than pane for any other reason → clipped, as today | inspection + pre-existing generic test (`TestRenderMarkdownDocument_NarrowWidth_ProseRespectsWidthArtOverflows`, `mdpreview_test.go`) — this is inherited clipping behavior, not diagram-type-specific, and predates this plan |
+
+**`make test`:** full suite passes, race detector on, 16 packages ok, 0 failures.
+
+**`make lint`:** `golangci-lint run` → `0 issues.`
+
+**Coverage of `app/ui/mdpreview_transpile.go` against the project standard:** the Makefile's
+`make test` target deletes `coverage.out`/`coverage_no_mocks.out` after printing them, so this task
+regenerated the profile manually (`go test -coverprofile=... ./...` then the same
+`grep`+`go tool cover -func` steps `make test` runs) to inspect per-function numbers for this one
+file. Before this task's fixes: 96.0% of statements covered (386/402), with several 0%-covered
+branches. After the fixes below: **98.8% of statements covered (397/402)**, 55 of 60 functions at
+100%, average per-function coverage ~99.0% — in line with (and mostly above) the rest of the
+`app/ui` package's own per-function numbers (e.g. `sgr.go:scan` 81.8%, `view.go:lineNumberSegment`
+90.9%, `vimmotion.go:repeatDiffAction` 91.7%), so this file is not an outlier against the project's
+existing standard.
+
+Real, plan-relevant gaps found and fixed (added tests, listed with the file:line of the branch each
+now covers):
+
+- `transpileMermaid`'s two `if b.empty() { return "", false }` branches
+  (`mdpreview_transpile.go:1621-1623`, `1628-1630`) were completely uncovered — this is also
+  Failure-modes row 2, which had zero test coverage anywhere before this task. Added
+  `TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled`,
+  `_StateDiagram_...`, and the full-pipeline `TestRenderMermaidFences_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim`.
+- `scanMermaidBlocks`'s unbalanced-extra-`}` branch (`mdpreview_transpile.go:673-674`) — explicitly
+  documented in the function's own doc comment, never tested. Added
+  `TestScanMermaidBlocks_UnbalancedExtraClosingBrace_SilentlyIgnored`.
+- `statementColonMember`'s stereotype-via-colon-form path (`Foo : <<interface>>`,
+  `mdpreview_transpile.go:1196-1199`) was 0% covered — the plan's Grammar section lists
+  "`<<interface>>` and other stereotypes" without restricting them to the block-body form, but only
+  the block-body path (`member`) had a test. Added
+  `TestClassTranspiler_ColonFormStereotype_HoistedAboveClassName`.
+- `statementColonMember`'s empty-key-after-style-suffix-strip branch (`mdpreview_transpile.go:1192-1194`)
+  and `parseClassDecl`'s matching empty-key branch (`mdpreview_transpile.go:835-837`) were both 0%
+  covered. Added `TestClassTranspiler_StatementColonMember_KeyAllStyleSuffixNoIdentifier_Dropped`
+  and `TestParseClassDecl_EmptyAfterStyleSuffixStrip_YieldsEmptyKey`.
+- stateDiagram's bare `state X <<fork/join/choice>>` declaration, reached through the top-level
+  `statement()` dispatch (not the composite-block `blockHeader` path), was never exercised
+  end-to-end — only `parseStateDecl` in isolation was tested, leaving `statement()`'s
+  `stateDeclFromStatement` branch (`mdpreview_transpile.go:1334-1337`) and `applyStateDecl`'s
+  annotation-append branch (`mdpreview_transpile.go:1359-1361`) both uncovered. Added
+  `TestStateTranspiler_BareStateDeclarationWithAnnotation_AppendsAnnotationLabelLine`.
+- `mermaidLabelCap`'s `k < 1` defensive clamp (`mdpreview_transpile.go:313-315`) was untested. Added
+  `TestMermaidLabelCap_KLessThanOne_ClampedToOne`.
+- quadrantChart's fallback (an explicit Overview claim) was untested at the `renderMermaidFences`
+  level. Added `TestRenderMermaidFences_QuadrantChart_StillFallsBackVerbatim`.
+
+Remaining uncovered branches, judged NOT material (all are defensive/dead-code paths unreachable
+through any real call site given the file's own documented invariants, not gaps in behavior this
+plan set out to cover):
+
+- `mermaidDiagramKind`'s `len(fields) == 0` guard (line 85-86): unreachable — a non-empty,
+  fully-trimmed string always yields at least one `strings.Fields` token.
+- `mermaidTruncate`'s `maxRunes <= len(ellipsis)` branch (line 138-140): every real caller passes
+  `mermaidLabelMinRunes` (16) or higher, or the 8-rune cardinality cap — never ≤3.
+  `mermaidTruncateRunesAndBytes`'s final `return ""` (line 285): unreachable given the same
+  invariant (capRunes ≥ 16, and a single UTF-8 rune is at most 4 bytes).
+- `parseClassRelation`'s `loc == nil` early return (line 1059-1061): unreachable via
+  `classTranspiler.statement`'s own call path, since the caller already checked
+  `classArrowPattern.MatchString(text)` before ever calling `statementRelation`; only reachable by a
+  direct unit-test call with a body containing no arrow at all, which none of this file's tests do.
+- `stateTranspiler.blockHeader`'s `ok == false` branch (line 1288-1290): unreachable in real
+  stateDiagram-v2 grammar — there is no other `{ ... }`-bracketed construct besides `state X { }`,
+  unlike classDiagram's namespace (which does exercise the equivalent branch on the class side via
+  `TestClassTranspiler_NamespaceAttribution_ClassInsideNamespaceSameAsTopLevel`).
+
+**Probe findings table:** re-inspected row by row (see the table in the "Probe findings" section
+above) — all five rows have non-empty `actual` cells with concrete measurements, and the blocker
+found in row 1 has its own resolved/decision section directly below the table. No empty cells.
+
+Net change from this task: 9 new tests added to `app/ui/mdpreview_transpile_test.go` (no production
+code changed — every gap found was a missing test for existing, already-correct behavior, not a
+behavioral defect). `make test` and `make lint` both pass after the additions.
 
 ### Task 7: [Final] Documentation and manual verification
 

@@ -252,6 +252,14 @@ func TestMermaidLabelCap_UnconstrainedSentinel_AlwaysReturnsCeiling(t *testing.T
 	assert.Equal(t, mermaidLabelMaxRunes, mermaidLabelCap(mermaidUnconstrainedWidth, 4, true))
 }
 
+func TestMermaidLabelCap_KLessThanOne_ClampedToOne(t *testing.T) {
+	// Defensive clamp: every real caller derives k from widestLevel(), which
+	// never returns less than 1, but mermaidLabelCap itself must not divide
+	// by a non-positive k if some future caller passes one directly.
+	assert.Equal(t, mermaidLabelCap(80, 1, true), mermaidLabelCap(80, 0, true))
+	assert.Equal(t, mermaidLabelCap(80, 1, true), mermaidLabelCap(80, -3, true))
+}
+
 // --- classInheritanceLabel (pinned so a future edit cannot silently change it) ---
 
 func TestClassInheritanceLabel_Value(t *testing.T) {
@@ -463,6 +471,25 @@ func TestScanMermaidBlocks_BlankLineSkipping(t *testing.T) {
 	}, h.calls)
 }
 
+func TestScanMermaidBlocks_UnbalancedExtraClosingBrace_SilentlyIgnored(t *testing.T) {
+	// A "}" with nothing currently open (more closes than opens) must not
+	// panic, underflow the brace stack, or reach the handler as a line — see
+	// scanMermaidBlocks's own doc comment: "a mismatched extra `}` (more
+	// closes than opens) is silently ignored rather than a defensive check
+	// every transpiler would otherwise need of its own."
+	source := "A --> B\n}\nC --> D"
+	h := &fakeBlockHandler{}
+
+	assert.NotPanics(t, func() {
+		scanMermaidBlocks(source, h)
+	})
+
+	assert.Equal(t, []recordedBlockCall{
+		{"line", "A --> B", 0},
+		{"line", "C --> D", 0},
+	}, h.calls, "the unbalanced \"}\" must never reach the handler as a line, and must not disturb what comes after it")
+}
+
 // --- classDiagram transpiler: classMemberText ---
 
 func TestClassMemberText_TrailingSpaceParenCommentary_Stripped(t *testing.T) {
@@ -593,6 +620,16 @@ func TestParseClassDecl_StyleSuffix_StrippedFromKeyAndTitle(t *testing.T) {
 	key, title := parseClassDecl("Animal:::highlight")
 	assert.Equal(t, "Animal", key)
 	assert.Equal(t, "Animal", title)
+}
+
+func TestParseClassDecl_EmptyAfterStyleSuffixStrip_YieldsEmptyKey(t *testing.T) {
+	// classDeclFromStatement's own doc comment: ok is false when
+	// "parseClassDecl could not extract a usable key (an empty declaration
+	// after the style-suffix strip)" — e.g. a malformed "class :::onlyStyle"
+	// line with no real identifier at all.
+	key, title := parseClassDecl(":::onlyStyle")
+	assert.Empty(t, key)
+	assert.Empty(t, title)
 }
 
 // --- classDiagram transpiler: parseClassRelation, the approved worked example ---
@@ -737,6 +774,39 @@ func TestClassTranspiler_Stereotype_HoistedAboveClassName(t *testing.T) {
 	assert.Equal(t, "«interface»", lines[0], "stereotype must render above the class name")
 	assert.Equal(t, "Shape", lines[1])
 	assert.Equal(t, "+area() double", lines[2])
+}
+
+func TestClassTranspiler_ColonFormStereotype_HoistedAboveClassName(t *testing.T) {
+	// Mirrors the test above but via the top-level "Shape : <<interface>>"
+	// colon form (statementColonMember) rather than a class-body line
+	// (member) — the plan's Grammar section lists "<<interface>> and other
+	// stereotypes" without restricting them to the block-body form, and
+	// statementColonMember has its own classStereotype check, separate from
+	// member's.
+	source := "classDiagram\n" +
+		"    class Shape\n" +
+		"    Shape : <<interface>>\n" +
+		"    Shape : +area() double\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newClassTranspiler(b))
+
+	n := b.nodes["Shape"]
+	require.NotNil(t, n)
+	assert.Equal(t, "«interface»", n.stereotype)
+	assert.Equal(t, []string{"+area() double"}, n.labelLines)
+}
+
+func TestClassTranspiler_StatementColonMember_KeyAllStyleSuffixNoIdentifier_Dropped(t *testing.T) {
+	// classStripStyleSuffix can reduce a key down to "" when the whole
+	// identifier in a "Key : text" colon-member line was nothing but a
+	// ":::styleName" suffix (a malformed line with no real class name) —
+	// statementColonMember must drop it rather than register a node keyed
+	// on the empty string.
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	c := newClassTranspiler(b)
+	c.statementColonMember(":::styleOnly", "+bar()")
+
+	assert.True(t, b.empty(), "no node may be registered when the key strips down to empty")
 }
 
 // --- classDiagram transpiler: colon member form, namespace attribution, ignored statements ---
@@ -954,6 +1024,27 @@ func TestParseStateDecl_Bare(t *testing.T) {
 	assert.Equal(t, "Active", key)
 	assert.Equal(t, "Active", title)
 	assert.Empty(t, annotation)
+}
+
+func TestStateTranspiler_BareStateDeclarationWithAnnotation_AppendsAnnotationLabelLine(t *testing.T) {
+	// "state Choice1 <<choice>>" as a standalone top-level statement, with no
+	// trailing "{" — so it goes through statement()'s stateDeclFromStatement
+	// branch and applyStateDecl's annotation append, never blockHeader. The
+	// plan's Grammar section lists bare "state X <<fork>>" as its own shape,
+	// distinct from the composite-block form that
+	// TestStateTranspiler_CompositeBlock_FlattensWithContainsEdge exercises;
+	// every other fork/join/choice test in this file only calls
+	// parseStateDecl directly, never through the full transpiler dispatch.
+	source := "stateDiagram-v2\n" +
+		"    state Choice1 <<choice>>\n" +
+		"    Draft --> Choice1\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	n := b.nodes["Choice1"]
+	require.NotNil(t, n)
+	assert.Equal(t, "Choice1", n.title)
+	assert.Equal(t, []string{"«choice»"}, n.labelLines)
 }
 
 // --- stateDiagram-v2 transpiler: direction dropped ---
@@ -1200,6 +1291,29 @@ func TestTranspileMermaid_UnrecognizedKind_NotHandled(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled(t *testing.T) {
+	// The plan's Failure modes table has a row for "recognized kind, builder
+	// empty" (a classDiagram whose every line is a comment or something
+	// classIgnoredStatement drops, so scanMermaidBlocks never dispatches a
+	// single node/edge into the builder). transpileMermaid must report "not
+	// handled" here exactly like an unrecognized kind, letting
+	// renderMermaidSource fall back to the ORIGINAL classDiagram source
+	// (which the vendored parser's "unsupported graph type" check then
+	// rejects — see TestRenderMermaidFences_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim
+	// for the full pipeline down to the verbatim fence text).
+	got, ok := transpileMermaid("classDiagram\n    %% just a comment\n", mermaidUnconstrainedWidth)
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestTranspileMermaid_StateDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled(t *testing.T) {
+	// Same "builder empty" failure mode as the classDiagram case above, for
+	// stateDiagram-v2.
+	got, ok := transpileMermaid("stateDiagram-v2\n    %% just a comment\n", mermaidUnconstrainedWidth)
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
 // --- renderMermaidSource ---
 
 func TestRenderMermaidSource_Graph_ByteIdenticalToDirectRenderDiagram(t *testing.T) {
@@ -1424,6 +1538,36 @@ func TestRenderMermaidFences_Gantt_StillFallsBackVerbatim(t *testing.T) {
 	got := renderMermaidFences(mdLines(doc))
 
 	assert.Equal(t, doc+"\n", got, "gantt is out of this patch's scope and must still fall back verbatim")
+}
+
+func TestRenderMermaidFences_QuadrantChart_StillFallsBackVerbatim(t *testing.T) {
+	// pins the deliberate scope decision: quadrantChart is the third kind the
+	// plan's Overview names as out of scope (alongside erDiagram and gantt
+	// above) and must still take the pre-existing fallback path. Before this
+	// test, quadrantChart was only ever exercised at the mermaidDiagramKind
+	// extraction level (TestMermaidDiagramKind_Table) — never through the
+	// full renderMermaidFences pipeline.
+	src := "quadrantChart\n    title Reach and engagement\n"
+	doc := "```mermaid\n" + src + "```"
+
+	got := renderMermaidFences(mdLines(doc))
+
+	assert.Equal(t, doc+"\n", got, "quadrantChart is out of this patch's scope and must still fall back verbatim")
+}
+
+func TestRenderMermaidFences_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim(t *testing.T) {
+	// Full pipeline for the Failure modes table's "recognized kind, builder
+	// empty" row (see TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled
+	// for the transpileMermaid-level pin): a classDiagram fence with nothing
+	// for the builder to use falls all the way back to the original fence
+	// text, exactly like an unrecognized kind — never an error, never a
+	// panic, never a half-rendered diagram.
+	src := "classDiagram\n    %% just a comment\n"
+	doc := "```mermaid\n" + src + "```"
+
+	got := renderMermaidFences(mdLines(doc))
+
+	assert.Equal(t, doc+"\n", got, "a classDiagram fence the builder never populates must fall back verbatim, not error or panic")
 }
 
 func TestRenderMermaidSource_ManyMemberClass_RendersWithinFortyCells(t *testing.T) {
