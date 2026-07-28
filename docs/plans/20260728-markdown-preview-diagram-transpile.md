@@ -421,11 +421,33 @@ the same renderer anyway.
 
 | # | behaviour | expected | actual |
 |---|---|---|---|
-| 1 | adaptive cap: fan-in with k=1..4 rendered at the computed cap | k=1,2,3 fit an 80-column pane; k=4 clips | |
-| 2 | long edge label on a leftmost-column edge — `startLabelCoord.x = middleX - len(label)/2` has no floor | no negative index panic | |
-| 3 | reserved column width for a 32-rune non-ASCII edge label | confirms the byte cap is needed, and its value | |
-| 4 | the real 19-member class end to end at the adaptive cap | `2n+3` rows, `W+4` cells, fits the pane | |
-| 5 | `owns·1·n` and `open·C1` under both TD and LR | no arrow bleed, no dash fill | |
+| 1 | adaptive cap: fan-in with k=1..4 rendered at the computed cap | k=1,2,3 fit an 80-column pane; k=4 clips | ⚠️ **CONTRADICTED for k=2 and k=3.** k=1: cap 32, box 36 cells, fits. k=2: cap 32 (clamped from 33), measured **85 cells** (plan's box-only arithmetic predicts 77) — clips. k=3: cap 19, measured **87 cells** (plan predicts 79) — clips. k=4: cap 16 (floor), measured 111 cells — clips, as expected, but at a larger margin than the plan's implied number. Root cause: the `k*(W+4)+(k-1)*5` formula counts only node-box width. It does not count the relation label ("implements", 10 chars + 3 padding = 13 cells) that a real classDiagram edge always carries except for the four unlabeled association/undirected rows. Reproduced independently in two separately-built probe programs; a control render of the same layouts with the edge label removed reproduces the plan's predicted 77/79/95 exactly, isolating the label as the cause. Rule found empirically: extra width over the box-only formula is `8 * floor(k/2)` cells (one widened inter-box gap per two implementors, 13 cells instead of the plain 5-cell gap), independent of the per-line cap. This means real classDiagram fan-ins (which do carry a relation label) clip starting at k=2, not k=4. This affects the edge-label policy the plan gates on Task 1 for — needs a design decision before Task 2 (see note below), not coded around here. |
+| 2 | long edge label on a leftmost-column edge — `startLabelCoord.x = middleX - len(label)/2` has no floor | no negative index panic | Confirmed, no contradiction. Tried: self-loop on a lone node (TD and LR), a backward sibling edge skipping a node (`C --> A`, TD and LR), and two bare-root siblings with a backward edge using 1-character boxes to minimize margin — all at the 32-rune cap and, as a further adversarial stress beyond the design's own limit, at 64 runes. All rendered without panic in every case. |
+| 3 | reserved column width for a 32-rune non-ASCII edge label | confirms the byte cap is needed, and its value | Confirmed. A 32-rune label of `≤` (3 bytes/rune, 96 bytes total) rendered at **101 cells** total diagram width, versus ~35-45 for a normal short label — confirming the byte reservation (`mapping_edge.go:161` uses `len(e.text)`, i.e. byte length) is the real cost driver, matching the plan's "~99 columns" estimate in the same ballpark. Truncating the same label to 32 **bytes** (not runes) yields 10 runes / 30 bytes and renders at a reasonable 35 cells — confirming the byte cap value: capping at `cap` bytes (the same numeric constant as the rune cap) is what actually binds for multi-byte edge-label content. |
+| 4 | the real 19-member class end to end at the adaptive cap | `2n+3` rows, `W+4` cells, fits the pane | Confirmed. Corpus source: `class Task` in `mx/api-overview/plans/workflow-task-separation/architecture-proposal.md`. Note: today's file has **18** member lines, not 19 as this plan's prose states elsewhere (likely drifted since this plan was drafted) — this does not change the result, since both 18 and 19 exceed `classMaxMembers = 12` and produce an identical capped shape. Hand-transpiled per the documented rules (strip trailing space-paren commentary, sanitize — a no-op here, no brackets/quotes/angle-brackets in this corpus text — truncate to the k=1 cap of 32 runes, cap at 12 members with an overflow row): 14 label lines (title + 12 capped members + `... +6 more`). Rendered box: height 31 rows (`2*14+3` ✓), width 36 cells (`32+4` ✓), fits the 80-column pane. Two such boxes side by side (fan-in to a shared downstream node, k=2 cap also 32) measure 77 cells, also fits — consistent with row 1's k=2 box-only prediction since this pairing uses an unlabeled edge to the downstream node. |
+| 5 | `owns·1·n` and `open·C1` under both TD and LR | no arrow bleed, no dash fill | Confirmed, no contradiction. Both labels render as one contiguous, unbroken run under both TD and LR (e.g. LR: `Repo ├─owns·1·n───►│ Item`) — the only dashes adjacent to the label are the ordinary box-connector strokes outside it, not gaps bleeding through the label itself, because replacing every space with `·` leaves no space for an arrow/dash character to show through. |
+
+⚠️ **Blocker found by Task 1, needs a decision before Task 2 starts.** Row 1 above contradicts the
+Overview's adaptive-cap width claim. The design says k=1, 2, and 3 implementors fit an 80-column
+pane and only k=4 clips. In practice, once the fan-in edges carry their designed relation label
+("implements", or "owns"/"has"/"uses" for the other labeled relations), k=2 already measures 85
+cells and k=3 measures 87 — both over 80. Only k=1 (a plain two-node chain, no fan-in) and the four
+unlabeled association/undirected relations match the plan's box-only arithmetic exactly.
+
+The cause is specific and narrow: a relation label reserves its own column width
+(`mapping_edge.go:161`, `lenLabel + 3`), and once a fan-in needs more than one edge to reach the
+shared target, at least one of those edges needs a sideways jog through a normally-narrow
+5-cell inter-box gap, widening that gap to the label's reserved width (13 cells for "implements").
+The plan's Technical Details section models node-box geometry precisely but does not fold this
+edge-routing cost into the per-k width story, so the "k=1,2,3 fit" conclusion needs re-checking
+against a k that also carries a real relation label, not just a box count.
+
+This is a design question, not a coding one, so it is left for the plan owner to resolve before
+Task 2 starts. Options that stay within the existing shape (not evaluated further here, since
+picking one is a design decision): fold the labeled-fan-in cost into the cap formula itself (a
+smaller effective cap once k >= 2 for labeled relations); shorten the relation-label constants
+below "implements" (10 characters); or accept that clipping now starts at k=2 for labeled
+relations and document it as a known limit rather than a design target of k=4.
 
 ## What Goes Where
 
@@ -446,18 +468,23 @@ code exists.
 - Create: `/private/tmp/claude-501/.../scratchpad/mermaid-probe/main.go` (outside the repo, so the
   working tree stays clean)
 
-- [ ] write a probe program that imports `mermaidcmd` from this module and renders one case per row
+- [x] write a probe program that imports `mermaidcmd` from this module and renders one case per row
       of the Probe findings table, each wrapped in its own `recover()` so one panic does not stop
-      the run
-- [ ] measure and print the maximum art width in cells for every row, not just the art
-- [ ] source row 4's input from the real 19-member class, found by grepping `~/dev` for
-      `classDiagram` fences
-- [ ] run it and fill in every `actual` cell in the Probe findings table above
-- [ ] confirm the adaptive cap formula `clamp((paneWidth - 5*(k-1)) / k - 4, 16, 32)` produces art
-      inside an 80-column pane for k=1, 2 and 3, and record the k=4 width
-- [ ] flag any row whose result contradicts the design, and stop for a decision rather than coding
-      around it
-- [ ] confirm `git status` in the repo is clean — the probe must leave no trace
+      the run — `/private/tmp/claude-501/-Users-sasha-dev-oss-revdiff/3ca44ced-2e51-4dbb-97e0-c4e65cb65f87/scratchpad/probe1/main.go`
+- [x] measure and print the maximum art width in cells for every row, not just the art
+- [x] source row 4's input from the real 19-member class, found by grepping `~/dev` for
+      `classDiagram` fences — found as `class Task` in
+      `mx/api-overview/plans/workflow-task-separation/architecture-proposal.md` (18 members in the
+      file as it stands today, see row 4 note above)
+- [x] run it and fill in every `actual` cell in the Probe findings table above
+- [x] confirm the adaptive cap formula `clamp((paneWidth - 5*(k-1)) / k - 4, 16, 32)` produces art
+      inside an 80-column pane for k=1, 2 and 3, and record the k=4 width — **k=1 confirmed (36
+      cells); k=2 and k=3 did NOT stay inside 80 columns once the fan-in edges carry their relation
+      label (85 and 87 cells measured); k=4 measured 111 cells.** See row 1 and the blocker note
+      above
+- [x] flag any row whose result contradicts the design, and stop for a decision rather than coding
+      around it — done, see the ⚠️ blocker note above; row 1 contradicts the design, rows 2-5 do not
+- [x] confirm `git status` in the repo is clean — the probe must leave no trace
 
 ### Task 2: Shared spine, dispatch, and the hook
 
