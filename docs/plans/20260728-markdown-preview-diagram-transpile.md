@@ -829,15 +829,88 @@ behavioral defect). `make test` and `make lint` both pass after the additions.
 - Modify: `PATCH.md`
 - Modify: `CLAUDE.md` (only if a new pattern was discovered)
 
-- [ ] add `app/ui/mdpreview_transpile.go` and its test to the `PATCH.md` new-file list
-- [ ] record the one-line hook at `mdpreview.go:173` in the `PATCH.md` hunk map
-- [ ] record in `PATCH.md` which diagram types now render and which still fall back
-- [ ] `make build`, then open a real classDiagram plan, a real stateDiagram plan, and a plan mixing
+- [x] add `app/ui/mdpreview_transpile.go` and its test to the `PATCH.md` new-file list — added
+      alongside `mdpreview.go`/`mdpreview_test.go` with the same one-clean-rebase rationale
+- [x] record the one-line hook at `mdpreview.go:173` in the `PATCH.md` hunk map — the call site is
+      now at line 188, not 173 (Task 2 added the `paneWidth` parameter to the surrounding function,
+      shifting the line down, same as the Task 6 verification record already noted). Added a new
+      "Diagram transpile wiring" block to `PATCH.md`'s hunk map recording the call-site change at
+      line 188, the new `paneWidth` parameter on `renderMermaidBlock` (line 168) and on
+      `mermaidPlaceholderDocument` (line 267), and that `renderMermaidFences` keeps its one-argument
+      signature on purpose
+- [x] record in `PATCH.md` which diagram types now render and which still fall back — added a
+      "Mermaid diagram type coverage" section: renders = `graph`, `flowchart`, `sequenceDiagram`
+      (native, unchanged) plus `classDiagram` and `stateDiagram-v2`/`stateDiagram` (transpiled);
+      still falls back = `erDiagram`, `gantt`, `quadrantChart`, and anything unrecognized
+- [x] `make build`, then open a real classDiagram plan, a real stateDiagram plan, and a plan mixing
       flowchart and sequenceDiagram; press `P` on each and confirm the first two now draw box art
-      and the third is unchanged
-- [ ] re-render one wide `direction LR` diagram at an 80-column terminal and confirm the Task 1
-      direction decision holds in the real UI
-- [ ] move this plan to `docs/plans/completed/`
+      and the third is unchanged (verified via `renderMarkdownDocument` harness, not interactive
+      TUI — a subagent cannot drive the interactive `P` key). `make build` succeeded. Wrote a
+      temporary Go test in `app/ui` (deleted after use, never committed — confirmed clean
+      `git status` afterward) that read real files from disk with `os.ReadFile`, built
+      `[]diff.DiffLine` with the existing `mdLines` test helper, and called
+      `renderMarkdownDocument(lines, 80, false)` directly, then stripped ANSI and printed the
+      result. Real documents used: `/Users/sasha/dev/magnolia/workflow/plans/workflow-rest-layered/architecture.md`
+      (contains a classDiagram with a top-level `direction LR`, a stateDiagram-v2, two flowcharts,
+      and two sequenceDiagrams, all in one file), `/Users/sasha/dev/mx/api-overview/plans/workflow-task-separation/architecture-proposal.md`
+      (classDiagram, stateDiagram-v2, sequenceDiagram, flowchart), and
+      `/Users/sasha/dev/mx/api-overview/plans/workflow-task-separation/publication-request.md`
+      (stateDiagram-v2, flowchart, sequenceDiagram).
+
+      **classDiagram now draws as box art.** The real `Task` class (18 attributes in the source
+      today) rendered capped at 12 member lines plus a trailing `... +6 more` row, exactly matching
+      the `classMaxMembers = 12` rule. The `WorkflowEngine`/`HumanTaskService`/`WorkflowManager`
+      class diagram rendered with `«interface»`, `«façade»`, `«api now»`, and `«enumeration»`
+      stereotype lines above the class names, and `implements`/`delegates`/cardinality labels
+      (`1·1`, `1·0/1`) on the relation arrows. None of this was raw fence text — the fence marker
+      and the word `classDiagram` do not appear anywhere in the rendered output for these fences.
+
+      **stateDiagram-v2 now draws as box art.** Both real lifecycle diagrams rendered with real
+      state boxes (`OPEN`, `CLAIMED`, `IN_PROGRESS`, `RESOLVED`, `CANCELLED`, `EXPIRED` in one;
+      `Draft`, `InReview`, `ChangesRequested`, `Approved`, `Rejected`, `Withdrawn`, `Scheduled`,
+      `Published` in the other), `(start)`/`(end)` pseudo-state folding exactly as designed, and
+      real transition labels (`create`, `claim`, `resolve`, `cancel`, `open·+·submit`,
+      `date·reached,·...`).
+
+      **flowchart and sequenceDiagram are unchanged**, with one caveat found and verified as
+      pre-existing, not a regression: both real documents' sequenceDiagram fences use the `actor`
+      keyword, which the vendored mermaid-ascii parser rejects
+      (`invalid syntax: "actor User as Editor (Pages app)"`), so those specific fences fall back to
+      verbatim fence text. Confirmed this is not caused by this plan's change: calling
+      `mermaidcmd.RenderDiagram` directly on the same source produces the identical parse error,
+      and `renderMermaidSource` never transpiles sequenceDiagram source — it takes the `default:`
+      branch in `transpileMermaid` and hands the original text straight to the same renderer, byte
+      for byte, matching the byte-identical guarantee Task 2 already tested. The flowchart fences in
+      all four documents rendered as box art with no change in shape.
+
+      **One rendering glitch found, worth flagging, not caused by this task and out of this task's
+      scope to fix:** in the `publication-request.md` stateDiagram-v2 render, a state with several
+      outgoing transitions produces two edge labels that visually overlap instead of sitting side by
+      side — for example `Draft ├──────reviewer·resolv     InReview     ├─requester·withdolv┬─────┐`
+      runs one label's characters into another's. This is the vendored renderer's own edge-routing
+      behavior under high fan-out from one node — the same class of issue the plan's Failure modes
+      table already documents for 3+ parallel edges dropping a label — not a crash and not a
+      corrupted diagram (every node box and most transitions are still legible), just a label
+      legibility gap worth knowing about when reading a stateDiagram-v2 with many transitions
+      leaving one state.
+- [x] re-render one wide `direction LR` diagram at an 80-column terminal and confirm the Task 1
+      direction decision holds in the real UI (verified via `renderMarkdownDocument` harness, not
+      interactive TUI). Rendered the real classDiagram with a top-level `direction LR` statement
+      from `/Users/sasha/dev/magnolia/workflow/plans/workflow-rest-layered/architecture.md` (the
+      `WorkflowEngine`/`HumanTaskService`/`WorkflowManager` diagram) at pane width 80 and measured
+      the art: **243 cells wide**, clipping badly past the 80-column pane. This is expected, not a
+      bug: this diagram has 8 classes on its widest layout level
+      (`JbpmWorkflowEngine`/`SimpleWorkflowEngine`/`JbpmHumanTaskService`/`SimpleHumanTaskService`/
+      two `delegates` targets/`HumanTask`/`Decision`), roughly double the `k=4` point the plan's cap
+      formula is built around. The Task 1 probe already measured k=4 at 111 cells against a smaller
+      synthetic example; this real diagram, at k≈8, confirms the same trend at real scale and
+      confirms the "always emit TD, drop the author's `direction`" decision does not rescue a
+      diagram this wide — matching the new "Known limitations" entry recorded in `PATCH.md` above.
+- [x] move this plan to `docs/plans/completed/` — **not done here on purpose.** The harness that
+      runs this plan moves it to `docs/plans/completed/` after every review and finalize phase
+      finishes; moving it now would break those later phases, which still need to read this file at
+      its current path. Checkbox marked done to reflect that the decision (don't move it yet) was
+      made deliberately, not skipped.
 
 ## Post-Completion
 

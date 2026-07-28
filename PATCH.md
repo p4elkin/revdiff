@@ -17,8 +17,13 @@ what the patch touches, and how to carry it onto a new upstream release.
 - `app/ui/mdpreview.go` — almost all patch logic lives here by design (fence extraction,
   glamour rendering, the preview-mode action allowlist, `toggleMarkdownPreview`).
 - `app/ui/mdpreview_test.go` — its tests.
+- `app/ui/mdpreview_transpile.go` — the classDiagram/stateDiagram-v2 → flowchart transpiler
+  (see `docs/plans/completed/20260728-markdown-preview-diagram-transpile.md`): diagram-kind
+  dispatch, the shared `flowchartBuilder`, both per-type transpilers, and the adaptive
+  label-width cap.
+- `app/ui/mdpreview_transpile_test.go` — its tests.
 
-A clean rebase never conflicts on these two files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these four files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -103,6 +108,28 @@ previewing — same root cause as Task 5, caught at three more sites):**
     pane during preview would desync the diff viewport's width geometry. It is a dim highlight,
     not a numeric tracker, so lower stakes than the status-bar segments, which ARE fixed.
 
+**Diagram transpile wiring (`classDiagram`/`stateDiagram-v2` rendering, added later — see
+`docs/plans/completed/20260728-markdown-preview-diagram-transpile.md`):**
+
+- `app/ui/mdpreview.go`
+  - line 168: `renderMermaidBlock` gained a fourth parameter, `paneWidth int` — the diff pane's
+    current width, needed by the transpiler's adaptive label-width cap
+  - line 188: `renderMermaidBlock` now calls `renderMermaidSource(strings.Join(body, "\n"),
+    paneWidth)` instead of `mermaidcmd.RenderDiagram(strings.Join(body, "\n"), nil)` directly —
+    the one-line hook that gives `mdpreview_transpile.go` a chance to rewrite a `classDiagram` or
+    `stateDiagram-v2` fence into `flowchart` source before it ever reaches the third-party
+    renderer
+  - line 267: `mermaidPlaceholderDocument` gained a matching `paneWidth int` parameter, passed
+    straight through to `renderMermaidBlock` at line 270
+  - `renderMermaidFences` (line 66) deliberately keeps its original one-argument signature: it
+    passes the `mermaidUnconstrainedWidth` sentinel internally, so its eleven existing callers in
+    `mdpreview_test.go` needed no change
+
+  Both edited lines live inside `app/ui/mdpreview.go`, which is itself one of the patch's own new
+  files (listed above) rather than an upstream one, so none of this carries rebase conflict risk
+  against upstream. It is recorded here anyway so the call flow between `mdpreview.go` and
+  `mdpreview_transpile.go` stays documented in one place, alongside every other hunk map entry.
+
 **Test-only, mechanical, not part of the feature itself:**
 
 - `app/keymap/keymap_test.go` — asserts `P` resolves to `ActionTogglePreview`
@@ -117,6 +144,21 @@ previewing — same root cause as Task 5, caught at three more sites):**
 the most likely to conflict — this was flagged going in (see the plan's "Patch discipline"
 section) and confirmed empirically: `model.go` alone carries 5 of the patch's 17 existing-file
 hunks (keymap 4, model 5, diffview 1, mouse 3, view 3, diffnav 1).
+
+## Mermaid diagram type coverage
+
+The vendored `mermaid-ascii` renderer only understands `graph`, `flowchart`, and
+`sequenceDiagram` natively. `mdpreview_transpile.go` widens that by rewriting two more types into
+`flowchart` source before handoff:
+
+- **Render as box art:** `graph`, `flowchart`, `sequenceDiagram` (native, unchanged path) plus
+  `classDiagram` and `stateDiagram-v2`/`stateDiagram` (transpiled to `flowchart` first — see
+  `transpileMermaid` in `mdpreview_transpile.go`).
+- **Still fall back to the verbatim fence text:** `erDiagram`, `gantt`, `quadrantChart`, and any
+  other/unrecognized fence language. Measured against a real corpus, these three types covered 45
+  non-rendering fences before the transpiler; `erDiagram` never actually appeared in that corpus.
+  This stays out of scope on purpose — see the diagram-transpile plan's Overview for the
+  fence-count breakdown.
 
 ## Known limitations
 
@@ -137,6 +179,13 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   diagram is a wider terminal.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
+- **A transpiled classDiagram/stateDiagram-v2 with 4 or more nodes on its widest layout level
+  clips at an 80-column pane.** The adaptive per-line label cap (`mermaidLabelCap` in
+  `mdpreview_transpile.go`) shrinks as that count (`k`) grows, but it floors at 16 runes per line
+  once `k >= 3`, so at `k >= 4` the box widths stop shrinking to compensate and the art runs wider
+  than the pane. This is the same "no horizontal panning" limitation as the item above — the
+  preview cannot scroll sideways to reveal the clipped part — it just also now applies to
+  transpiled diagrams, not only to hand-written wide `graph`/`flowchart` sources.
 
 ## Dependencies added
 
