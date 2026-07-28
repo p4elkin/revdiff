@@ -7,7 +7,6 @@ import (
 	"log"
 	"strings"
 
-	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
 	"github.com/charmbracelet/glamour"
 	glamourStyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/x/ansi"
@@ -55,8 +54,19 @@ func mdFencePrefix(s string) (rune, int) {
 // is dropped). A diagram that fails to render falls back to its original
 // fence text verbatim — see renderMermaidBlock. This function never returns
 // an error and never panics.
+//
+// renderMermaidBlock now takes a pane-width parameter (see its doc comment
+// and mdpreview_transpile.go's adaptive label cap), but this function's own
+// signature is deliberately left unchanged: it is called from eleven places
+// in mdpreview_test.go, none of which care about width, and every one of
+// this function's own callers only has a mermaid fence's rendered art to
+// verify, not a real viewport to size it against. mermaidUnconstrainedWidth
+// tells the adaptive cap to skip sizing entirely and behave like every other
+// (non-transpiled) diagram type: unconstrained.
 func renderMermaidFences(lines []diff.DiffLine) string {
-	return joinWithMermaidFences(lines, renderMermaidBlock)
+	return joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
+		return renderMermaidBlock(body, openLine, closeLine, mermaidUnconstrainedWidth)
+	})
 }
 
 // joinWithMermaidFences is the shared fence-scanning walk behind
@@ -146,11 +156,16 @@ func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string
 	return out.String()
 }
 
-// renderMermaidBlock renders one mermaid fence's body via mermaid-ascii. On
-// any parse/render error, or a panic inside the third-party renderer, it
-// falls back to the original fence text (opening line, body, closing line)
-// joined verbatim. This function never returns an error and never panics.
-func renderMermaidBlock(body []string, openLine, closeLine string) (result string) {
+// renderMermaidBlock renders one mermaid fence's body via mermaid-ascii,
+// through renderMermaidSource (mdpreview_transpile.go) so classDiagram and
+// stateDiagram-v2 fences get a chance to transpile to flowchart source
+// first. On any parse/render error, or a panic inside the third-party
+// renderer, it falls back to the original fence text (opening line, body,
+// closing line) joined verbatim. This function never returns an error and
+// never panics. paneWidth is the diff pane's current width, threaded down
+// for the adaptive label-width cap the transpiler uses — see
+// renderMermaidSource and mermaidLabelCap.
+func renderMermaidBlock(body []string, openLine, closeLine string, paneWidth int) (result string) {
 	verbatim := func() string {
 		var b strings.Builder
 		b.WriteString(openLine)
@@ -170,7 +185,7 @@ func renderMermaidBlock(body []string, openLine, closeLine string) (result strin
 		}
 	}()
 
-	rendered, err := mermaidcmd.RenderDiagram(strings.Join(body, "\n"), nil)
+	rendered, err := renderMermaidSource(strings.Join(body, "\n"), paneWidth)
 	if err != nil || strings.TrimSpace(rendered) == "" {
 		return verbatim()
 	}
@@ -242,10 +257,17 @@ func mermaidPlaceholder(nonce string, idx int) string {
 // buffer, including the contents of any fenced code block nested inside it,
 // so putting the art directly in doc (even inside a code fence) is not
 // sufficient to protect it.
-func mermaidPlaceholderDocument(lines []diff.DiffLine, nonce string) (doc string, arts []string) {
+//
+// paneWidth is passed straight through to renderMermaidBlock, which is what
+// makes the current viewport width available inside the classDiagram/
+// stateDiagram-v2 transpiler's adaptive label cap (see mermaidLabelCap in
+// mdpreview_transpile.go) — the whole reason this function has a width
+// parameter at all, since renderMarkdownDocument is the only caller that
+// ever has a real viewport width to offer.
+func mermaidPlaceholderDocument(lines []diff.DiffLine, nonce string, paneWidth int) (doc string, arts []string) {
 	idx := 0
 	doc = joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
-		arts = append(arts, renderMermaidBlock(body, openLine, closeLine))
+		arts = append(arts, renderMermaidBlock(body, openLine, closeLine, paneWidth))
 		placeholder := mermaidPlaceholder(nonce, idx)
 		idx++
 		return "\n" + placeholder + "\n\n"
@@ -326,7 +348,7 @@ func spliceMermaidArt(rendered, nonce string, arts []string) string {
 // PATCH.md "Known limitations".
 func renderMarkdownDocument(lines []diff.DiffLine, width int, noColors bool) string {
 	nonce := mermaidNonce()
-	doc, arts := mermaidPlaceholderDocument(lines, nonce)
+	doc, arts := mermaidPlaceholderDocument(lines, nonce, width)
 
 	w := max(width, mdPreviewMinWidth)
 

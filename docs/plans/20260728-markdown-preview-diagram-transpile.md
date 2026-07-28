@@ -534,46 +534,46 @@ are stubs that report not-handled.
 - Create: `app/ui/mdpreview_transpile_test.go`
 - Modify: `app/ui/mdpreview.go`
 
-- [ ] write failing tests for `mermaidDiagramKind`: a table over `graph`, `flowchart`,
+- [x] write failing tests for `mermaidDiagramKind`: a table over `graph`, `flowchart`,
       `sequenceDiagram`, `erDiagram`, `gantt`, `quadrantChart`, prose, leading blank lines, and
       leading `%%` comments
-- [ ] write failing tests for `mermaidSafeText`: one row per rule in the node-label table, plus a
+- [x] write failing tests for `mermaidSafeText`: one row per rule in the node-label table, plus a
       row pinning the deliberate non-action on parens, braces, and tildes, plus the ` & ` squeeze,
       plus a run of five colons collapsing to one and not to `:::`
-- [ ] write failing tests for `mermaidEdgeLabel`: cut at first `<br/>`, cut at first `(`, cut at
+- [x] write failing tests for `mermaidEdgeLabel`: cut at first `<br/>`, cut at first `(`, cut at
       first `{`, spaces becoming `·`, the byte cap binding before the rune cap on a non-ASCII label,
       hard truncation with no cut point, a label starting with a paren falling back to truncation,
       and an all-cut label yielding no label rather than an empty one
-- [ ] write failing tests for `mermaidTruncate` (rune-safe, ASCII ellipsis), `mermaidStripComment`,
+- [x] write failing tests for `mermaidTruncate` (rune-safe, ASCII ellipsis), `mermaidStripComment`,
       and `splitOnFirstColon` covering `A --> B : label`, `A --> B: label`, `Foo : +bar() void`,
       and a line with no colon
-- [ ] write failing tests for `mermaidLabelCap`: the clamp formula at k=1,2,3,4 for an 80-column
+- [x] write failing tests for `mermaidLabelCap`: the clamp formula at k=1,2,3,4 for an 80-column
       pane, the floor, the ceiling, and the unconstrained sentinel
-- [ ] write failing tests for `flowchartBuilder`: node id assignment in first-seen order, title and
+- [x] write failing tests for `flowchartBuilder`: node id assignment in first-seen order, title and
       stereotype ordering, label-line cap with the `... +K more` overflow row, edge dedup, `empty`,
       the emitted `source` shape, the level computation feeding k, and **declarations emitted in
       first-seen-as-edge-source order** pinned against a fan-in
-- [ ] write failing tests for `scanMermaidBlocks`: brace-stack nesting, transparent blocks, comment
+- [x] write failing tests for `scanMermaidBlocks`: brace-stack nesting, transparent blocks, comment
       stripping, blank skipping
-- [ ] implement `mermaidDiagramKind`, `mermaidStripComment`, `splitOnFirstColon`, `mermaidTruncate`,
+- [x] implement `mermaidDiagramKind`, `mermaidStripComment`, `splitOnFirstColon`, `mermaidTruncate`,
       `mermaidSafeText`, `mermaidEdgeLabel`, `mermaidLabelCap`
-- [ ] implement `flowchartBuilder` with `node` / `setTitle` / `setStereotype` / `addLabelLine` /
+- [x] implement `flowchartBuilder` with `node` / `setTitle` / `setStereotype` / `addLabelLine` /
       `addEdge` / `empty` / `source`, plus the level walk behind the adaptive cap, and the constants
       `mermaidLabelMaxRunes = 32`, `mermaidLabelMinRunes = 16`, `classMaxMembers = 12`,
       `classInheritanceLabel`
-- [ ] implement the `mermaidBlockHandler` interface — **`blockHeader` and `line` only**, since those
+- [x] implement the `mermaidBlockHandler` interface — **`blockHeader` and `line` only**, since those
       are the two methods both transpilers implement — and `scanMermaidBlocks`
-- [ ] implement `transpileMermaid` dispatch and `renderMermaidSource`, wrapping the third-party
+- [x] implement `transpileMermaid` dispatch and `renderMermaidSource`, wrapping the third-party
       error with `fmt.Errorf` for `wrapcheck`
-- [ ] thread the viewport width from `renderMarkdownDocument` through `mermaidPlaceholderDocument`
+- [x] thread the viewport width from `renderMarkdownDocument` through `mermaidPlaceholderDocument`
       to `renderMermaidBlock`, leaving `renderMermaidFences`'s one-argument signature alone so the
       eleven existing call sites in `mdpreview_test.go` stay untouched
-- [ ] change the one statement at `app/ui/mdpreview.go:173` to call `renderMermaidSource`
-- [ ] write a test asserting `graph`, `flowchart` and `sequenceDiagram` each render byte-identically
+- [x] change the one statement at `app/ui/mdpreview.go:173` to call `renderMermaidSource`
+- [x] write a test asserting `graph`, `flowchart` and `sequenceDiagram` each render byte-identically
       through `renderMermaidSource` and through a direct `mermaidcmd.RenderDiagram` call — this pins
       the 206-fence common path, and `sequenceDiagram` matters because it takes a different code
       path entirely (`diagram.go:14`)
-- [ ] run `make test` and `make lint` — both must pass before Task 3
+- [x] run `make test` and `make lint` — both must pass before Task 3
 
 ### Task 3: classDiagram transpiler
 
