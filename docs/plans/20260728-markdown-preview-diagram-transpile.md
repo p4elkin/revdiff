@@ -248,19 +248,38 @@ is **how many nodes share the widest layout level**, not the direction keyword.
 The cap is therefore computed per diagram, not fixed:
 
 ```
-k   = max number of nodes on any one layout level
-cap = clamp((paneWidth - 5*(k-1)) / k - 4, 16, 32)
+k        = max number of nodes on any one layout level
+labelJog = 8 * floor(k/2)   when any edge in the diagram carries a label, else 0
+cap      = clamp((paneWidth - 5*(k-1) - labelJog) / k - 4, 16, 32)
 ```
+
+The `labelJog` term is **measured, not derived** — see the Probe findings table. A relation label
+reserves its own column width (`mapping_edge.go:161`, `lenLabel + 3`), and once a fan-in needs more
+than one edge to reach a shared target, at least one edge jogs sideways through what is normally a
+5-cell inter-box gap, widening it. The probe measured the extra as exactly `8 * floor(k/2)` cells,
+independent of the per-line cap. Diagrams whose relations are all unlabeled — the four association
+and undirected rows in the arrow table — pay nothing, which is why the term is conditional.
 
 `k` is topology only, so it does not depend on the cap — compute `k`, then the cap, then render
 labels. No iteration. Levels come from a walk over the built graph: roots are the nodes never used
 as an edge target, and every other node sits one below its deepest parent. That matches the
 renderer's own level assignment once the declaration order below is fixed.
 
-Worked values at an 80-column pane: `k=1` gives 76, clamped to 32, full detail on a chain. `k=2`
-gives 33, clamped to 32, and two boxes measure 77 cells. `k=3` gives 19, and three boxes measure 79
-cells. `k=4` gives 12, raised to the floor of 16, and the diagram clips — recorded in the Failure
-modes table rather than pretended away.
+Worked values at an 80-column pane, with labeled relations (the common case), all cross-checked
+against the probe's measurements:
+
+| k | cap | art width | fits 80? |
+|---|---|---|---|
+| 1 | 32 (ceiling) | 36 | yes |
+| 2 | 29 | 79 | yes |
+| 3 | 16 (floor) | 78 | yes |
+| 4 | 16 (floor, formula wanted 8) | 111 | no, clips |
+
+So the clip boundary is `k=4`, the same as the original design intended — the first formula just
+reached it by ignoring a real cost. `k=3` now lands exactly on the floor, which means a
+three-implementor interface shows 16-rune member lines. That is tight but readable, and it is the
+honest trade for fitting the pane. `k=4` and above clips, recorded in the Failure modes table
+rather than pretended away.
 
 The upper clamp of 32 exists because past it the extra width buys little and boxes start to
 dominate the pane. The floor of 16 exists because below it a member line is all ellipsis.
@@ -427,7 +446,25 @@ the same renderer anyway.
 | 4 | the real 19-member class end to end at the adaptive cap | `2n+3` rows, `W+4` cells, fits the pane | Confirmed. Corpus source: `class Task` in `mx/api-overview/plans/workflow-task-separation/architecture-proposal.md`. Note: today's file has **18** member lines, not 19 as this plan's prose states elsewhere (likely drifted since this plan was drafted) — this does not change the result, since both 18 and 19 exceed `classMaxMembers = 12` and produce an identical capped shape. Hand-transpiled per the documented rules (strip trailing space-paren commentary, sanitize — a no-op here, no brackets/quotes/angle-brackets in this corpus text — truncate to the k=1 cap of 32 runes, cap at 12 members with an overflow row): 14 label lines (title + 12 capped members + `... +6 more`). Rendered box: height 31 rows (`2*14+3` ✓), width 36 cells (`32+4` ✓), fits the 80-column pane. Two such boxes side by side (fan-in to a shared downstream node, k=2 cap also 32) measure 77 cells, also fits — consistent with row 1's k=2 box-only prediction since this pairing uses an unlabeled edge to the downstream node. |
 | 5 | `owns·1·n` and `open·C1` under both TD and LR | no arrow bleed, no dash fill | Confirmed, no contradiction. Both labels render as one contiguous, unbroken run under both TD and LR (e.g. LR: `Repo ├─owns·1·n───►│ Item`) — the only dashes adjacent to the label are the ordinary box-connector strokes outside it, not gaps bleeding through the label itself, because replacing every space with `·` leaves no space for an arrow/dash character to show through. |
 
-⚠️ **Blocker found by Task 1, needs a decision before Task 2 starts.** Row 1 above contradicts the
+### ✅ Blocker from row 1 — resolved before Task 2
+
+**Decision: fold the measured cost into the cap formula.** The `labelJog = 8 * floor(k/2)` term is
+now part of the formula in the "width cap is adaptive" section above, conditional on the diagram
+having any labeled relation. That restores the intended clip boundary of `k=4` and gives caps of
+32 / 29 / 16 / floor for k = 1 / 2 / 3 / 4, measured at 36 / 79 / 78 / 111 cells.
+
+Rejected: shortening the relation-label constants below `implements`, which would trade a readable
+label for a few cells and still not fix `k=4`; and accepting `k=2` as the clip boundary, which
+would make three quarters of real class diagrams clip rather than one quarter.
+
+Also noted from row 4: the corpus class this plan calls "19-member" has 18 members today. It has
+drifted since the plan was drafted. The arithmetic is unchanged, since both counts exceed the
+12-member cap and produce the same capped shape. Prose elsewhere in this plan still says 19; treat
+that as the historical figure, not a test fixture.
+
+The original blocker text follows for the record.
+
+⚠️ **Blocker found by Task 1 (RESOLVED — see above).** Row 1 above contradicts the
 Overview's adaptive-cap width claim. The design says k=1, 2, and 3 implementors fit an 80-column
 pane and only k=4 clips. In practice, once the fan-in edges carry their designed relation label
 ("implements", or "owns"/"has"/"uses" for the other labeled relations), k=2 already measures 85
