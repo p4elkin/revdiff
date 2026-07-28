@@ -581,35 +581,35 @@ are stubs that report not-handled.
 - Modify: `app/ui/mdpreview_transpile.go`
 - Modify: `app/ui/mdpreview_transpile_test.go`
 
-- [ ] write failing test `TestClassMemberText_TrailingSpaceParenCommentary_Stripped` — a table over
+- [x] write failing test `TestClassMemberText_TrailingSpaceParenCommentary_Stripped` — a table over
       all eight verbatim corpus member lines with expected output. Highest-value test in the plan
-- [ ] write failing test `TestClassMemberText_MethodArgList_NotStripped` — `+bar() void` and
+- [x] write failing test `TestClassMemberText_MethodArgList_NotStripped` — `+bar() void` and
       `splitForCreate/Update/Replace()` survive intact, pinning the space-paren rule against a
       regression to the blunt first-paren rule
-- [ ] write failing test `TestClassMemberText_PipeInMemberLine_ReplacedWithSlash`
-- [ ] write failing tests for `parseClassDecl` over all four `class ...` shapes, including the
+- [x] write failing test `TestClassMemberText_PipeInMemberLine_ReplacedWithSlash`
+- [x] write failing tests for `parseClassDecl` over all four `class ...` shapes, including the
       bracket alias with its quotes and brackets consumed and its parenthetical **kept** (title
       rule, not member rule), and generics keeping their tildes
-- [ ] write failing test that `class Animal:::highlight` yields the key `Animal`, and that a
+- [x] write failing test that `class Animal:::highlight` yields the key `Animal`, and that a
       relation naming `Animal` resolves to that same node rather than creating a second box
-- [ ] write failing test that a classDiagram `direction` statement is dropped and the emitted
+- [x] write failing test that a classDiagram `direction` statement is dropped and the emitted
       header is always `flowchart TD`
-- [ ] write failing test that relations resolve by key, not alias
-- [ ] write failing test for the approved `Renderer <|-- Git` giving `Git -->|implements| Renderer`
-- [ ] write failing table test over all fourteen relation arrows covering label and direction
-- [ ] write failing tests for cardinality normalization, and for a flipped arrow flipping the
+- [x] write failing test that relations resolve by key, not alias
+- [x] write failing test for the approved `Renderer <|-- Git` giving `Git -->|implements| Renderer`
+- [x] write failing table test over all fourteen relation arrows covering label and direction
+- [x] write failing tests for cardinality normalization, and for a flipped arrow flipping the
       cardinality order
-- [ ] write failing test that an explicit `: label` overrides the table default while the
+- [x] write failing test that an explicit `: label` overrides the table default while the
       cardinality suffix is still appended
-- [ ] write failing test that the stereotype is hoisted above the class name as `«interface»`
-- [ ] write failing tests for the colon member form, namespace attribution, and note/style lines
+- [x] write failing test that the stereotype is hoisted above the class name as `«interface»`
+- [x] write failing tests for the colon member form, namespace attribution, and note/style lines
       being ignored
-- [ ] write failing test `TestTranspileClassDiagram_NineteenMembers_CappedWithOverflowRow` —
+- [x] write failing test `TestTranspileClassDiagram_NineteenMembers_CappedWithOverflowRow` —
       exactly 12 member lines plus `... +7 more`
-- [ ] implement `classTranspiler` with `blockHeader` / `line` / `statement` / `member`, plus
+- [x] implement `classTranspiler` with `blockHeader` / `line` / `statement` / `member`, plus
       `parseClassDecl`, `parseClassRelation`, `classArrow`, `classCardinality`, `classMemberText`,
       `classStereotype`, and the `:::suffix` strip shared by the declaration and relation parsers
-- [ ] run `make test` and `make lint` — both must pass before Task 4
+- [x] run `make test` and `make lint` — both must pass before Task 4
 
 ### Task 4: stateDiagram-v2 transpiler
 

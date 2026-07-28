@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -451,12 +452,405 @@ func TestScanMermaidBlocks_BlankLineSkipping(t *testing.T) {
 	}, h.calls)
 }
 
+// --- classDiagram transpiler: classMemberText ---
+
+func TestClassMemberText_TrailingSpaceParenCommentary_Stripped(t *testing.T) {
+	// All eight lines are verbatim from real corpus classDiagram fences (see
+	// the plan's "Keeping boxes readable" section): five carry genuine
+	// trailing commentary that must be stripped (from the 18-member `Task`
+	// class in
+	// mx/api-overview/plans/workflow-task-separation/architecture-proposal.md,
+	// the same corpus source the plan's Probe finding #4 measures), and
+	// three are method signatures whose own "()" has no space before it at
+	// all — so the space-paren rule must leave them completely untouched
+	// (two from mx/magnolia-content-api/adrs/024-generalized-reference-resources.md,
+	// plus the plan's own canonical "+bar() void" example, echoed
+	// verbatim from a real corpus classDiagram in
+	// keen-noodling-russell.md's `splitForCreate/Update/Replace()`). This is
+	// the exact three-of-eight split the plan's derivation calls out: "the
+	// blunt rule is wrong on three".
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"trailing commentary: our opaque id", `+id : String  (our opaque id)`, "+id : String"},
+		{"trailing commentary: enum-like values", `+type : String  (approval | review | checklist | generic | custom)`, "+type : String"},
+		{"trailing commentary: nullable", `+assignee : String  (nullable)`, "+assignee : String"},
+		{"trailing commentary: nullable (second field)", `+dueDate : Instant  (nullable)`, "+dueDate : Instant"},
+		{"trailing commentary: em-dash explanation", `+workflow : WorkflowRef  (NULLABLE — correlation only)`, "+workflow : WorkflowRef"},
+		{"method with return type: no space before paren", "+bar() void", "+bar() void"},
+		{"method group with no args: no space before paren", "splitForCreate/Update/Replace()", "splitForCreate/Update/Replace()"},
+		{"method with return type: real corpus", "+token() String", "+token() String"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, classMemberText(tc.input))
+		})
+	}
+}
+
+func TestClassMemberText_MethodArgList_NotStripped(t *testing.T) {
+	assert.Equal(t, "+bar() void", classMemberText("+bar() void"),
+		"the blunt \"cut at the first '('\" rule would wrongly truncate this to \"+bar\"")
+	assert.Equal(t, "splitForCreate/Update/Replace()", classMemberText("splitForCreate/Update/Replace()"),
+		"the blunt rule would wrongly clip the trailing \"()\" off this method group")
+}
+
+func TestClassMemberText_PipeInMemberLine_ReplacedWithSlash(t *testing.T) {
+	// Verbatim from the plan's "Declaration order" section: a real member
+	// line whose pipe must survive as a slash, not vanish or corrupt the
+	// emitted flowchart source.
+	assert.Equal(t, "+kind : content/asset/uri", classMemberText("+kind : content|asset|uri"))
+}
+
+// --- classDiagram transpiler: classStereotype ---
+
+func TestClassStereotype_Table(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		want   string
+		wantOK bool
+	}{
+		{"interface", "<<interface>>", "«interface»", true},
+		{"extra internal spacing", "<< abstract >>", "«abstract»", true},
+		{"not a stereotype", "+bar() void", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := classStereotype(tc.input)
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// --- classDiagram transpiler: classSplitTrailingLabel ---
+
+func TestClassSplitTrailingLabel_SkipsStyleSuffixColonRuns(t *testing.T) {
+	// Both operands carry a ":::style" suffix (a run of 3 colons each); the
+	// real trailing label separator is the single lone colon before
+	// "bites". A naive first-colon cut (splitOnFirstColon) would instead
+	// split inside the FIRST ":::style" run.
+	body, label, ok := classSplitTrailingLabel(`Dog:::style --> Cat:::style2 : bites`)
+	require.True(t, ok)
+	assert.Equal(t, "Dog:::style --> Cat:::style2", body)
+	assert.Equal(t, "bites", label)
+}
+
+func TestClassSplitTrailingLabel_NoLabel(t *testing.T) {
+	body, label, ok := classSplitTrailingLabel("A --> B")
+	assert.False(t, ok)
+	assert.Equal(t, "A --> B", body)
+	assert.Empty(t, label)
+}
+
+// --- classDiagram transpiler: classIgnoredStatement ---
+
+func TestClassIgnoredStatement_Lollipop(t *testing.T) {
+	assert.True(t, classIgnoredStatement("Class1 ()-- Class2"))
+	assert.False(t, classIgnoredStatement("A --> B"))
+}
+
+// --- classDiagram transpiler: parseClassDecl ---
+
+func TestParseClassDecl_Bare(t *testing.T) {
+	key, title := parseClassDecl("Foo")
+	assert.Equal(t, "Foo", key)
+	assert.Equal(t, "Foo", title)
+}
+
+func TestParseClassDecl_BracketAlias_QuotesAndBracketsConsumed_ParentheticalKept(t *testing.T) {
+	// Verbatim shape from a real corpus classDiagram (a design plan's
+	// before/after diagram, keen-noodling-russell.md): the bracket alias's
+	// own parenthetical must survive, because the space-paren strip is a
+	// MEMBER rule, not a title rule.
+	key, title := parseClassDecl(`VariantSplitter_OLD["VariantSplitter (before: 1680 lines)"]`)
+	assert.Equal(t, "VariantSplitter_OLD", key)
+	assert.Equal(t, "VariantSplitter (before: 1680 lines)", title,
+		"the bracket alias's parenthetical must survive — the space-paren strip only applies to members")
+}
+
+func TestParseClassDecl_Generic_TildeKeptVerbatim(t *testing.T) {
+	key, title := parseClassDecl("Repo~T~")
+	assert.Equal(t, "Repo~T~", key)
+	assert.Equal(t, "Repo~T~", title)
+}
+
+func TestParseClassDecl_StyleSuffix_StrippedFromKeyAndTitle(t *testing.T) {
+	key, title := parseClassDecl("Animal:::highlight")
+	assert.Equal(t, "Animal", key)
+	assert.Equal(t, "Animal", title)
+}
+
+// --- classDiagram transpiler: parseClassRelation, the approved worked example ---
+
+func TestParseClassRelation_RendererImplementsGit_Example(t *testing.T) {
+	fromKey, toKey, word, cardinalitySuffix, ok := parseClassRelation("Renderer <|-- Git")
+	require.True(t, ok)
+	assert.Equal(t, "Git", fromKey)
+	assert.Equal(t, "Renderer", toKey)
+	assert.Equal(t, "implements", word)
+	assert.Empty(t, cardinalitySuffix)
+}
+
+func TestClassTranspiler_RendererImplementsGit_EmittedSourceUsesFlippedSyntheticEdge(t *testing.T) {
+	// Node ids in the emitted flowchart source are always synthetic (n0,
+	// n1, ...), never the real class name — see flowchartBuilder's doc
+	// comment — so "Git -->|implements| Renderer" shows up as synthetic ids
+	// in that SAME flipped order, not as the literal class names. "Git" is
+	// declared first (n0) because declarationOrder emits edge SOURCES
+	// before their targets, and the emitted edge is source-to-target.
+	source := "classDiagram\n    Renderer <|-- Git\n"
+	got, ok := transpileMermaid(source, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.Contains(t, got, "n0[Git]")
+	assert.Contains(t, got, "n1[Renderer]")
+	assert.Contains(t, got, "n0 -->|implements| n1")
+}
+
+// --- classDiagram transpiler: parseClassRelation, all fourteen arrows ---
+
+func TestParseClassRelation_AllFourteenArrows_Table(t *testing.T) {
+	tests := []struct {
+		arrow    string
+		wantFrom string
+		wantTo   string
+		wantWord string
+	}{
+		{"<|--", "B", "A", "implements"},
+		{"--|>", "A", "B", "implements"},
+		{"<|..", "B", "A", "implements"},
+		{"..|>", "A", "B", "implements"},
+		{"*--", "A", "B", "owns"},
+		{"--*", "B", "A", "owns"},
+		{"o--", "A", "B", "has"},
+		{"--o", "B", "A", "has"},
+		{"-->", "A", "B", ""},
+		{"<--", "B", "A", ""},
+		{"..>", "A", "B", "uses"},
+		{"<..", "B", "A", "uses"},
+		{"--", "A", "B", ""},
+		{"..", "A", "B", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.arrow, func(t *testing.T) {
+			fromKey, toKey, word, _, ok := parseClassRelation("A " + tc.arrow + " B")
+			require.True(t, ok)
+			assert.Equal(t, tc.wantFrom, fromKey)
+			assert.Equal(t, tc.wantTo, toKey)
+			assert.Equal(t, tc.wantWord, word)
+		})
+	}
+}
+
+// --- classDiagram transpiler: classCardinality ---
+
+func TestClassCardinality_Table(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{"1", "1"},
+		{"0..1", "0/1"},
+		{"1..*", "1+"},
+		{"1..n", "1+"},
+		{"*", "n"},
+		{"n", "n"},
+		{"0..*", "n"},
+		{"0..n", "n"},
+		{"many", "n"},
+		{"?", "?"},                            // not in the table: sanitized (no-op here) and left as-is
+		{strings.Repeat("x", 12), "xxxxx..."}, // not in the table: sanitized (no-op) then capped at 8 runes
+	}
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			assert.Equal(t, tc.want, classCardinality(tc.raw))
+		})
+	}
+}
+
+func TestParseClassRelation_CardinalityOrder_FlipsWithArrow(t *testing.T) {
+	// A non-flipping arrow: the pair stays in left-to-right source order.
+	_, _, _, suffix, ok := parseClassRelation(`Task "1" --> "0..1" WorkflowRef`)
+	require.True(t, ok)
+	assert.Equal(t, "1 0/1", suffix)
+
+	// A flipping arrow (<|--): the emitted edge runs right-to-left, so the
+	// cardinality pair must flip too, or the FROM side would report the
+	// WRONG end's multiplicity.
+	_, _, _, flippedSuffix, ok := parseClassRelation(`A "1" <|-- "0..1" B`)
+	require.True(t, ok)
+	assert.Equal(t, "0/1 1", flippedSuffix)
+}
+
+func TestClassTranspiler_ExplicitLabelOverridesTableDefault_CardinalitySuffixStillAppended(t *testing.T) {
+	fromKey, toKey, word, suffix, ok := parseClassRelation(`A "1" --> "n" B`)
+	require.True(t, ok)
+	assert.Equal(t, "A", fromKey)
+	assert.Equal(t, "B", toKey)
+	assert.Empty(t, word, "the plain association arrow carries no table default")
+	assert.Equal(t, "1 n", suffix)
+
+	body, explicit, hasExplicit := classSplitTrailingLabel(`A "1" --> "n" B : mentions`)
+	require.True(t, hasExplicit)
+	assert.Equal(t, "mentions", explicit)
+
+	fromKey2, toKey2, word2, suffix2, ok2 := parseClassRelation(body)
+	require.True(t, ok2)
+	assert.Equal(t, fromKey, fromKey2)
+	assert.Equal(t, toKey, toKey2)
+	assert.Empty(t, word2)
+	assert.Equal(t, suffix, suffix2)
+	assert.Equal(t, "mentions 1 n", classJoinLabelParts(explicit, suffix2),
+		"the explicit label replaces the word, but the cardinality suffix must still be appended")
+}
+
+// --- classDiagram transpiler: stereotype hoisted above the class name ---
+
+func TestClassTranspiler_Stereotype_HoistedAboveClassName(t *testing.T) {
+	source := "classDiagram\n" +
+		"    class Shape {\n" +
+		"        <<interface>>\n" +
+		"        +area() double\n" +
+		"    }\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newClassTranspiler(b))
+
+	n := b.nodes["Shape"]
+	require.NotNil(t, n)
+	assert.Equal(t, "«interface»", n.stereotype)
+	lines := n.renderLabelLines(mermaidLabelMaxRunes)
+	require.Len(t, lines, 3)
+	assert.Equal(t, "«interface»", lines[0], "stereotype must render above the class name")
+	assert.Equal(t, "Shape", lines[1])
+	assert.Equal(t, "+area() double", lines[2])
+}
+
+// --- classDiagram transpiler: colon member form, namespace attribution, ignored statements ---
+
+func TestClassTranspiler_ColonMemberForm_NoBlockNeeded(t *testing.T) {
+	// Verbatim shape from a real corpus classDiagram
+	// (magnolia/feature-toggles/ClassDiagram.mmd): "FeatureToggles" is never
+	// declared with a "class FeatureToggles" statement anywhere in that
+	// file — it only ever appears as a relation endpoint and via the
+	// colon-member form, so ensureTitle's fallback is what gives the box a
+	// readable title at all.
+	source := "classDiagram\n" +
+		"    FeatureTogglesProvider --> FeatureToggles : provides\n" +
+		"    FeatureToggles : +isEnabled()\n" +
+		"    FeatureToggles : +enable()\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newClassTranspiler(b))
+
+	n := b.nodes["FeatureToggles"]
+	require.NotNil(t, n)
+	assert.Equal(t, "FeatureToggles", n.title)
+	assert.Equal(t, []string{"+isEnabled()", "+enable()"}, n.labelLines)
+}
+
+func TestClassTranspiler_NamespaceAttribution_ClassInsideNamespaceSameAsTopLevel(t *testing.T) {
+	source := "classDiagram\n" +
+		"    namespace Ns {\n" +
+		"        class Foo {\n" +
+		"            +bar() void\n" +
+		"        }\n" +
+		"    }\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newClassTranspiler(b))
+
+	n := b.nodes["Foo"]
+	require.NotNil(t, n)
+	assert.Equal(t, "Foo", n.title)
+	assert.Equal(t, []string{"+bar() void"}, n.labelLines)
+	assert.Len(t, b.nodes, 1, "the namespace itself must never become a node")
+}
+
+func TestClassTranspiler_IgnoredStatements_NoteStyleClickClassDefDoNotCorruptDiagram(t *testing.T) {
+	source := "classDiagram\n" +
+		"    class Foo\n" +
+		`    note for Foo "some note: with a colon"` + "\n" +
+		"    style Foo fill:#fff\n" +
+		"    classDef highlight fill:#f00\n" +
+		"    click Foo call callback()\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newClassTranspiler(b))
+
+	assert.Len(t, b.nodes, 1, "only the real \"class Foo\" declaration may produce a node")
+	require.Contains(t, b.nodes, "Foo")
+	assert.Empty(t, b.nodes["Foo"].labelLines)
+}
+
+// --- classDiagram transpiler: style suffix vs. key resolution ---
+
+func TestClassTranspiler_StyleSuffixDeclaration_RelationResolvesToSameNode(t *testing.T) {
+	source := "classDiagram\n" +
+		"    class Animal:::highlight\n" +
+		"    Zoo --> Animal\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newClassTranspiler(b))
+
+	require.Contains(t, b.nodes, "Animal")
+	assert.Len(t, b.nodes, 2,
+		"the relation must resolve \"Animal\" to the SAME node as the declaration, not create a second box")
+}
+
+func TestClassTranspiler_RelationResolvesByKeyNotAlias(t *testing.T) {
+	source := "classDiagram\n" +
+		`    class Foo["Display Name"]` + "\n" +
+		"    Foo --> Bar\n"
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newClassTranspiler(b))
+
+	require.Contains(t, b.nodes, "Foo")
+	assert.Equal(t, "Display Name", b.nodes["Foo"].title)
+	assert.NotContains(t, b.nodes, "Display Name",
+		"the relation must key off \"Foo\" (the declaration's identifier), never its display alias")
+}
+
+// --- classDiagram transpiler: direction dropped ---
+
+func TestTranspileClassDiagram_DirectionStatement_DroppedHeaderAlwaysFlowchartTD(t *testing.T) {
+	source := "classDiagram\n" +
+		"    direction LR\n" +
+		"    class A\n" +
+		"    class B\n" +
+		"    A --> B\n"
+	got, ok := transpileMermaid(source, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.True(t, strings.HasPrefix(got, "flowchart TD\n"))
+	assert.NotContains(t, got, "direction")
+}
+
+// --- classDiagram transpiler: classMaxMembers overflow row, end to end ---
+
+func TestTranspileClassDiagram_NineteenMembers_CappedWithOverflowRow(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("classDiagram\n    class Big {\n")
+	for i := 1; i <= 19; i++ {
+		fmt.Fprintf(&body, "        +m%d : String\n", i)
+	}
+	body.WriteString("    }\n")
+
+	got, ok := transpileMermaid(body.String(), mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.Contains(t, got, "+m12 : String")
+	assert.NotContains(t, got, "m13", "the 13th member and beyond must collapse into the overflow row")
+	assert.Contains(t, got, "... +7 more")
+}
+
 // --- transpileMermaid ---
 
-func TestTranspileMermaid_ClassDiagram_RecognizedButNotHandled(t *testing.T) {
+func TestTranspileMermaid_ClassDiagram_NowTranspilesToFlowchart(t *testing.T) {
+	// Task 2 pinned classDiagram as "recognized but not handled" — that was
+	// only ever describing Task 2's deliberately temporary stub state. Task
+	// 3 wires classTranspiler in, so this same minimal source now DOES
+	// transpile; this test replaces the earlier "not handled" pin.
 	got, ok := transpileMermaid("classDiagram\n    class Foo", mermaidUnconstrainedWidth)
-	assert.False(t, ok)
-	assert.Empty(t, got)
+	require.True(t, ok)
+	assert.True(t, strings.HasPrefix(got, "flowchart TD\n"))
+	assert.Contains(t, got, "n0[Foo]")
 }
 
 func TestTranspileMermaid_StateDiagramV2_RecognizedButNotHandled(t *testing.T) {

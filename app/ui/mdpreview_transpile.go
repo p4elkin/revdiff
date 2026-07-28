@@ -17,14 +17,16 @@ import (
 // The approach is a transpiler, not a new renderer: classDiagram and
 // stateDiagram-v2 sources become synthetic `flowchart TD` source, which goes
 // to the SAME existing mermaid-ascii renderer every other diagram type
-// already uses. Task 2 builds the shared spine both diagram types need — the
+// already uses. Task 2 built the shared spine both diagram types need — the
 // dispatch, the sanitizing/label helpers, the flowchart-source builder, and
 // the block scanner — plus the one-line hook that replaces the direct
-// mermaidcmd.RenderDiagram call in mdpreview.go. classTranspiler
-// (Task 3) and stateTranspiler (Task 4) are not implemented yet:
-// transpileMermaid recognizes both kinds but reports "not handled" for
-// both, so every fence type — the 206 already working today, and these two
-// not-yet-wired kinds — takes an exactly-unchanged path through this task.
+// mermaidcmd.RenderDiagram call in mdpreview.go. Task 3 implements
+// classTranspiler (see its own doc comment below, and the plan's "Grammar
+// handled — classDiagram" section), so classDiagram fences now transpile.
+// stateTranspiler (Task 4) is still a stub: transpileMermaid recognizes
+// stateDiagram-v2 but reports "not handled" for it, so that kind — the one
+// not yet wired — still takes today's exact fallback path, same as every
+// fence type that already worked before this patch.
 
 // mermaidUnconstrainedWidth is passed wherever no real viewport width is
 // available (renderMermaidFences's callers — see its doc comment for why
@@ -675,24 +677,553 @@ func scanMermaidBlocks(source string, h mermaidBlockHandler) {
 	}
 }
 
+// classIgnoredStatementPrefixes lists classDiagram statement keywords that
+// carry no information the flowchart-source builder needs: styling/metadata
+// directives (style, cssClass, classDef), doc/interaction directives (note,
+// click, callback, link, href), and accessibility/title directives
+// (accTitle, accDescr, title). Checked BEFORE the colon-form member parser
+// runs, because several of these (classDef's "fill:#fff", accTitle's own
+// label text) would otherwise misparse as a `ClassName : member` statement
+// — see the plan's classDiagram grammar list of statements that are
+// "ignored silently, rest of the diagram still renders".
+var classIgnoredStatementPrefixes = []string{
+	"note", "click", "callback", "link", "href",
+	"style", "cssClass", "classDef",
+	"accTitle", "accDescr", "title",
+}
+
+// classIgnoredStatement reports whether text is one of the classDiagram
+// statement kinds this patch deliberately drops rather than transpiles: the
+// prefixes above, plus mermaid's lollipop interface notation
+// ("Class1 ()-- Class2"), which — left unchecked — would otherwise match
+// classArrowPattern's plain "--" fallback and manufacture a bogus relation
+// out of the "()" text.
+func classIgnoredStatement(text string) bool {
+	if strings.Contains(text, "()--") {
+		return true
+	}
+	for _, prefix := range classIgnoredStatementPrefixes {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// classMemberSpaceParen matches the FIRST whitespace character that is
+// immediately followed by '(' — the space-paren commentary rule from the
+// plan's "Keeping boxes readable" section. This is deliberately NOT "the
+// first '(' anywhere": a method signature like "+bar() void" or
+// "splitForCreate/Update/Replace()" has no space before its own paren at
+// all, so this pattern never matches those lines, and the whole line
+// survives untouched — a blunter "cut at the first '('" rule would instead
+// truncate "+bar() void" down to "+bar" and clip the trailing "()" off
+// "splitForCreate/Update/Replace()".
+var classMemberSpaceParen = regexp.MustCompile(`\s\(`)
+
+// classMemberText renders one classDiagram member/attribute line safe to
+// place as a label line inside a synthesized flowchart node: strip trailing
+// space-paren commentary (classMemberSpaceParen, above), then run the
+// general node-label sanitizer (mermaidSafeText) so pipes, quotes, and
+// angle brackets in real member text (e.g. "+kind : content|asset|uri", a
+// real corpus line — see the plan's "Declaration order" section) cannot
+// reach the emitted flowchart source unescaped. Truncation to the adaptive
+// per-line cap and the classMaxMembers overflow row both happen later, once
+// per diagram, in flowchartNode.renderLabelLines — classMemberText itself
+// never shortens anything, since the cap is not yet known this early.
+func classMemberText(raw string) string {
+	s := raw
+	if loc := classMemberSpaceParen.FindStringIndex(s); loc != nil {
+		s = strings.TrimRight(s[:loc[0]], " \t")
+	}
+	return mermaidSafeText(s)
+}
+
+// classStereotypePattern matches mermaid's "<<word>>" stereotype annotation
+// syntax (<<interface>>, <<abstract>>, <<service>>, or any other word an
+// author writes), whether the whole line is the annotation (a class-body
+// line on its own) or it is the text after a member colon
+// ("Foo : <<interface>>"). Detected and rewritten to the literal UML
+// notation "«word»" BEFORE mermaidSafeText ever runs on this text —
+// mermaidSafeText maps '<' and '>' to parens, which would turn an
+// already-sanitized "<<interface>>" into "((interface))" and make this
+// pattern permanently unrecognizable afterward. Running the check first
+// keeps the blanket '<'/'>' sanitizing rule simple and provably safe, with
+// no per-line "is this actually an arrow" exception carved out of it.
+var classStereotypePattern = regexp.MustCompile(`^<<\s*(.+?)\s*>>$`)
+
+// classStereotype reports whether text is a stereotype annotation and, if
+// so, returns it rendered as "«word»" — the literal notation mermaid itself
+// draws for a classDiagram stereotype. "(interface)" was rejected (see the
+// plan's Stereotypes section): the corpus already uses parens for member
+// commentary in the same box, so a parenthesized stereotype would just read
+// as another member.
+func classStereotype(text string) (label string, ok bool) {
+	m := classStereotypePattern.FindStringSubmatch(strings.TrimSpace(text))
+	if m == nil {
+		return "", false
+	}
+	return "«" + mermaidSafeText(m[1]) + "»", true
+}
+
+// classStripStyleSuffix strips a mermaid ":::styleName" class-assignment
+// suffix from an identifier, keeping the class name itself. Shared by
+// parseClassDecl (a declaration's own identifier) and classOperand (a
+// relation's operand identifier) — see the plan's Sanitizing note: ignoring
+// the suffix entirely, rather than parsing past it, would either skip the
+// whole declaration or key the class as "Animal:::highlight", so a relation
+// naming plain "Animal" would create a SECOND box for the same class.
+// Reuses mermaidColonRun (already ":{2,}", exactly what a style-suffix
+// marker is) instead of declaring a near-duplicate pattern.
+func classStripStyleSuffix(s string) string {
+	if loc := mermaidColonRun.FindStringIndex(s); loc != nil {
+		return strings.TrimSpace(s[:loc[0]])
+	}
+	return s
+}
+
+// classBracketAliasPattern matches classDiagram's bracket-alias declaration
+// shape, `Foo["Display Name"]`: group 1 is the identifier (the node KEY,
+// used for relation matching — never sanitized, see parseClassDecl), group
+// 2 is the quoted display text (the node TITLE).
+var classBracketAliasPattern = regexp.MustCompile(`^([^\[\s]+)\s*\[(.*)\]$`)
+
+// parseClassDecl parses the text after a "class " keyword — covering all
+// four declaration shapes the plan's Grammar section lists: bare ("Foo"),
+// bracket alias (`Foo["Display Name"]`), generic ("Repo~T~"), and any of
+// those with a trailing ":::styleName" (stripped via classStripStyleSuffix
+// before the shape is even examined, since the style suffix always trails
+// the whole declaration). key is the raw, UNsanitized identifier — the same
+// text a relation operand must produce for the two to resolve to the same
+// node (see classOperand) — never run through mermaidSafeText. title is
+// what a caller passes to flowchartBuilder.setTitle: sanitized, but
+// deliberately NOT run through the member-only space-paren strip, because
+// the bracket alias's parenthetical is real display text, not trailing
+// member commentary (see the plan's note that the bracket alias keeps its
+// parenthetical). key is "" when rest is empty after the style-suffix
+// strip, signaling "nothing to declare" to the caller.
+func parseClassDecl(rest string) (key, title string) {
+	rest = classStripStyleSuffix(strings.TrimSpace(rest))
+	if rest == "" {
+		return "", ""
+	}
+	if m := classBracketAliasPattern.FindStringSubmatch(rest); m != nil {
+		key = strings.TrimSpace(m[1])
+		display := strings.Trim(strings.TrimSpace(m[2]), `"`)
+		return key, mermaidSafeText(display)
+	}
+	// Bare or generic ("Repo~T~"): key and title are the same raw text. The
+	// tilde is left completely alone by mermaidSafeText (see its own doc
+	// comment), so a generic class's title renders with its type parameter
+	// exactly as the author wrote it.
+	return rest, mermaidSafeText(rest)
+}
+
+// classDeclFromStatement recognizes a "class ..." declaration — bare
+// statement OR block-header form, since scanMermaidBlocks already strips a
+// block header's trailing "{" before either classTranspiler.statement or
+// classTranspiler.blockHeader ever sees the text, so both reach this same
+// helper with identical input. ok is false when text does not start with
+// "class " at all, or parseClassDecl could not extract a usable key (an
+// empty declaration after the style-suffix strip).
+func classDeclFromStatement(text string) (key, title string, ok bool) {
+	rest, isClass := strings.CutPrefix(text, "class ")
+	if !isClass {
+		return "", "", false
+	}
+	key, title = parseClassDecl(rest)
+	return key, title, key != ""
+}
+
+// classQuotedSegment matches a double-quoted cardinality literal (e.g. "1",
+// "0..1") wherever it appears in a relation operand's raw text.
+var classQuotedSegment = regexp.MustCompile(`"([^"]*)"`)
+
+// classOperand splits one relation operand's raw text into its class key
+// and optional cardinality — order-independent, since mermaid places the
+// cardinality AFTER the class name on a relation's left operand
+// (`Task "1"`) but BEFORE it on the right (`"0..1" WorkflowRef`; see the
+// real corpus example in the plan's Grammar section): finding the quoted
+// segment wherever it falls and treating everything else as the key serves
+// both positions with one function. The key is then run through
+// classStripStyleSuffix, since a relation operand can carry its own
+// ":::styleName" independent of the class's own declaration (see that
+// function's doc comment for why this must be parsed, not ignored). key is
+// the RAW identifier — never sanitized — so it matches whatever
+// parseClassDecl produced for the same class elsewhere in the diagram.
+func classOperand(raw string) (key, cardinality string) {
+	raw = strings.TrimSpace(raw)
+	if m := classQuotedSegment.FindStringSubmatchIndex(raw); m != nil {
+		cardinality = raw[m[2]:m[3]]
+		key = strings.TrimSpace(raw[:m[0]] + raw[m[1]:])
+	} else {
+		key = raw
+	}
+	return classStripStyleSuffix(key), cardinality
+}
+
+// classArrowPattern matches any of the fourteen classDiagram relation arrow
+// tokens the plan's "Relation arrows to labels" table covers. Alternatives
+// are ordered longest-first (4-character tokens, then 3-character, then the
+// 2-character undirected fallbacks) because Go's regexp alternation is
+// leftmost-first, not leftmost-longest: at a start position where more than
+// one alternative could match (e.g. "<|--" and a bare "--" share a "--"
+// tail), the FIRST listed alternative that matches wins, so a shorter
+// generic pattern listed before a longer specific one would silently steal
+// the match. Because the search finds the leftmost occurrence in the whole
+// line, a cardinality like "0..1" sitting to the RIGHT of the real arrow
+// (e.g. `Task "1" --> "0..1" WorkflowRef`) is never mistaken for the
+// undirected-dashed ".." token — the real arrow occurs earlier in the
+// string and wins.
+var classArrowPattern = regexp.MustCompile(
+	`<\|--|--\|>|<\|\.\.|\.\.\|>|--\*|\*--|--o|o--|-->|<--|\.\.>|<\.\.|--|\.\.`,
+)
+
+// classArrowInfo is one row of classArrowTable: the word label a relation
+// arrow maps to (empty for the four association/undirected kinds, which
+// carry no default word), and whether the emitted flowchart edge's
+// direction is the REVERSE of the arrow's left-to-right source order.
+type classArrowInfo struct {
+	label string
+	flip  bool
+}
+
+// classArrowTable is the plan's "Relation arrows to labels" table verbatim:
+// one rule generates every flip — the arrow points from the subject to the
+// object of the English sentence the label forms (e.g. "Git implements
+// Renderer" reads left-to-right regardless of which way "Renderer <|-- Git"
+// was written, so that relation flips). A map, rather than a switch or a
+// chain of ifs, keeps classArrow itself at cyclomatic complexity 1 — the
+// branching lives in this data, not in code a future edit could make
+// asymmetric by accident.
+var classArrowTable = map[string]classArrowInfo{
+	"<|--": {classInheritanceLabel, true},
+	"--|>": {classInheritanceLabel, false},
+	"<|..": {classInheritanceLabel, true},
+	"..|>": {classInheritanceLabel, false},
+	"*--":  {"owns", false},
+	"--*":  {"owns", true},
+	"o--":  {"has", false},
+	"--o":  {"has", true},
+	"-->":  {"", false},
+	"<--":  {"", true},
+	"..>":  {"uses", false},
+	"<..":  {"uses", true},
+	"--":   {"", false},
+	"..":   {"", false},
+}
+
+// classArrow looks up token's word label and flip flag in classArrowTable —
+// a pure map read, cyclomatic complexity 1.
+func classArrow(token string) (label string, flip bool) {
+	info := classArrowTable[token]
+	return info.label, info.flip
+}
+
+// classCardinalityTable is the plan's cardinality normalization table
+// verbatim: the handful of shapes mermaid authors actually write, mapped to
+// a short form that keeps an edge label's width cost low (every character
+// costs a column of rendered art — see the plan's "Keeping boxes readable"
+// section).
+var classCardinalityTable = map[string]string{
+	"1":    "1",
+	"0..1": "0/1",
+	"1..*": "1+",
+	"1..n": "1+",
+	"*":    "n",
+	"n":    "n",
+	"0..*": "n",
+	"0..n": "n",
+	"many": "n",
+}
+
+// classCardinality normalizes one quoted cardinality value per
+// classCardinalityTable; anything the table does not recognize is
+// sanitized and capped at 8 runes rather than dropped outright, so an
+// author's unusual cardinality text still shows up in shortened form
+// instead of vanishing.
+func classCardinality(raw string) string {
+	if norm, ok := classCardinalityTable[raw]; ok {
+		return norm
+	}
+	return mermaidTruncate(mermaidSafeText(raw), 8)
+}
+
+// classComposeCardinality joins a relation's two normalized cardinalities
+// (skipping either side that carried none at all) with a space, in the
+// order the caller passes them. parseClassRelation passes them already
+// re-ordered to match the EMITTED arrow direction, so this function itself
+// stays direction-agnostic — see parseClassRelation's doc comment for why
+// the pair must flip when the arrow flips.
+func classComposeCardinality(fromCard, toCard string) string {
+	var parts []string
+	if fromCard != "" {
+		parts = append(parts, classCardinality(fromCard))
+	}
+	if toCard != "" {
+		parts = append(parts, classCardinality(toCard))
+	}
+	return strings.Join(parts, " ")
+}
+
+// classJoinLabelParts combines a relation's word label (from classArrowTable
+// or an explicit "  : label" override) with its cardinality suffix (from
+// classComposeCardinality): both, either alone, or neither — matching the
+// plan's "appended after a space" rule without ever producing a stray
+// leading/trailing space when one side is empty. The composed result is
+// still raw, unsanitized text — flowchartBuilder.source runs it through
+// mermaidEdgeLabel at emission time (see addEdge's doc comment), which is
+// what turns any remaining space into "·"; this function must never
+// hand-roll that substitution itself.
+func classJoinLabelParts(word, cardinalitySuffix string) string {
+	switch {
+	case word == "":
+		return cardinalitySuffix
+	case cardinalitySuffix == "":
+		return word
+	default:
+		return word + " " + cardinalitySuffix
+	}
+}
+
+// classAnyColonRun matches ANY run of one or more consecutive colons —
+// unlike mermaidColonRun (2+ only), this must also find a lone single
+// colon, since that is exactly the signal classSplitTrailingLabel looks for.
+var classAnyColonRun = regexp.MustCompile(`:+`)
+
+// classSplitTrailingLabel splits a relation line's optional trailing
+// "  : label" (or ": label", or "  :label") from its relation body. This is
+// deliberately NOT splitOnFirstColon (which cuts at ANY first colon):
+// mermaid's ":::styleName" suffix can appear on either relation operand
+// (see classOperand), and it is always a run of 2+ colons with no
+// surrounding space, while the real trailing-label separator is always a
+// LONE single colon. Scanning for the first colon-run whose length is
+// exactly 1 finds the real separator even when an earlier ":::" run would
+// otherwise fool a naive first-colon cut.
+func classSplitTrailingLabel(text string) (body, label string, ok bool) {
+	for _, loc := range classAnyColonRun.FindAllStringIndex(text, -1) {
+		if loc[1]-loc[0] == 1 {
+			return strings.TrimSpace(text[:loc[0]]), strings.TrimSpace(text[loc[1]:]), true
+		}
+	}
+	return text, "", false
+}
+
+// parseClassRelation parses one classDiagram relation's BODY (the trailing
+// "  : label", if any, already peeled off by classSplitTrailingLabel — see
+// classTranspiler.statementRelation) into its emitted from/to keys, table
+// word label, and composed cardinality suffix. ok is false when body
+// carries no recognizable arrow token, or either operand resolves to an
+// empty key (a malformed or one-sided relation — see the plan's Failure
+// modes table: "some lines unparseable, those lines dropped, the rest
+// renders").
+//
+// The cardinality pair is reordered to match the EMITTED arrow, not the
+// arrow's left-to-right source order: when classArrow reports flip (the
+// emitted edge runs right-to-left relative to how the author wrote it), the
+// FROM side's own cardinality is the one that was written on the RIGHT, and
+// vice versa. Composing it any other way would silently swap which
+// cardinality reads as "the multiplicity at the source end" versus "at the
+// target end" whenever a flipping relation (<|--, --*, --o, <--, <.., <|..)
+// is used — see the plan's cardinality section.
+func parseClassRelation(body string) (fromKey, toKey, word, cardinalitySuffix string, ok bool) {
+	loc := classArrowPattern.FindStringIndex(body)
+	if loc == nil {
+		return "", "", "", "", false
+	}
+
+	leftKey, leftCard := classOperand(body[:loc[0]])
+	rightKey, rightCard := classOperand(body[loc[1]:])
+	if leftKey == "" || rightKey == "" {
+		return "", "", "", "", false
+	}
+
+	word, flip := classArrow(body[loc[0]:loc[1]])
+	fromKey, toKey = leftKey, rightKey
+	fromCard, toCard := leftCard, rightCard
+	if flip {
+		fromKey, toKey = rightKey, leftKey
+		fromCard, toCard = rightCard, leftCard
+	}
+
+	return fromKey, toKey, word, classComposeCardinality(fromCard, toCard), true
+}
+
+// classTranspiler implements mermaidBlockHandler for classDiagram source,
+// accumulating nodes and edges into a shared flowchartBuilder as
+// scanMermaidBlocks walks the diagram body — see this file's package doc
+// comment for the overall transpile approach, and the plan's "Grammar
+// handled — classDiagram" section for the full grammar covered here.
+type classTranspiler struct {
+	b *flowchartBuilder
+
+	// currentClass is the key of the class body currently open (between a
+	// "class Foo {" header and its matching "}"), or "" when only
+	// statement-level lines are being processed. classStack saves the
+	// PREVIOUS value across every currently-open block — class OR
+	// namespace — so closing one restores the right context regardless of
+	// nesting: a class opened inside a namespace restores "" on close (the
+	// namespace itself is transparent and never becomes "current" — see
+	// blockHeader). One stack entry is pushed per blockHeader call and
+	// popped per matching "}" line, mirroring scanMermaidBlocks's own brace
+	// stack one level up.
+	currentClass string
+	classStack   []string
+}
+
+// newClassTranspiler creates a classTranspiler that accumulates into b.
+func newClassTranspiler(b *flowchartBuilder) *classTranspiler {
+	return &classTranspiler{b: b}
+}
+
+// blockHeader implements mermaidBlockHandler: a "class Foo {" header opens a
+// named block (its members dispatch to member, one level deeper — see
+// line); any other header (namespace, or anything unrecognized) is
+// transparent, exactly as if the block were not there, which is what makes
+// namespace attribution a no-op for classDiagram — a class nested inside a
+// namespace still reports at the same depth as a top-level class.
+func (c *classTranspiler) blockHeader(header string, _ int) bool {
+	c.classStack = append(c.classStack, c.currentClass)
+
+	key, title, ok := classDeclFromStatement(header)
+	if !ok {
+		return false
+	}
+	c.b.setTitle(key, title)
+	c.currentClass = key
+	return true
+}
+
+// line implements mermaidBlockHandler: a block's closing "}" restores
+// whatever class was open before it (or none), a line at depth > 0 while a
+// class body is open is a member line, and everything else is a top-level
+// statement.
+func (c *classTranspiler) line(text string, depth int) {
+	if text == "}" {
+		if n := len(c.classStack); n > 0 {
+			c.currentClass = c.classStack[n-1]
+			c.classStack = c.classStack[:n-1]
+		}
+		return
+	}
+	if depth > 0 && c.currentClass != "" {
+		c.member(text)
+		return
+	}
+	c.statement(text)
+}
+
+// statement handles one top-level (depth 0) classDiagram line: a class
+// declaration, a relation, the "Foo : member" colon form (real corpus
+// example: "FeatureToggles : +isEnabled()", which never gets a
+// "class FeatureToggles" declaration anywhere in that diagram — see
+// ensureTitle), a dropped "direction" statement, an ignored statement kind,
+// or — if none of those match — a line this patch cannot parse, silently
+// omitted per the plan's Failure modes table.
+func (c *classTranspiler) statement(text string) {
+	if strings.HasPrefix(text, "direction") || classIgnoredStatement(text) {
+		return
+	}
+	if key, title, ok := classDeclFromStatement(text); ok {
+		c.b.setTitle(key, title)
+		return
+	}
+	if classArrowPattern.MatchString(text) {
+		c.statementRelation(text)
+		return
+	}
+	if key, after, ok := splitOnFirstColon(text); ok && key != "" {
+		c.statementColonMember(key, after)
+	}
+}
+
+// statementRelation parses and records one relation statement. An explicit
+// trailing "  : label" overrides the arrow table's default word — the
+// cardinality suffix is still appended either way, per the plan's rule that
+// an explicit label only replaces the word, never the cardinality.
+func (c *classTranspiler) statementRelation(text string) {
+	body, explicit, hasExplicit := classSplitTrailingLabel(text)
+	fromKey, toKey, word, cardinalitySuffix, ok := parseClassRelation(body)
+	if !ok {
+		return
+	}
+	c.ensureTitle(fromKey)
+	c.ensureTitle(toKey)
+	if hasExplicit && explicit != "" {
+		word = explicit
+	}
+	c.b.addEdge(fromKey, toKey, classJoinLabelParts(word, cardinalitySuffix))
+}
+
+// statementColonMember handles the "ClassName : member" top-level form —
+// used both for an ordinary member ("Foo : +bar() void") and for a
+// stereotype ("Foo : <<interface>>"). key may carry its own ":::styleName"
+// suffix, stripped the same way a bracket-alias declaration's would be.
+func (c *classTranspiler) statementColonMember(key, after string) {
+	key = classStripStyleSuffix(key)
+	if key == "" {
+		return
+	}
+	c.ensureTitle(key)
+	if label, ok := classStereotype(after); ok {
+		c.b.setStereotype(key, label)
+		return
+	}
+	c.b.addLabelLine(key, classMemberText(after))
+}
+
+// member handles one line inside an open class body: mermaid allows a
+// stereotype ("<<interface>>") as a body line on its own, so that is checked
+// before treating the line as an ordinary member/attribute.
+func (c *classTranspiler) member(text string) {
+	if label, ok := classStereotype(text); ok {
+		c.b.setStereotype(c.currentClass, label)
+		return
+	}
+	c.b.addLabelLine(c.currentClass, classMemberText(text))
+}
+
+// ensureTitle gives key a default title (its own raw name) the first time
+// it is referenced with no title of its own — needed because a real corpus
+// diagram can reference a class ONLY through relations and the colon-member
+// form, with no "class X" declaration anywhere (e.g. the FeatureToggles
+// corpus diagrams: "FeatureToggles" only ever appears as a relation
+// endpoint or in a "FeatureToggles : +isEnabled()" line). Without this, that
+// node's title would stay empty and flowchartNode.renderLabelLines would
+// fall back to the SYNTHETIC id ("n3") as its only label line — a
+// meaningless string where the reader expects the class name. A later
+// explicit `class X["Display"]` declaration (in either source order) still
+// wins: setTitle always overwrites unconditionally, and this only ever sets
+// a title when none exists yet.
+func (c *classTranspiler) ensureTitle(key string) {
+	n := c.b.node(key)
+	if n.title == "" {
+		n.title = mermaidSafeText(key)
+	}
+}
+
 // transpileMermaid dispatches on source's own diagram kind (see
 // mermaidDiagramKind) to produce synthetic flowchart source for the two
-// diagram types this patch adds support for. Both are named explicitly in
-// the switch below — "recognized" in the sense the plan's Task 2 scope calls
-// for — but return "not handled" for now: classTranspiler and
-// stateTranspiler are Task 3 and Task 4. Until either lands, every diagram
-// kind — the 206 fences that already render today, and these two
-// recognized-but-not-yet-transpiled kinds — takes exactly today's path
-// through renderMermaidSource, which is what lets this task land with the
-// already-working set of diagrams provably unchanged.
-//
-//nolint:unparam // paneWidth is threaded down now — matching the plan's
-// Task 2 scope for width-plumbing — so classTranspiler/stateTranspiler
-// (Task 3/4) can build a paneWidth-aware flowchartBuilder without a second
-// signature change here. Both stub branches below ignore it until then.
+// diagram types this patch adds support for. classDiagram is fully wired
+// (Task 3): classTranspiler walks the source via scanMermaidBlocks into a
+// paneWidth-aware flowchartBuilder, and a builder that ends up empty (every
+// statement was a comment or something this patch ignores) falls back to
+// "not handled" exactly like an unrecognized kind — see flowchartBuilder's
+// empty doc comment. stateDiagram-v2 is still a stub (Task 4):
+// stateTranspiler is not implemented yet, so that kind — recognized in the
+// sense the plan's Task 2 scope calls for, but not yet transpiled — takes
+// today's exact path through renderMermaidSource, same as the 206 fences
+// that already worked before this patch.
 func transpileMermaid(source string, paneWidth int) (string, bool) {
 	switch mermaidDiagramKind(source) {
-	case "classDiagram", "stateDiagram-v2":
+	case "classDiagram":
+		b := newFlowchartBuilder(paneWidth)
+		scanMermaidBlocks(source, newClassTranspiler(b))
+		if b.empty() {
+			return "", false
+		}
+		return b.source(), true
+	case "stateDiagram-v2":
 		return "", false
 	default:
 		return "", false
