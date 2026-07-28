@@ -359,6 +359,12 @@ handled per position, below.
 - **every remaining space to `·`**, because the arrow shows through a space at its own column.
   `owns 1 n` renders as `owns│1 n` under TD and `─owns─1─n─` under LR; `owns·1·n` is clean in both.
   This applies to the cardinality suffix too, which is exactly this shape
+- **collapse any run of two or more `·` into a single `·`**, done as the last content step, right
+  before truncation. A raw label that already contains a literal middle dot surrounded by spaces
+  (the real corpus label `open · C1 (Request)` is exactly this shape) turns both of those
+  surrounding spaces into `·` too, which without this step would leave three dots in a row where
+  the author wrote one. Implemented in Task 5, after Task 4 found the gap while pinning a corpus
+  label test
 - truncate to the adaptive rune cap and to that many bytes, whichever binds first
 - **never emit an empty label** — if every rule above leaves nothing, emit no label at all rather
   than `-->||`, which creates a phantom node named `|| n1`
@@ -366,7 +372,8 @@ handled per position, below.
 Real corpus labels under this policy: `submit (pins version, starts workflow)` → `submit`;
 `resolve {outcome} (act without claiming)` → `resolve`;
 `decision==approve<br/>AND publicationDate in future` → `decision==approve`;
-`open · C1 (Request)` → `open·C1`. All land under 20 characters.
+`open · C1 (Request)` → `open·C1` (only true once the dot-run collapse above runs; before Task 5
+implemented it, the same input produced `open···C1`). All land under 20 characters.
 
 ### Declaration order
 
@@ -646,27 +653,42 @@ are stubs that report not-handled.
 ### Task 5: Integration against the real renderer
 
 **Files:**
+- Modify: `app/ui/mdpreview_transpile.go`
 - Modify: `app/ui/mdpreview_transpile_test.go`
 
-- [ ] write test that a classDiagram renders real box art through `renderMermaidSource`
-- [ ] write test that a stateDiagram renders real box art through `renderMermaidSource`
-- [ ] write test that a node label containing quotes survives intact — the regression pin for the
+- [x] ➕ **discovered during Task 4**: `mermaidEdgeLabel` turned a corpus label that already contains
+      a middle dot surrounded by spaces (`open · C1 (Request)`) into three dots in a row
+      (`open···C1`), because both surrounding spaces convert to `·` too. Collapse any run of two or
+      more `·` into a single one as a final content step in `mermaidEdgeLabel` (new
+      `mermaidDotRun` regexp, applied right after the space-to-dot substitution and before
+      truncation), so the label becomes `open·C1`. Updated
+      `TestStateTranspiler_SixVerbatimCorpusLabels_ShortenedForms`'s row 3 (was pinned at
+      `open···C1`) and its explanatory comment, and added
+      `TestMermaidEdgeLabel_RunOfMiddleDotsCollapsesToOne` as a direct unit test of the collapse.
+      Corrected the "Edge label" section prose above, which claimed `open·C1` without the collapse
+      actually being implemented
+- [x] write test that a classDiagram renders real box art through `renderMermaidSource`
+- [x] write test that a stateDiagram renders real box art through `renderMermaidSource`
+- [x] write test that a node label containing quotes survives intact — the regression pin for the
       `strings.Trim(labelText, "\"")` at `parse.go:128`, triggered through the bracket alias, which
       is its most likely real source
-- [ ] write test that an edge label carrying a cardinality suffix renders with no arrow bleed —
+- [x] write test that an edge label carrying a cardinality suffix renders with no arrow bleed —
       assert the art contains `owns·1·n` contiguously and contains no `owns│1`
-- [ ] write test `TestRenderMermaidSource_AdversarialSources_NeverPanic` — table: unbalanced `[`, a
+- [x] write test `TestRenderMermaidSource_AdversarialSources_NeverPanic` — table: unbalanced `[`, a
       label of only `|[]{}<>"`, a 300-character member, a relation missing an operand,
       `[*] --> [*]`, a self-transition, three parallel edges
-- [ ] write tests that `renderMermaidFences` no longer falls back verbatim for either type — output
+- [x] write tests that `renderMermaidFences` no longer falls back verbatim for either type — output
       must not contain `classDiagram` or the fence marker, and must contain `│`
-- [ ] write test that `erDiagram` and `gantt` still fall back verbatim, pinning the scope decision
-- [ ] write test that the 19-member class measures at most 40 cells wide, pinning the width
-      arithmetic against a future renderer change
-- [ ] write test that art splices unreflowed at width 20, mirroring `mdpreview_test.go:180`
-- [ ] confirm no existing test in `mdpreview_test.go` needed changing, and say so explicitly if one
-      did
-- [ ] run `make test` and `make lint` — both must pass before Task 6
+- [x] write test that `erDiagram` and `gantt` still fall back verbatim, pinning the scope decision
+- [x] write test that the 19-member class measures at most 40 cells wide, pinning the width
+      arithmetic against a future renderer change — the corpus class actually has 18 members today
+      (see the Probe findings table), so this test uses its own synthetic member count rather than
+      hardcoding either historical figure
+- [x] write test that art splices unreflowed at width 20, mirroring `mdpreview_test.go:180`
+- [x] confirm no existing test in `mdpreview_test.go` needed changing, and say so explicitly if one
+      did — none did; `git diff --stat` after this task shows only `mdpreview_transpile.go` and
+      `mdpreview_transpile_test.go` touched
+- [x] run `make test` and `make lint` — both must pass before Task 6
 
 ### Task 6: Verify acceptance criteria
 

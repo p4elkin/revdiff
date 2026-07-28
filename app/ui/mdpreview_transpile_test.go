@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -101,6 +102,16 @@ func TestMermaidEdgeLabel_SpacesBecomeMiddleDot(t *testing.T) {
 	got := mermaidEdgeLabel("owns 1 n", 32)
 	assert.Equal(t, "owns·1·n", got,
 		"every remaining space must become a middle dot, or the arrow bleeds through it (position-dependent)")
+}
+
+func TestMermaidEdgeLabel_RunOfMiddleDotsCollapsesToOne(t *testing.T) {
+	// a raw label that already contains a literal middle dot surrounded by
+	// spaces (real corpus text — see TestStateTranspiler_SixVerbatimCorpusLabels_ShortenedForms)
+	// turns both of those surrounding spaces into "·" too, which without the
+	// collapse would read as three dots in a row where the author wrote one.
+	got := mermaidEdgeLabel("open · C1 (Request)", 32)
+	assert.Equal(t, "open·C1", got,
+		"a run of two or more middle dots must collapse to a single one, not read as a triple-dot artifact")
 }
 
 func TestMermaidEdgeLabel_ParenAtStart_FallsBackToTruncationInsteadOfEmpty(t *testing.T) {
@@ -1119,12 +1130,13 @@ func TestStateTranspiler_SixVerbatimCorpusLabels_ShortenedForms(t *testing.T) {
 	// Row 3 ("open · C1 (Request)") is the one label in this set that
 	// ALREADY carries a literal middle dot in its raw corpus text. The
 	// cut-at-paren step leaves "open · C1"; the space-to-middle-dot step then
-	// converts BOTH spaces surrounding that pre-existing dot too, yielding
-	// three consecutive dots rather than a single one. That is still safe —
-	// a run of "·" characters cannot bleed an arrow through it any more than
-	// one can — and it is the genuine, verified output of the existing
-	// shared mermaidEdgeLabel (unchanged since Task 2/3), not a
-	// stateDiagram-specific rule this task introduces.
+	// converts BOTH spaces surrounding that pre-existing dot too, which on
+	// its own would yield three consecutive dots rather than the one the
+	// author wrote. mermaidEdgeLabel now collapses any run of two or more
+	// "·" into one (see mermaidDotRun), so this shortens to "open·C1" —
+	// matching the plan's own worked example — via the shared
+	// mermaidEdgeLabel, not a stateDiagram-specific rule this task
+	// introduces.
 	tests := []struct {
 		name  string
 		input string
@@ -1132,7 +1144,7 @@ func TestStateTranspiler_SixVerbatimCorpusLabels_ShortenedForms(t *testing.T) {
 	}{
 		{"publication-request.md: submit", "submit (pins version, starts workflow)", "submit"},
 		{"architecture-proposal.md: resolve", "resolve {outcome}  (act without claiming)", "resolve"},
-		{"workflow-policy-brain-sketch.md: open · C1", "open · C1 (Request)", "open···C1"},
+		{"workflow-policy-brain-sketch.md: open · C1", "open · C1 (Request)", "open·C1"},
 		{"live-copy.md: reattach", "reattach (rebase / keep-base)", "reattach"},
 		{"workflow-rest-layered/architecture.md: decision==approve", "decision==approve<br/>AND publicationDate in future", "decision==approve"},
 		{"four-eyes-api-interactions.md: resolve", "resolve (approve/reject/abort)", "resolve"},
@@ -1227,4 +1239,274 @@ func TestRenderMermaidSource_SequenceDiagram_ByteIdenticalToDirectRenderDiagram(
 func TestRenderMermaidSource_MalformedDiagram_WrapsUnderlyingError(t *testing.T) {
 	_, err := renderMermaidSource("this is not a valid mermaid diagram at all", 80)
 	require.Error(t, err)
+}
+
+// --- Task 5: integration against the real renderer ---
+//
+// Everything above this point exercises the transpiler's own pieces in
+// isolation (string in, string out) or, at most, transpileMermaid's decision
+// of whether to hand off synthetic flowchart source at all. The tests below
+// go one step further and actually call the real, vendored
+// mermaidcmd.RenderDiagram — through renderMermaidSource and
+// renderMermaidFences, exactly as production code does — so a mismatch
+// between what this file's own sanitizing rules assume and what the real
+// parser/renderer actually does cannot hide behind a unit test that never
+// left our own code.
+
+func TestRenderMermaidSource_ClassDiagram_RendersRealBoxArt(t *testing.T) {
+	src := "classDiagram\n" +
+		"    class Renderer {\n" +
+		"        <<interface>>\n" +
+		"        +render() void\n" +
+		"    }\n" +
+		"    class Git {\n" +
+		"        +render() void\n" +
+		"    }\n" +
+		"    Renderer <|-- Git\n"
+
+	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+	assert.Contains(t, got, "Renderer")
+	assert.Contains(t, got, "Git")
+	assert.Contains(t, got, "│", "the real renderer must draw a box-drawing character, not just plain text")
+}
+
+func TestRenderMermaidSource_StateDiagram_RendersRealBoxArt(t *testing.T) {
+	src := "stateDiagram-v2\n" +
+		"    [*] --> Draft\n" +
+		"    Draft --> Done : submit\n" +
+		"    Done --> [*]\n"
+
+	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+	assert.Contains(t, got, "Draft")
+	assert.Contains(t, got, "Done")
+	assert.Contains(t, got, "(start)")
+	assert.Contains(t, got, "(end)")
+	assert.Contains(t, got, "│", "the real renderer must draw a box-drawing character, not just plain text")
+}
+
+func TestRenderMermaidSource_ClassDiagram_BracketAliasEmbeddedQuote_SurvivesIntact(t *testing.T) {
+	// Regression pin for the VENDORED parser's own quote-eating behavior
+	// (parse.go:128's strings.Trim(labelText, `"`)) — see the plan's
+	// Sanitizing note: an odd count of quotes in a NODE label stops the
+	// closing "]" from decrementing bracketDepth and swallows the rest of
+	// the diagram, and even a balanced pair loses its trailing quote to the
+	// Trim call. classTranspiler's own parseClassDecl mimics that same
+	// outer-quote trim to pull the display text out of a bracket alias, but
+	// mermaidSafeText then deletes every remaining quote character —
+	// including one the author embedded INSIDE the display text — so by the
+	// time this synthesized flowchart source reaches the real renderer there
+	// is no quote left at all for parse.go:128 to eat. Triggered here
+	// through the bracket alias, which is its most likely real source; this
+	// is NOT about an edge label.
+	src := "classDiagram\n" +
+		`    class Foo["Display "Name""]` + "\n" +
+		"    class Bar\n" +
+		"    Foo --> Bar\n"
+
+	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+	assert.Contains(t, got, "Display Name",
+		"the label must survive whole, not truncated or split at the embedded quote")
+	assert.NotContains(t, got, `"`, "no quote character may ever reach the rendered art")
+}
+
+func TestRenderMermaidSource_ClassDiagram_CardinalityEdgeLabel_NoArrowBleed(t *testing.T) {
+	// "owns 1 n" is exactly the shape the plan's Probe finding #5 measured
+	// as clean under both TD and LR once every space becomes a middle dot;
+	// this pins that same shape against the REAL renderer's output, not just
+	// the label string mermaidEdgeLabel/classComposeCardinality build.
+	src := "classDiagram\n" +
+		"    class Repo\n" +
+		"    class Item\n" +
+		`    Repo "1" *-- "n" Item` + "\n"
+
+	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+	assert.Contains(t, got, "owns·1·n", "the composed cardinality label must appear as one contiguous, unbroken run")
+	assert.NotContains(t, got, "owns│1", "a box-drawing vertical must never bleed through the middle of the label")
+}
+
+func TestRenderMermaidSource_AdversarialSources_NeverPanic(t *testing.T) {
+	// None of these are well-formed diagrams (several are deliberately
+	// malformed), so success or failure of the render itself is not the
+	// point — the only assertion is that nothing panics anywhere in the
+	// pipeline: transpileMermaid's parsing, flowchartBuilder's level/cap
+	// math, or the real vendored renderer it hands off to.
+	tests := []struct {
+		name string
+		src  string
+	}{
+		{
+			"unbalanced [ in a class declaration",
+			"classDiagram\n    class Foo[Bar\n    class Baz\n    Foo --> Baz\n",
+		},
+		{
+			"member line of only pipe/bracket/brace/angle/quote punctuation",
+			"classDiagram\n    class Foo {\n        |[]{}<>\"\n    }\n",
+		},
+		{
+			"300-character member",
+			"classDiagram\n    class Foo {\n        " + strings.Repeat("x", 300) + "\n    }\n",
+		},
+		{
+			"relation missing an operand",
+			"classDiagram\n    class Foo\n    --> Foo\n",
+		},
+		{
+			"start-to-end pseudostate edge",
+			"stateDiagram-v2\n    [*] --> [*]\n",
+		},
+		{
+			"self-transition",
+			"stateDiagram-v2\n    A --> A\n",
+		},
+		{
+			"three parallel edges between one pair",
+			"classDiagram\n    class Foo\n    class Bar\n" +
+				"    Foo --> Bar : one\n    Foo --> Bar : two\n    Foo --> Bar : three\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.NotPanics(t, func() {
+				_, _ = renderMermaidSource(tc.src, mermaidUnconstrainedWidth)
+			})
+		})
+	}
+}
+
+func TestRenderMermaidFences_ClassDiagram_NoLongerFallsBackVerbatim(t *testing.T) {
+	src := "classDiagram\n    class Foo\n    class Bar\n    Foo --> Bar\n"
+	doc := "before\n```mermaid\n" + src + "```\nafter"
+
+	got := renderMermaidFences(mdLines(doc))
+
+	assert.NotContains(t, got, "classDiagram", "the raw fence body must not survive once the diagram transpiles and renders")
+	assert.NotContains(t, got, "```mermaid", "the fence marker itself should be gone once rendered")
+	assert.Contains(t, got, "│", "box art must appear in place of the fence")
+	assert.Contains(t, got, "before")
+	assert.Contains(t, got, "after")
+}
+
+func TestRenderMermaidFences_StateDiagram_NoLongerFallsBackVerbatim(t *testing.T) {
+	src := "stateDiagram-v2\n    [*] --> Draft\n    Draft --> Done : submit\n    Done --> [*]\n"
+	doc := "before\n```mermaid\n" + src + "```\nafter"
+
+	got := renderMermaidFences(mdLines(doc))
+
+	assert.NotContains(t, got, "stateDiagram", "the raw fence body must not survive once the diagram transpiles and renders")
+	assert.NotContains(t, got, "```mermaid", "the fence marker itself should be gone once rendered")
+	assert.Contains(t, got, "│", "box art must appear in place of the fence")
+	assert.Contains(t, got, "before")
+	assert.Contains(t, got, "after")
+}
+
+func TestRenderMermaidFences_ErDiagram_StillFallsBackVerbatim(t *testing.T) {
+	// pins the deliberate scope decision: this patch covers classDiagram and
+	// stateDiagram-v2 only (see the plan's Overview) — erDiagram is
+	// unaffected and must still take the pre-existing fallback path.
+	src := "erDiagram\n    CUSTOMER ||--o{ ORDER : places\n"
+	doc := "```mermaid\n" + src + "```"
+
+	got := renderMermaidFences(mdLines(doc))
+
+	assert.Equal(t, doc+"\n", got, "erDiagram is out of this patch's scope and must still fall back verbatim")
+}
+
+func TestRenderMermaidFences_Gantt_StillFallsBackVerbatim(t *testing.T) {
+	// pins the deliberate scope decision: gantt is unaffected by this patch
+	// and must still take the pre-existing fallback path.
+	src := "gantt\n    title A Gantt Diagram\n    section Section\n    A task :a1, 2024-01-01, 30d\n"
+	doc := "```mermaid\n" + src + "```"
+
+	got := renderMermaidFences(mdLines(doc))
+
+	assert.Equal(t, doc+"\n", got, "gantt is out of this patch's scope and must still fall back verbatim")
+}
+
+func TestRenderMermaidSource_ManyMemberClass_RendersWithinFortyCells(t *testing.T) {
+	// Pins the width arithmetic from the plan's "The 19-member class"
+	// section against a future renderer change. The plan's own worked
+	// example there was a real 19-member corpus class; Task 1's probe found
+	// that file actually has 18 members today (see the Probe findings
+	// table) — both counts exceed classMaxMembers (12) and produce an
+	// identical capped shape, so this fixture uses its own synthetic member
+	// count (mirroring TestTranspileClassDiagram_NineteenMembers_CappedWithOverflowRow's
+	// own synthetic "Big" class from Task 3) rather than hardcoding either
+	// historical figure.
+	var body strings.Builder
+	body.WriteString("classDiagram\n    class Task {\n")
+	for i := 1; i <= 18; i++ {
+		fmt.Fprintf(&body, "        +member%d() void\n", i)
+	}
+	body.WriteString("    }\n")
+
+	got, err := renderMermaidSource(body.String(), 80)
+	require.NoError(t, err)
+
+	maxWidth := 0
+	for l := range strings.SplitSeq(got, "\n") {
+		if n := len([]rune(l)); n > maxWidth {
+			maxWidth = n
+		}
+	}
+	assert.LessOrEqual(t, maxWidth, 40, "a single member-heavy class must stay within 40 cells wide")
+}
+
+func TestRenderMarkdownDocument_ClassDiagramArtSurvivesGlamourWithoutReflow(t *testing.T) {
+	// Mirrors TestRenderMarkdownDocument_MermaidArtSurvivesGlamourWithoutReflow
+	// (mdpreview_test.go:180) for a transpiled diagram type. One real
+	// difference from that test: paneWidth is inert for flowchart/graph
+	// source (transpileMermaid never touches it, so "want" there can be
+	// computed at any width), but it DOES feed classDiagram's adaptive label
+	// cap here (mermaidLabelCap) — so "want" must be computed at the exact
+	// same paneWidth renderMarkdownDocument uses internally
+	// (mermaidPlaceholderDocument threads its own width parameter straight
+	// through to renderMermaidBlock/renderMermaidSource), not at
+	// mermaidUnconstrainedWidth, which would silently pin a different cap
+	// than what actually gets rendered and spliced in.
+	// Two implementors (k=2, a real fan-in) rather than one: at k=1 the
+	// renderer stacks Git above Renderer vertically (18 cells wide, under
+	// narrowWidth) rather than side by side, which would make the fixture
+	// sanity check below vacuous. Two implementors force the wide-fan-in
+	// layout the plan's adaptive cap is actually shaped around.
+	const narrowWidth = 20
+	src := "classDiagram\n" +
+		"    class Renderer {\n" +
+		"        <<interface>>\n" +
+		"        +render() void\n" +
+		"    }\n" +
+		"    class Git {\n" +
+		"        +render() void\n" +
+		"    }\n" +
+		"    class Hg {\n" +
+		"        +render() void\n" +
+		"    }\n" +
+		"    Renderer <|-- Git\n" +
+		"    Renderer <|-- Hg\n"
+
+	want, err := renderMermaidSource(src, narrowWidth)
+	require.NoError(t, err)
+	require.NotEmpty(t, want)
+
+	maxArtWidth := 0
+	for l := range strings.SplitSeq(want, "\n") {
+		if n := len([]rune(l)); n > maxArtWidth {
+			maxArtWidth = n
+		}
+	}
+	require.Greater(t, maxArtWidth, narrowWidth,
+		"test fixture sanity: the diagram must be wider than narrowWidth or this test cannot detect reflow")
+
+	doc := "before\n\n```mermaid\n" + src + "```\n\nafter\n"
+
+	got := renderMarkdownDocument(mdLines(doc), narrowWidth, false)
+	stripped := xansi.Strip(got)
+
+	assert.Contains(t, stripped, want,
+		"the diagram must reach the output byte-exact: unwrapped, unreflowed, untruncated")
+	assert.Contains(t, stripped, "before")
+	assert.Contains(t, stripped, "after")
 }

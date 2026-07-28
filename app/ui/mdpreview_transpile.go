@@ -197,6 +197,18 @@ func mermaidSafeText(s string) string {
 // own break pattern (cmd/label.go's htmlBreakPattern).
 var mermaidBRPattern = regexp.MustCompile(`(?i)<br\s*/?>|\\n`)
 
+// mermaidDotRun matches a run of two or more consecutive "·" (middle dot)
+// characters. mermaidEdgeLabel's own space -> "·" substitution can produce
+// exactly this: a raw label that already contains a literal "·" surrounded
+// by spaces (the real corpus label "open · C1 (Request)" is exactly this
+// shape) turns BOTH of those surrounding spaces into "·" too, leaving three
+// dots in a row where the author only ever wrote one separator. A run of two
+// or more dots reads as a visual artifact in the rendered art even though it
+// is not unsafe (a run of "·" cannot bleed an arrow through it any more than
+// a single one can) — collapsing it to one keeps the label's meaning while
+// removing the noise.
+var mermaidDotRun = regexp.MustCompile(`·{2,}`)
+
 // mermaidEdgeLabel turns a raw `: label` (or `-->|label|`) capture into text
 // safe to place inside our own synthesized `-->|label|` edge — see the
 // plan's "Edge label" sanitizing table for the derivation of every step.
@@ -237,6 +249,11 @@ func mermaidEdgeLabel(raw string, capRunes int) string {
 	// through the label's own row, so it bleeds through any space at its
 	// column (position-dependent — see the plan's Probe finding table).
 	s = strings.ReplaceAll(s, " ", "·")
+
+	// Collapse any run this just created (see mermaidDotRun) BEFORE the
+	// rune/byte cap is applied, so the truncation budget is spent on real
+	// content rather than on redundant dots this step itself introduced.
+	s = mermaidDotRun.ReplaceAllString(s, "·")
 
 	return mermaidTruncateRunesAndBytes(s, capRunes)
 }
