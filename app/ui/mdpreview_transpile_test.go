@@ -132,11 +132,54 @@ func TestMermaidEdgeLabel_ByteCapBindsBeforeRuneCap_NonASCII(t *testing.T) {
 	// 32 runes of "≤" (3 bytes each) satisfy a 32-RUNE cap but reserve 96
 	// bytes — mapping_edge.go bills column width by len() (bytes), so the
 	// byte cap (same numeric value) must bind here instead, matching the
-	// plan's Probe finding #3 exactly: 10 runes / 30 bytes.
+	// plan's Probe finding #3: 30 bytes of budget spent, here as 9 kept runes
+	// plus the 3-byte ellipsis.
 	raw := strings.Repeat("≤", 32)
 	got := mermaidEdgeLabel(raw, 32)
-	assert.Equal(t, strings.Repeat("≤", 10), got)
+	assert.Equal(t, strings.Repeat("≤", 9)+"...", got)
 	assert.LessOrEqual(t, len(got), 32)
+}
+
+func TestMermaidEdgeLabel_ByteCappedMultiWordLabel_KeepsTheEllipsis(t *testing.T) {
+	// Regression pin. mermaidEdgeLabel turns every space into a 2-byte "·",
+	// so the BYTE cap — not the rune cap — is what binds for essentially
+	// every multi-word edge label. An earlier version of
+	// mermaidTruncateRunesAndBytes could only ever return a bare prefix on
+	// that path, so a cut label looked complete: two different transitions
+	// out of the same state both displayed as "reviewer·resolv" with nothing
+	// marking the truncation.
+	got := mermaidEdgeLabel("reviewer resolves request-changes", mermaidLabelMinRunes)
+	assert.True(t, strings.HasSuffix(got, "..."),
+		"a byte-capped edge label must still carry the ellipsis, or truncation is invisible: %q", got)
+	assert.LessOrEqual(t, len(got), mermaidLabelMinRunes, "the byte cap must still hold")
+	assert.LessOrEqual(t, len([]rune(got)), mermaidLabelMinRunes, "the rune cap must still hold")
+	assert.Equal(t, "reviewer·res...", got)
+}
+
+func TestMermaidTruncateRunesAndBytes_NoRoomForEllipsis_FallsBackToBarePrefix(t *testing.T) {
+	// A cap at or below the ellipsis's own length cannot carry one; the
+	// result degrades to a bare prefix rather than to the ellipsis alone.
+	got := mermaidTruncateRunesAndBytes(strings.Repeat("≤", 5), 3)
+	assert.Equal(t, "≤", got)
+	assert.LessOrEqual(t, len(got), 3)
+}
+
+func TestMermaidEdgeLabel_AngleBracketInLabel_NotCutAsAParenthetical(t *testing.T) {
+	// mermaidSafeText maps '<' and '[' to '(' — so cutting the parenthetical
+	// AFTER sanitizing silently truncated every label containing either
+	// character. The cut must run on the raw text, where no parenthesis
+	// exists.
+	assert.Equal(t, "count·(·max", mermaidEdgeLabel("count < max", 32))
+	assert.Equal(t, "uses·arr(i)", mermaidEdgeLabel("uses arr[i]", 32))
+	assert.Equal(t, "emits·(event)", mermaidEdgeLabel("emits <event>", 32))
+}
+
+func TestMermaidEdgeLabel_AngleBracketWithCardinality_KeepsTheSuffix(t *testing.T) {
+	// The classDiagram path composes "word + cardinality suffix" and hands
+	// the whole thing here. With the cut running after sanitizing, a '<' in
+	// the word took the cardinality down with it.
+	got := mermaidEdgeLabel(classJoinLabelParts("count < max", classComposeCardinality("1", "n")), 32)
+	assert.Equal(t, "count·(·max·1·n", got)
 }
 
 func TestMermaidEdgeLabel_AllCutAway_YieldsNoLabelNotEmptyString(t *testing.T) {
@@ -612,10 +655,67 @@ func TestParseClassDecl_BracketAlias_QuotesAndBracketsConsumed_ParentheticalKept
 		"the bracket alias's parenthetical must survive — the space-paren strip only applies to members")
 }
 
-func TestParseClassDecl_Generic_TildeKeptVerbatim(t *testing.T) {
+func TestParseClassDecl_Generic_TildeKeptInTitleStrippedFromKey(t *testing.T) {
+	// The title keeps the type parameter (it is what the author documented);
+	// the KEY drops it, because relations name the bare class — see
+	// TestClassTranspiler_GenericDeclaration_RelationResolvesToTheSameBox.
 	key, title := parseClassDecl("Repo~T~")
-	assert.Equal(t, "Repo~T~", key)
+	assert.Equal(t, "Repo", key)
 	assert.Equal(t, "Repo~T~", title)
+}
+
+func TestClassStripGeneric_Table(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain generic", "Repo~T~", "Repo"},
+		{"nested generic collapses to the bare name", "Map~String,List~Int~~", "Map"},
+		{"no tilde at all", "Repo", "Repo"},
+		{"tilde inside but not trailing", "Re~po", "Re~po"},
+		{"leading tilde leaves nothing to keep", "~T~", "~T~"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, classStripGeneric(tc.input))
+		})
+	}
+}
+
+func TestClassTranspiler_GenericDeclaration_RelationResolvesToTheSameBox(t *testing.T) {
+	// Real corpus shape (magnolia-content-model's README): the class is
+	// declared generic, every relation names it bare. Keying the declaration
+	// WITH its type parameter split one class into two boxes — an empty one
+	// carrying all the relations, and a floating one holding the stereotype
+	// and members.
+	source := "classDiagram\n" +
+		"    class ScalarContentProperty~T~ {\n" +
+		"        <<abstract>>\n" +
+		"        -T defaultValue\n" +
+		"    }\n" +
+		"    ContentProperty <|-- ScalarContentProperty\n"
+
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newClassTranspiler(b))
+
+	assert.Equal(t, []string{"ScalarContentProperty", "ContentProperty"}, b.order,
+		"the generic declaration and the bare relation operand must be one node, not two")
+	n := b.nodes["ScalarContentProperty"]
+	require.NotNil(t, n)
+	assert.Equal(t, "ScalarContentProperty~T~", n.title, "the title keeps the type parameter")
+	assert.Equal(t, "«abstract»", n.stereotype)
+	assert.Equal(t, []string{"-T defaultValue"}, n.labelLines)
+	assert.Contains(t, b.edges,
+		flowchartEdge{from: "ScalarContentProperty", to: "ContentProperty", label: classInheritanceLabel})
+}
+
+func TestClassOperand_GenericSpelledOnTheRelation_ResolvesToTheBareKey(t *testing.T) {
+	// The mirror case: the relation spells the type parameter, the
+	// declaration does not. Both must normalize to the same key.
+	key, cardinality := classOperand("ScalarContentProperty~T~")
+	assert.Equal(t, "ScalarContentProperty", key)
+	assert.Empty(t, cardinality)
 }
 
 func TestParseClassDecl_StyleSuffix_StrippedFromKeyAndTitle(t *testing.T) {
@@ -983,19 +1083,63 @@ func TestStateNodeKey_Table(t *testing.T) {
 	tests := []struct {
 		name     string
 		raw      string
+		scope    string
 		isTarget bool
 		want     string
 	}{
-		{"pseudo-state as source folds to start", "[*]", false, stateStartKey},
-		{"pseudo-state as target folds to end", "[*]", true, stateEndKey},
-		{"real state name as source is unchanged", "Draft", false, "Draft"},
-		{"real state name as target is unchanged", "Draft", true, "Draft"},
+		{"pseudo-state as source folds to start", "[*]", "", false, stateStartKey},
+		{"pseudo-state as target folds to end", "[*]", "", true, stateEndKey},
+		{"real state name as source is unchanged", "Draft", "", false, "Draft"},
+		{"real state name as target is unchanged", "Draft", "", true, "Draft"},
+		{"pseudo-state inside a composite is scoped to it", "[*]", "Active", false, stateStartKey + "Active"},
+		{"end pseudo-state inside a composite is scoped to it", "[*]", "Active", true, stateEndKey + "Active"},
+		{"real state name is never scoped", "NumLockOff", "Active", false, "NumLockOff"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, stateNodeKey(tc.raw, tc.isTarget))
+			assert.Equal(t, tc.want, stateNodeKey(tc.raw, tc.scope, tc.isTarget))
 		})
 	}
+}
+
+func TestStateTranspiler_CompositeOwnPseudoState_DoesNotFoldWithTheDiagramLevelOne(t *testing.T) {
+	// The canonical mermaid composite-state example. The diagram-level "[*]"
+	// enters Active; Active's OWN "[*]" enters NumLockOff, which is Active's
+	// internal start, not a second entry point into the diagram. Folding both
+	// into one node (the first version of stateNodeKey) drew a false
+	// "(start) --> NumLockOff" arrow straight past Active into its interior.
+	source := "stateDiagram-v2\n" +
+		"    [*] --> Active\n" +
+		"    state Active {\n" +
+		"        [*] --> NumLockOff\n" +
+		"        NumLockOff --> NumLockOn : EvNumLockPressed\n" +
+		"    }\n"
+
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+
+	diagramStart := b.nodes[stateStartKey]
+	require.NotNil(t, diagramStart, "the diagram-level start pseudo-state must exist")
+	compositeStart := b.nodes[stateStartKey+"Active"]
+	require.NotNil(t, compositeStart, "the composite's own start pseudo-state must be its own node")
+	assert.NotEqual(t, diagramStart.id, compositeStart.id,
+		"a composite's [*] is its own internal start and must not share a node with the diagram's")
+	assert.Equal(t, stateStartLabel, compositeStart.title,
+		"a scoped pseudo-state still renders with the readable (start) label")
+
+	// the diagram-level start reaches Active and nothing else
+	var fromDiagramStart []string
+	for _, e := range b.edges {
+		if e.from == stateStartKey {
+			fromDiagramStart = append(fromDiagramStart, e.to)
+		}
+	}
+	assert.Equal(t, []string{"Active"}, fromDiagramStart,
+		"the diagram-level start must not gain a second arrow into the composite's interior")
+
+	// the composite owns its own start, and that start is what reaches NumLockOff
+	assert.Contains(t, b.edges, flowchartEdge{from: "Active", to: stateStartKey + "Active", label: "contains"})
+	assert.Contains(t, b.edges, flowchartEdge{from: stateStartKey + "Active", to: "NumLockOff", label: ""})
 }
 
 // --- stateDiagram-v2 transpiler: parseStateDecl ---
@@ -1631,6 +1775,135 @@ func TestRenderMermaidSource_ManyMemberClass_RendersWithinFortyCells(t *testing.
 		}
 	}
 	assert.LessOrEqual(t, maxWidth, 40, "a single member-heavy class must stay within 40 cells wide")
+}
+
+// mermaidArtWidth returns the widest rendered line of a box-art render, in
+// display cells — trailing spaces stripped first so padding is not counted as
+// content.
+func mermaidArtWidth(art string) int {
+	widest := 0
+	for l := range strings.SplitSeq(art, "\n") {
+		if n := xansi.StringWidth(strings.TrimRight(l, " ")); n > widest {
+			widest = n
+		}
+	}
+	return widest
+}
+
+// --- honest width behavior on REAL corpus diagrams ---
+//
+// The synthetic fan-in fixtures the cap formula was derived from (see
+// TestMermaidLabelCap_AdaptiveTable_80ColumnPane) do fit an 80-column pane at
+// k=2 and k=3. Real corpus diagrams mostly do not. Both tests below use
+// verbatim corpus fences and pin the measured truth: the adaptive cap shrinks
+// the labels, and the art is STILL wider than the pane.
+//
+// Measured over every distinct classDiagram/stateDiagram fence in the plan's
+// corpus (15 fences), rendered at a paneWidth of 80: widths 36, 79, 80, 81,
+// 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284 — three of fifteen fit.
+// So the cap reduces overflow but does not prevent it, at any k. These tests
+// exist so that stays written down in executable form: the earlier
+// synthetic-only pinning is exactly why the plan carried a wrong "only k>=4
+// clips" claim through implementation.
+
+func TestRenderMermaidSource_RealCorpusStateDiagram_CapShrinksButArtStillOverflowsPane(t *testing.T) {
+	// Verbatim from /Users/sasha/dev/mx/publication-requests/docs/architecture/
+	// 2026-07-10-workflow-policy-brain-sketch.md. Its widest layout level
+	// holds 2 nodes, so the plan's own table predicts 79 cells — "fits 80".
+	source := `stateDiagram-v2
+    [*] --> Draft: open · C1 (Request)
+    Draft --> InReview: submit + validate · C2 (Request/Content)
+    InReview --> ChangesRequested: gate concludes · C3 (Engine)
+    ChangesRequested --> InReview: revise (Request)
+    InReview --> Approved: quorum met · C3 (Engine)
+    InReview --> Rejected: hard reject · C3 (Engine)
+    Approved --> Scheduled: has publicationDate · C4 (Scheduler)
+    Approved --> Published: publish · C5 (Publishing)
+    Scheduled --> Published: tick due · C5 (Scheduler)
+    Published --> [*]: close + notify · C6 (Request/Notifications)
+    Draft --> Withdrawn: withdraw (Request)`
+
+	b := newFlowchartBuilder(80)
+	scanMermaidBlocks(source, newStateTranspiler(b))
+	k := b.widestLevel()
+	require.Equal(t, 2, k, "this corpus diagram's widest layout level holds two states")
+	assert.Equal(t, 29, mermaidLabelCap(80, k, b.hasAnyEdgeLabel()),
+		"the adaptive cap must still shrink below the 32-rune ceiling — do not weaken or delete it")
+
+	art, err := renderMermaidSource(source, 80)
+	require.NoError(t, err)
+	width := mermaidArtWidth(art)
+	assert.Greater(t, width, 80,
+		"honest behavior: a real k=2 corpus stateDiagram overflows an 80-column pane despite the cap (measured 88); "+
+			"the cap reduces overflow, it does not guarantee fit")
+	assert.Less(t, width, 130, "sanity band — a much larger number means the cap stopped working entirely, got %d", width)
+}
+
+func TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane(t *testing.T) {
+	// Verbatim from /Users/sasha/dev/magnolia/dam/docs/plans/
+	// 2026-07-28-dam-source-refactor-design.md. Widest layout level holds 3
+	// nodes, so the cap is already on its floor (16 runes) and cannot shrink
+	// any further — mermaidLabelMinRunes is what stops it. The plan's table
+	// predicted 78 cells, "fits 80".
+	source := `classDiagram
+    class AssetProviderRegistry {
+        <<interface>>
+        +getProviderById(String) AssetProvider
+        +getProviderFor(ItemKey) AssetProvider
+        +getProvidersFor(MediaType...) Iterator
+        +getRendererFor(Asset, MediaType) AssetRenderer
+    }
+    class AssetProvider {
+        <<interface>>
+        +getAsset(ItemKey) Asset
+        +list(AssetQuery) Iterator
+        +provides(MediaType) boolean
+        +getRendererFor(Asset, MediaType) AssetRenderer
+        +isEnabled() boolean
+    }
+    class Asset {
+        <<interface>>
+        +getLink() String
+        +getContentStream() InputStream
+        +getBinaryReference() BinaryReference
+        +getTitle() String
+    }
+    class Item {
+        <<interface>>
+        +getParent() Folder
+        +getAssetProvider() AssetProvider
+    }
+    class Folder {
+        <<interface>>
+        +getChildren() Iterator
+        +getItem(String) Item
+        +isRoot() boolean
+    }
+    class WithMutableContent {
+        <<interface>>
+        +setContent(InputStream) CompletableFuture
+    }
+
+    AssetProviderRegistry --> AssetProvider : looks up by id or media type
+    AssetProvider --> Asset : returns
+    Item <|-- Asset
+    Item <|-- Folder
+    Asset <|.. WithMutableContent : cast to write
+    Item --> AssetProvider : points back`
+
+	b := newFlowchartBuilder(80)
+	scanMermaidBlocks(source, newClassTranspiler(b))
+	k := b.widestLevel()
+	require.Equal(t, 3, k, "this corpus diagram's widest layout level holds three classes")
+	assert.Equal(t, mermaidLabelMinRunes, mermaidLabelCap(80, k, b.hasAnyEdgeLabel()),
+		"the cap is already on its floor here and has nothing left to give")
+
+	art, err := renderMermaidSource(source, 80)
+	require.NoError(t, err)
+	width := mermaidArtWidth(art)
+	assert.Greater(t, width, 80,
+		"honest behavior: even on the cap's floor a real k=3 corpus classDiagram overflows an 80-column pane (measured 81)")
+	assert.Less(t, width, 130, "sanity band — a much larger number means the cap stopped working entirely, got %d", width)
 }
 
 func TestRenderMarkdownDocument_ClassDiagramArtSurvivesGlamourWithoutReflow(t *testing.T) {

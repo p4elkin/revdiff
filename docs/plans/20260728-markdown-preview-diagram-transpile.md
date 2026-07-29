@@ -265,24 +265,63 @@ labels. No iteration. Levels come from a walk over the built graph: roots are th
 as an edge target, and every other node sits one below its deepest parent. That matches the
 renderer's own level assignment once the declaration order below is fixed.
 
-Worked values at an 80-column pane, with labeled relations (the common case), all cross-checked
-against the probe's measurements:
+Worked values at an 80-column pane, with labeled relations (the common case), on the **synthetic
+fan-in shape the formula was derived from** — an interface with `k` implementors, each a plain box,
+one labeled edge each. All cross-checked against the probe's measurements:
 
-| k | cap | art width | fits 80? |
+| k | cap | art width, synthetic shape | fits 80? |
 |---|---|---|---|
 | 1 | 32 (ceiling) | 36 | yes |
 | 2 | 29 | 79 | yes |
 | 3 | 16 (floor) | 78 | yes |
 | 4 | 16 (floor, formula wanted 8) | 111 | no, clips |
 
-So the clip boundary is `k=4`, the same as the original design intended — the first formula just
-reached it by ignoring a real cost. `k=3` now lands exactly on the floor, which means a
-three-implementor interface shows 16-rune member lines. That is tight but readable, and it is the
-honest trade for fitting the pane. `k=4` and above clips, recorded in the Failure modes table
-rather than pretended away.
+⚠️ **Corrected after review (2026-07-29). Those four rows describe the synthetic shape only. They
+do not describe real diagrams, and the "so the clip boundary is k=4" conclusion this section used
+to draw from them was wrong.**
+
+Every distinct `classDiagram` / `stateDiagram` fence in the corpus was re-rendered at a pane width
+of 80 (15 fences after de-duplicating identical sources). Measured widths, sorted:
+
+```
+36, 79, 80, 81, 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284
+```
+
+**Three of fifteen fit an 80-column pane.** The median is 101. Overflow starts at `k=1`
+(a single tall class with long member lines measures 82) and there are overflowing diagrams at
+every `k` the corpus contains — 81 at `k=3`, 88 and 113 at `k=2`, 96 at `k=1`.
+
+Two things the formula does not model explain the gap:
+
+- `widestLevel` predicts the renderer's horizontal placement only while edges connect adjacent
+  levels. Once an edge skips a level — which real diagrams do constantly, and the corpus
+  stateDiagrams do on nearly every transition — the renderer's own placement no longer matches the
+  level counts this walk produces, so `k` under-reports the real side-by-side width.
+- `labelJog = 8 * floor(k/2)` was calibrated on the fixed 10-character `implements` label. A
+  stateDiagram transition label is free text up to the cap and reserves `len(label) + 3` columns of
+  its own (`mapping_edge.go:161`), so the real jog cost scales with the label, not with `k` alone.
+  The `architecture-proposal.md` stateDiagram measures 113 cells at `k=2` with a cap of 29; the
+  same diagram with every label removed still measures 82.
+
+**What the cap is actually for, then.** It reduces overflow, it does not prevent it. It is worth
+keeping — without it the widest corpus diagram is far worse, and `k=1` diagrams do land inside the
+pane — but nothing in this design guarantees a diagram fits. The real fix is horizontal panning in
+preview mode, which is a separate feature (there is no `scroll_left`/`scroll_right` in
+`mdPreviewAllowedActions`, and the preview render does not flow through `applyHorizontalScroll` at
+all). That is recorded in PATCH.md's Known limitations, not built here.
 
 The upper clamp of 32 exists because past it the extra width buys little and boxes start to
-dominate the pane. The floor of 16 exists because below it a member line is all ellipsis.
+dominate the pane. The floor of 16 exists because below it a member line is all ellipsis. The floor
+is why the cap cannot rescue a wide diagram: from `k=3` up it is already on the floor and has
+nothing left to give.
+
+Pinned in `mdpreview_transpile_test.go` by
+`TestRenderMermaidSource_RealCorpusStateDiagram_CapShrinksButArtStillOverflowsPane` and
+`TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane`, which use verbatim
+corpus fences and assert both halves of the truth: the cap really does shrink, and the art really
+is still wider than the pane. The synthetic table above stays pinned too
+(`TestMermaidLabelCap_AdaptiveTable_80ColumnPane`) — it is a correct description of the formula,
+just not of real diagrams.
 
 This needs the viewport width inside the transpiler. `renderMarkdownDocument` already takes
 `width`, so it threads through `mermaidPlaceholderDocument` to `renderMermaidBlock`.
@@ -303,7 +342,8 @@ eleven members, so the cap never fires on the median diagram — it only bounds 
 The 19-member class: widest member 62 characters, 20 label lines. Unbounded that is 66 cells by 43
 rows, and two side by side would be 137 cells with the right-hand class permanently invisible.
 Under these rules it becomes 14 label lines each at most 32: 36 cells by 31 rows, and two side by
-side is 77 cells, which fits 80.
+side is 77 cells, which fits 80. (That last "fits 80" is the synthetic two-box pairing again — see
+the corrected measurements above for why real diagrams of this shape usually do not fit.)
 
 Rejected: dropping the type after `:` (21 of 36 diagrams use generic types, so the type is what
 these authors are documenting); always name-only (discards the reason the author chose
@@ -428,9 +468,8 @@ TD case inside the pane down to `k=3`. Not worth the machinery.
 | transpile succeeds, render still errors | verbatim, identical to today |
 | panic in our code or theirs | existing `recover()` at `mdpreview.go:167`, verbatim |
 | render returns whitespace only | existing blank check at `mdpreview.go:174`, verbatim |
-| widest layout level has 4+ nodes at an 80-column pane | the cap hits its floor of 16 and the art clips on the right; unavoidable without horizontal panning |
+| art wider than the pane at an 80-column pane | clipped on the right, with no way to scroll it into view. **Measured: 12 of the corpus's 15 distinct class/state fences overflow at width 80** (widths 36, 79, 80, 81, 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284). This happens at every `k`, not only at `k>=4` as this table used to claim — see the corrected "The width cap is adaptive" section. The adaptive cap reduces the overflow; it does not prevent it. Unavoidable without horizontal panning, which is out of scope here |
 | three or more parallel edges between one pair | renders, but the renderer drops one of the labels (`mapping_edge.go:96-104` offers only two alternate routings) |
-| art wider than the pane for any other reason | clipped, as today |
 
 The user can never see a crash or a mangled half-diagram. Every exit lands on the same `verbatim()`
 closure that ships today.
@@ -463,6 +502,13 @@ having any labeled relation. That restores the intended clip boundary of `k=4` a
 Rejected: shortening the relation-label constants below `implements`, which would trade a readable
 label for a few cells and still not fix `k=4`; and accepting `k=2` as the clip boundary, which
 would make three quarters of real class diagrams clip rather than one quarter.
+
+⚠️ **This decision was itself only half right, found by the 2026-07-29 review.** The `labelJog`
+term is real and worth keeping, but it does not restore a `k=4` clip boundary, because there is no
+clip boundary in `k` at all. Re-measured over the whole corpus at width 80, only 3 of 15 distinct
+class/state fences fit, and the overflowing ones span every `k` from 1 upward. Both the "clip
+boundary" phrasing above and the rejected option's "three quarters vs one quarter" estimate are
+wrong. The corrected numbers live in the "The width cap is adaptive" section.
 
 Also noted from row 4: the corpus class this plan calls "19-member" has 18 members today. It has
 drifted since the plan was drafted. The arithmetic is unchanged, since both counts exceed the
@@ -746,7 +792,7 @@ are stubs that report not-handled.
 | 4 | transpile succeeds, render still errors → verbatim | inspection only. No adversarial input tried during this task's audit reaches this branch — the transpiler's exhaustive sanitizing (see "Sanitizing" tables) makes every emitted flowchart source provably valid to the vendored parser in every case exercised. The branch exists as defense in depth (`renderMermaidSource`'s `err != nil` check, `app/ui/mdpreview_transpile.go:1658`), not as a reachable behavior this task could reproduce |
 | 5 | panic in our code or theirs → existing `recover()`, verbatim | inspection only for the recover itself (no test forces an actual panic to prove `recover()` catches it) + test in the opposite direction: `TestRenderMermaidSource_AdversarialSources_NeverPanic` proves the known-hazardous inputs it tries do not need to rely on `recover()` at all, which is stronger evidence of robustness but not a direct test of the recover path |
 | 6 | render returns whitespace only → existing blank check, verbatim | inspection only. The check (`app/ui/mdpreview.go:189`) is shared, pre-existing code, identical regardless of diagram kind; not re-derived or modified by this plan, and no test in this file specifically forces a classDiagram/stateDiagram-v2 transpile to render as whitespace-only |
-| 7 | widest layout level 4+ nodes at 80-col pane → cap floors, clips | test: `TestMermaidLabelCap_AdaptiveTable_80ColumnPane` (k=4 case) at the formula level, plus the Probe findings table's row 1 measuring the real clip on the actual renderer |
+| 7 | art wider than the 80-col pane → clipped, no way to scroll it into view | **Row rewritten 2026-07-29** — the old wording ("widest layout level 4+ nodes") was wrong, see the corrected "The width cap is adaptive" section. Tests: `TestMermaidLabelCap_AdaptiveTable_80ColumnPane` still pins the formula on the synthetic shape, and two new tests pin the honest behavior on verbatim corpus fences — `TestRenderMermaidSource_RealCorpusStateDiagram_CapShrinksButArtStillOverflowsPane` (k=2, cap 29, art 88 cells) and `TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane` (k=3, cap on its floor, art 81 cells). Both assert the cap still shrinks AND the art still overflows |
 | 8 | 3+ parallel edges between one pair → renders, drops one label | test only proves no panic (`TestRenderMermaidSource_AdversarialSources_NeverPanic`'s "three parallel edges" case). The specific "drops one label" claim is verified only by the Probe findings intro paragraph (external throwaway probe program, Task 1), not by any test in this repo |
 | 9 | art wider than pane for any other reason → clipped, as today | inspection + pre-existing generic test (`TestRenderMarkdownDocument_NarrowWidth_ProseRespectsWidthArtOverflows`, `mdpreview_test.go`) — this is inherited clipping behavior, not diagram-type-specific, and predates this plan |
 

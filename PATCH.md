@@ -194,13 +194,29 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   diagram is a wider terminal.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
-- **A transpiled classDiagram/stateDiagram-v2 with 4 or more nodes on its widest layout level
-  clips at an 80-column pane.** The adaptive per-line label cap (`mermaidLabelCap` in
-  `mdpreview_transpile.go`) shrinks as that count (`k`) grows, but it floors at 16 runes per line
-  once `k >= 3`, so at `k >= 4` the box widths stop shrinking to compensate and the art runs wider
-  than the pane. This is the same "no horizontal panning" limitation as the item above — the
-  preview cannot scroll sideways to reveal the clipped part — it just also now applies to
-  transpiled diagrams, not only to hand-written wide `graph`/`flowchart` sources.
+- **Most transpiled classDiagram/stateDiagram-v2 fences are wider than an 80-column pane, and the
+  adaptive label cap only reduces that — it does not prevent it.** Measured 2026-07-29 over every
+  distinct class/state mermaid fence in the author's document corpus (15 fences), rendered at a
+  pane width of 80: widths `36, 79, 80, 81, 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284`.
+  **Three of fifteen fit**; the median is 101.
+
+  The per-line label cap (`mermaidLabelCap` in `mdpreview_transpile.go`) shrinks label lines as the
+  number of nodes on the widest layout level (`k`) grows, and it is worth keeping, but it cannot
+  guarantee a fit for two reasons. It floors at 16 runes per line, so from `k >= 3` up it is
+  already on the floor with nothing left to give. And its model of the renderer's horizontal
+  placement is approximate: `widestLevel` stops matching the real placement once edges skip levels
+  (which real diagrams do constantly), and the `labelJog` term was calibrated on a fixed
+  10-character relation word while a stateDiagram transition label is free text that reserves
+  `len(label)+3` columns of its own. Overflow therefore happens at every `k`, not only at `k >= 4`
+  — an earlier version of this note and of the plan both claimed a `k >= 4` boundary, which the
+  corpus measurement disproves.
+
+  This is the same "no horizontal panning" limitation as the item above — the preview cannot scroll
+  sideways to reveal the clipped part — so the only current remedy is a wider terminal. Horizontal
+  panning in preview mode is the real fix and needs its own plan. Two tests pin the honest
+  behaviour on verbatim corpus fences so the claim cannot quietly drift back:
+  `TestRenderMermaidSource_RealCorpusStateDiagram_CapShrinksButArtStillOverflowsPane` and
+  `TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane`.
 
 ## Dependencies added
 

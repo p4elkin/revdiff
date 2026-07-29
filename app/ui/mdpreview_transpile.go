@@ -273,22 +273,32 @@ var mermaidDotRun = regexp.MustCompile(`·{2,}`)
 // `-->||` is not read as an empty label by the vendored parser, but as a
 // malformed edge whose remainder becomes a phantom node named "|| n1".
 //
-// The <br/>/literal-\n cut runs on the RAW text, before mermaidSafeText —
-// deliberately the one rule not layered on top like the others. mermaidSafeText
-// maps '<'/'>' to '('/')' and deletes bare backslashes, either of which would
-// destroy the very pattern this step is trying to recognize (an already-
-// sanitized "<br/>" reads as "(br/)", which the break pattern no longer
-// matches; a literal "\n" would already have lost its backslash). Cutting
-// first, on the untouched raw text, avoids that ordering trap entirely.
+// Both cutting rules — the <br/>/literal-\n cut and the parenthetical cut —
+// run on the RAW text, before mermaidSafeText. They are deliberately not
+// layered on top of the sanitizer like the rest, because mermaidSafeText
+// rewrites exactly the characters they look for:
+//
+//   - it maps '<'/'>' to '('/')' and deletes bare backslashes, so an
+//     already-sanitized "<br/>" reads as "(br/)", which the break pattern no
+//     longer matches, and a literal "\n" would already have lost its
+//     backslash;
+//   - it maps '<' and '[' to '(' too, so a label with no parenthetical at all
+//     grows one during sanitizing. Cutting after that silently truncated every
+//     label containing '<' or '[': "count < max" became "count", "uses arr[i]"
+//     became "uses·arr", and a classDiagram relation lost its cardinality
+//     suffix along with the rest.
+//
+// Cutting first, on the untouched raw text, avoids both traps: only a
+// parenthesis or brace the author actually typed can end a label.
 func mermaidEdgeLabel(raw string, capRunes int) string {
 	s := raw
 	if loc := mermaidBRPattern.FindStringIndex(s); loc != nil {
 		s = strings.TrimSpace(s[:loc[0]])
 	}
 
-	s = mermaidSafeText(s)
-
 	s = mermaidCutParenthetical(s)
+
+	s = mermaidSafeText(s)
 
 	// Every remaining space becomes a middle dot: the arrow is drawn
 	// through the label's own row, so it bleeds through any space at its
@@ -309,11 +319,14 @@ func mermaidEdgeLabel(raw string, capRunes int) string {
 // being cut to nothing — cutting at index 0 would discard real content for
 // no gain, and the caller's own truncation still bounds the width.
 //
-// Two callers share this rule. mermaidEdgeLabel applies it to a whole edge
-// label. classJoinLabelParts applies it to a relation's WORD alone, before
-// the cardinality suffix is appended — otherwise a parenthetical inside an
-// explicit "  : label" override would cut the suffix away with it, losing
-// the cardinality the plan says an explicit label never replaces.
+// Two callers share this rule, and BOTH run it on raw, pre-sanitizing text.
+// mermaidEdgeLabel applies it to a whole edge label (see that function's doc
+// comment for why the order matters — mermaidSafeText manufactures new '('
+// characters out of '<' and '['). classJoinLabelParts applies it to a
+// relation's WORD alone, before the cardinality suffix is appended —
+// otherwise a parenthetical inside an explicit "  : label" override would cut
+// the suffix away with it, losing the cardinality the plan says an explicit
+// label never replaces.
 func mermaidCutParenthetical(s string) string {
 	if idx := strings.IndexAny(s, "({"); idx > 0 {
 		return strings.TrimSpace(s[:idx])
@@ -327,25 +340,46 @@ func mermaidCutParenthetical(s string) string {
 // count; a label built from multi-byte runes (e.g. "≤", 3 bytes each) can
 // still pass the rune check while reserving far more than capRunes bytes of
 // mermaid-ascii's per-column width budget.
+//
+// A byte-capped result carries the same "..." ellipsis a rune-capped one
+// does. That is not cosmetic. mermaidEdgeLabel turns every space into a
+// 2-byte "·", so the byte cap binds for essentially every multi-word edge
+// label; without the ellipsis two different transitions out of the same state
+// can both display as a bare prefix ("reviewer·resolv"), reading as complete
+// labels that happen to be identical rather than as two truncated ones.
+//
+// The candidate is built as "first n runes + ellipsis" directly, NOT by
+// re-running mermaidTruncate on a prefix. That was the earlier shape and it
+// was silently broken: every prefix handed back was already at or under
+// capRunes runes, so mermaidTruncate returned it unchanged and the ellipsis
+// could never appear.
 func mermaidTruncateRunesAndBytes(s string, capRunes int) string {
 	out := mermaidTruncate(s, capRunes)
 	if len(out) <= capRunes {
 		return out
 	}
-	// The rune-capped result is still over the byte budget: shrink the
-	// ORIGINAL string rune-by-rune from the end, re-deriving the ellipsis
-	// each time via mermaidTruncate, until a candidate clears the same
-	// numeric cap in bytes too.
-	//
-	// The walk starts at capRunes, not at len(runes): for every n above
-	// capRunes, mermaidTruncate(runes[:n], capRunes) returns the byte-
-	// identical ellipsis form already computed as out above — which just
-	// failed the byte check — so those iterations can only repeat the same
-	// failure. Starting lower skips them and bounds the loop at capRunes (at
-	// most mermaidLabelMaxRunes = 32) iterations instead of len(runes).
+
+	// Still over the byte budget: shrink the ORIGINAL string rune by rune
+	// from the end until the kept prefix PLUS the ellipsis clears the same
+	// numeric cap in bytes. The walk starts at capRunes-len(ellipsis) rather
+	// than at len(runes) because every longer prefix would only produce a
+	// candidate that is longer in both runes and bytes than one already
+	// rejected, so it bounds the loop at capRunes (at most
+	// mermaidLabelMaxRunes = 32) iterations instead of len(runes).
 	runes := []rune(s)
-	for n := min(len(runes), capRunes); n > 0; n-- {
-		candidate := mermaidTruncate(string(runes[:n]), capRunes)
+	const ellipsis = "..."
+	if capRunes <= len(ellipsis) {
+		// No room for an ellipsis at all — fall back to a bare prefix, the
+		// same degenerate case mermaidTruncate itself handles this way.
+		for n := min(len(runes), capRunes); n > 0; n-- {
+			if candidate := string(runes[:n]); len(candidate) <= capRunes {
+				return candidate
+			}
+		}
+		return ""
+	}
+	for n := min(len(runes), capRunes-len(ellipsis)); n > 0; n-- {
+		candidate := string(runes[:n]) + ellipsis
 		if len(candidate) <= capRunes {
 			return candidate
 		}
@@ -906,6 +940,45 @@ func classStripStyleSuffix(s string) string {
 	return s
 }
 
+// classStripGeneric strips a trailing "~...~" type-parameter suffix from an
+// identifier, keeping the bare class name. This is the same corruption class
+// classStripStyleSuffix exists to prevent, reached through a different piece
+// of syntax: mermaid lets a class be DECLARED generic
+// ("class ScalarContentProperty~T~ { ... }") while every relation naming it
+// writes the bare name ("ContentProperty <|-- ScalarContentProperty"). Keying
+// the declaration with its type parameter makes those two texts different
+// keys, so the diagram draws two boxes for one class — one holding the
+// stereotype and members with no relations, one holding all the relations
+// with no content. That is a real corpus case (magnolia-content-model's
+// README).
+//
+// The cut is taken at the FIRST '~' rather than by matching a balanced
+// "~...~" tail, so a nested type parameter ("Map~String,List~Int~~", which
+// ends in two tildes) collapses to "Map" instead of to "Map~String,List~Int".
+// A string that merely CONTAINS a tilde without ending in one is left alone,
+// and so is one whose first tilde is at index 0 (nothing would be left).
+func classStripGeneric(s string) string {
+	s = strings.TrimSpace(s)
+	if !strings.HasSuffix(s, "~") {
+		return s
+	}
+	idx := strings.Index(s, "~")
+	if idx <= 0 {
+		return s
+	}
+	return strings.TrimSpace(s[:idx])
+}
+
+// classNodeKey normalizes an identifier into the node KEY that every mention
+// of the same class — a declaration, a relation operand, a colon-form member
+// line — must agree on: both the ":::styleName" style suffix and a trailing
+// "~T~" generic type parameter stripped. Anywhere only one of the two strips
+// is applied, the same class can end up keyed two different ways and render
+// as two disconnected boxes.
+func classNodeKey(s string) string {
+	return classStripGeneric(classStripStyleSuffix(s))
+}
+
 // classBracketAliasPattern matches classDiagram's bracket-alias declaration
 // shape, `Foo["Display Name"]`: group 1 is the identifier (the node KEY,
 // used for relation matching — never sanitized, see parseClassDecl), group
@@ -917,30 +990,33 @@ var classBracketAliasPattern = regexp.MustCompile(`^([^\[\s]+)\s*\[(.*)\]$`)
 // bracket alias (`Foo["Display Name"]`), generic ("Repo~T~"), and any of
 // those with a trailing ":::styleName" (stripped via classStripStyleSuffix
 // before the shape is even examined, since the style suffix always trails
-// the whole declaration). key is the raw, UNsanitized identifier — the same
-// text a relation operand must produce for the two to resolve to the same
-// node (see classOperand) — never run through mermaidSafeText. title is
-// what a caller passes to flowchartBuilder.setTitle: sanitized, but
-// deliberately NOT run through the member-only space-paren strip, because
-// the bracket alias's parenthetical is real display text, not trailing
-// member commentary (see the plan's note that the bracket alias keeps its
-// parenthetical). key is "" when rest is empty after the style-suffix
-// strip, signaling "nothing to declare" to the caller.
+// the whole declaration). key is the raw, UNsanitized identifier, normalized
+// through classNodeKey — the same text a relation operand must produce for
+// the two to resolve to the same node (see classOperand) — never run through
+// mermaidSafeText. title is what a caller passes to flowchartBuilder.setTitle:
+// sanitized, but deliberately NOT run through the member-only space-paren
+// strip, because the bracket alias's parenthetical is real display text, not
+// trailing member commentary (see the plan's note that the bracket alias
+// keeps its parenthetical). key is "" when rest is empty after the
+// style-suffix strip, signaling "nothing to declare" to the caller.
+//
+// The generic type parameter is stripped from the KEY but kept in the TITLE:
+// "class Repo~T~" keys as "Repo" (so a relation naming plain "Repo" lands on
+// the same node — see classStripGeneric) while still rendering its box titled
+// "Repo~T~", which is what the author documented. The tilde itself is left
+// completely alone by mermaidSafeText (see its own doc comment), so the title
+// shows the type parameter exactly as written.
 func parseClassDecl(rest string) (key, title string) {
 	rest = classStripStyleSuffix(strings.TrimSpace(rest))
 	if rest == "" {
 		return "", ""
 	}
 	if m := classBracketAliasPattern.FindStringSubmatch(rest); m != nil {
-		key = strings.TrimSpace(m[1])
+		key = classStripGeneric(strings.TrimSpace(m[1]))
 		display := strings.Trim(strings.TrimSpace(m[2]), `"`)
 		return key, mermaidSafeText(display)
 	}
-	// Bare or generic ("Repo~T~"): key and title are the same raw text. The
-	// tilde is left completely alone by mermaidSafeText (see its own doc
-	// comment), so a generic class's title renders with its type parameter
-	// exactly as the author wrote it.
-	return rest, mermaidSafeText(rest)
+	return classStripGeneric(rest), mermaidSafeText(rest)
 }
 
 // classDeclFromStatement recognizes a "class ..." declaration — bare
@@ -969,12 +1045,14 @@ var classQuotedSegment = regexp.MustCompile(`"([^"]*)"`)
 // (`Task "1"`) but BEFORE it on the right (`"0..1" WorkflowRef`; see the
 // real corpus example in the plan's Grammar section): finding the quoted
 // segment wherever it falls and treating everything else as the key serves
-// both positions with one function. The key is then run through
-// classStripStyleSuffix, since a relation operand can carry its own
-// ":::styleName" independent of the class's own declaration (see that
-// function's doc comment for why this must be parsed, not ignored). key is
-// the RAW identifier — never sanitized — so it matches whatever
-// parseClassDecl produced for the same class elsewhere in the diagram.
+// both positions with one function. The key is then run through classNodeKey,
+// since a relation operand can carry its own ":::styleName" independent of
+// the class's own declaration, and can equally well spell the class with its
+// generic type parameter when the declaration does (or the other way round)
+// — see classStripStyleSuffix and classStripGeneric for why each of those
+// must be normalized rather than ignored. key is the RAW identifier — never
+// sanitized — so it matches whatever parseClassDecl produced for the same
+// class elsewhere in the diagram.
 func classOperand(raw string) (key, cardinality string) {
 	raw = strings.TrimSpace(raw)
 	if m := classQuotedSegment.FindStringSubmatchIndex(raw); m != nil {
@@ -983,7 +1061,7 @@ func classOperand(raw string) (key, cardinality string) {
 	} else {
 		key = raw
 	}
-	return classStripStyleSuffix(key), cardinality
+	return classNodeKey(key), cardinality
 }
 
 // classArrowPattern matches any of the fourteen classDiagram relation arrow
@@ -1323,9 +1401,10 @@ func (c *classTranspiler) statementRelation(text string) bool {
 // statementColonMember handles the "ClassName : member" top-level form —
 // used both for an ordinary member ("Foo : +bar() void") and for a
 // stereotype ("Foo : <<interface>>"). key may carry its own ":::styleName"
-// suffix, stripped the same way a bracket-alias declaration's would be.
+// suffix or generic type parameter, both normalized away by classNodeKey the
+// same way a declaration's or a relation operand's would be.
 func (c *classTranspiler) statementColonMember(key, after string) {
-	key = classStripStyleSuffix(key)
+	key = classNodeKey(key)
 	if key == "" {
 		return
 	}
@@ -1507,8 +1586,8 @@ func (s *stateTranspiler) applyStateDecl(key, title, annotation string) {
 // there is no arrow-to-label lookup here: label is already whatever text
 // followed the transition's colon, straight from parseStateTransition.
 func (s *stateTranspiler) statementTransition(fromRaw, toRaw, label string) {
-	fromKey := stateNodeKey(fromRaw, false)
-	toKey := stateNodeKey(toRaw, true)
+	fromKey := stateNodeKey(fromRaw, s.currentComposite, false)
+	toKey := stateNodeKey(toRaw, s.currentComposite, true)
 
 	s.ensureTitle(fromKey)
 	s.ensureTitle(toKey)
@@ -1520,22 +1599,27 @@ func (s *stateTranspiler) statementTransition(fromRaw, toRaw, label string) {
 // ensureTitle gives key a default title the first time it is referenced with
 // no title of its own — see classTranspiler.ensureTitle's doc comment for
 // why this fallback matters (a state can be introduced purely by a
-// transition endpoint, never declared). The two folded pseudo-state keys are
+// transition endpoint, never declared). Folded pseudo-state keys are
 // special-cased to their fixed "(start)"/"(end)" labels rather than falling
-// through to mermaidSafeText: sanitizing the raw "\x00start"/"\x00end" keys
-// would not even be meaningful (they are synthetic, never user text), and
-// sanitizing the literal "[*]" token instead (mermaidSafeText maps "[" and
-// "]" to parens) would render the confusing "(*)" rather than the readable
-// "(start)"/"(end)" the plan specifies.
+// through to mermaidSafeText: sanitizing the raw "\x00start.../\x00end..."
+// keys would not even be meaningful (they are synthetic, never user text),
+// and sanitizing the literal "[*]" token instead (mermaidSafeText maps "["
+// and "]" to parens) would render the confusing "(*)" rather than the
+// readable "(start)"/"(end)" the plan specifies.
+//
+// The match is on PREFIX, not equality, because a pseudo-state key carries
+// its enclosing composite's name as a scope suffix (see stateNodeKey). A real
+// state name can never collide with either prefix: it cannot contain a NUL
+// byte.
 func (s *stateTranspiler) ensureTitle(key string) {
 	n := s.b.node(key)
 	if n.title != "" {
 		return
 	}
-	switch key {
-	case stateStartKey:
+	switch {
+	case strings.HasPrefix(key, stateStartKey):
 		n.title = stateStartLabel
-	case stateEndKey:
+	case strings.HasPrefix(key, stateEndKey):
 		n.title = stateEndLabel
 	default:
 		n.title = mermaidSafeText(key)
@@ -1548,17 +1632,15 @@ func (s *stateTranspiler) ensureTitle(key string) {
 // composite, not just the first: flowchartBuilder.addEdge's own from+to+
 // label dedup (see its doc comment) collapses repeats to the single edge the
 // plan describes, so no separate "have I attributed this one yet"
-// bookkeeping is needed here. The two folded pseudo-state keys are excluded:
-// they are diagram-global (every "[*]" anywhere in the source folds to the
-// same two nodes — see stateNodeKey), not real children scoped to any one
-// composite, so attributing the shared node to whichever composite happens
-// to mention it would misrepresent containment for every OTHER mention of
-// the same pseudo-state elsewhere in the diagram.
+// bookkeeping is needed here.
+//
+// Pseudo-states are attributed like any other child, and must be: a "[*]"
+// written inside a composite is that composite's OWN start or end, and its
+// key is scoped to the composite so it is a distinct node from the diagram's
+// (see stateNodeKey). Leaving it unattributed would draw a start box floating
+// beside the composite it belongs to rather than inside it.
 func (s *stateTranspiler) attributeToComposite(key string) {
 	if s.currentComposite == "" || key == s.currentComposite {
-		return
-	}
-	if key == stateStartKey || key == stateEndKey {
 		return
 	}
 	s.b.addEdge(s.currentComposite, key, "contains")
@@ -1598,14 +1680,19 @@ func (s *stateTranspiler) startNoteIfAny(text string) bool {
 	return true
 }
 
-// stateStartKey and stateEndKey are the synthetic node keys every "[*]"
-// pseudo-state transition endpoint folds to — see the plan's "[*] folding is
-// essential" note: mermaid treats every left-side "[*]" as the SAME start
-// pseudo-state and every right-side one as the SAME end, so a real corpus
-// diagram's several "[*]" mentions must collapse to exactly two nodes, not
-// one disconnected stub per mention. The leading NUL byte can never collide
-// with a real state name (a plain identifier) and the ids are synthetic
-// anyway — see flowchartBuilder's own doc comment on synthetic ids.
+// stateStartKey and stateEndKey are the synthetic node-key PREFIXES every
+// "[*]" pseudo-state transition endpoint folds to — see the plan's "[*]
+// folding is essential" note: mermaid treats every left-side "[*]" in one
+// scope as the SAME start pseudo-state and every right-side one as the SAME
+// end, so a real corpus diagram's several "[*]" mentions must collapse to two
+// nodes per scope, not one disconnected stub per mention. The leading NUL
+// byte can never collide with a real state name (a plain identifier) and the
+// ids are synthetic anyway — see flowchartBuilder's own doc comment on
+// synthetic ids.
+//
+// A prefix rather than a whole key because the fold is scoped: stateNodeKey
+// appends the enclosing composite's name, so a composite's own "[*]" is a
+// different node from the diagram's.
 // stateStartLabel and stateEndLabel are the two nodes' rendered titles:
 // shape syntax like "(( ))" is unsupported by the vendored renderer and
 // parens are inert (see mermaidSafeText), so a literal "start"/"end" would
@@ -1632,14 +1719,26 @@ const statePseudoState = "[*]"
 // right-side one as different pseudo-states (see the const block above).
 // Any other token is returned completely unchanged: a real state name is
 // never folded or otherwise altered here.
-func stateNodeKey(raw string, isTarget bool) string {
+//
+// The fold is scoped to scope — the key of the composite state the transition
+// was written inside, or "" at the diagram's top level. In mermaid a "[*]"
+// written inside `state Active { ... }` is Active's OWN internal start, not
+// the diagram's entry point. Folding it together with the diagram-level one
+// (which the first version of this function did) draws a false second entry
+// arrow straight into the composite's interior: the canonical mermaid
+// composite example rendered as BOTH "(start) --> Active" and
+// "(start) --> NumLockOff". Appending the scope keeps the two apart while
+// still folding every "[*]" WITHIN one scope together, which is the property
+// the plan's fold note actually needs. Top-level transitions pass scope "",
+// so their key is exactly stateStartKey/stateEndKey as before.
+func stateNodeKey(raw, scope string, isTarget bool) string {
 	if raw != statePseudoState {
 		return raw
 	}
 	if isTarget {
-		return stateEndKey
+		return stateEndKey + scope
 	}
-	return stateStartKey
+	return stateStartKey + scope
 }
 
 // stateIgnoredStatementKeywords lists stateDiagram-v2 statement keywords that
