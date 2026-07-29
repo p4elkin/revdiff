@@ -852,9 +852,19 @@ func (b *flowchartBuilder) source() string {
 //     including a block's own closing `}` (so the handler can pop whatever
 //     per-block state it pushed in blockHeader) and every plain statement,
 //     at whatever depth it currently belongs to.
+//   - inRawText is asked BEFORE either of the other two, on every line. While
+//     it reports true the handler is consuming free-form text rather than
+//     diagram structure — stateDiagram-v2's multi-line note body is the one
+//     such region — and the scanner hands the line straight to line without
+//     looking at braces at all. That is what stops prose inside a note from
+//     opening or closing a block: a note body may perfectly well contain a
+//     stray `}` or a line ending in `{`, and either one used to corrupt the
+//     brace stack and misattribute every state that followed. The handler
+//     itself decides when the region ends, from the line it is given.
 type mermaidBlockHandler interface {
 	blockHeader(header string, depth int) bool
 	line(text string, depth int)
+	inRawText() bool
 }
 
 // scanMermaidBlocks walks source line by line for h — see mermaidBlockHandler
@@ -864,6 +874,11 @@ type mermaidBlockHandler interface {
 // see blockHeader's bool result) lives here too, so a mismatched extra `}`
 // (more closes than opens) is silently ignored rather than a defensive check
 // every transpiler would otherwise need of its own.
+//
+// The raw-text gate comes first, ahead of every brace test: while the handler
+// reports inRawText the line is note prose, not structure, and must not touch
+// the brace stack — see mermaidBlockHandler's own doc comment for what went
+// wrong when it did.
 func scanMermaidBlocks(source string, h mermaidBlockHandler) {
 	depth := 0
 	var named []bool // brace stack: does the block at this position count toward depth?
@@ -871,6 +886,11 @@ func scanMermaidBlocks(source string, h mermaidBlockHandler) {
 	for raw := range strings.SplitSeq(source, "\n") {
 		trimmed := strings.TrimSpace(mermaidStripComment(raw))
 		if trimmed == "" {
+			continue
+		}
+
+		if h.inRawText() {
+			h.line(trimmed, depth)
 			continue
 		}
 
@@ -967,13 +987,54 @@ var mermaidLeadingArrow = regexp.MustCompile(
 	`^(?:<\|--|--\|>|<\|\.\.|\.\.\|>|--\*|\*--|--o|o--|-->|<--|\.\.>|<\.\.|\(\)--|--\(\)|--|\.\.)`,
 )
 
+// mermaidOperandDecoration matches, ANCHORED at the start of the string, one
+// piece of syntax mermaid lets a relation operand carry between the node's
+// own name and the arrow that follows it. There are exactly three:
+//
+//	"1", "0..1"     a quoted cardinality        (`Task "1" --> "n" Item`)
+//	:::styleName    a style-class assignment    (`Task:::hot --> Item`)
+//	~T~             a generic type parameter    (`Repo~T~ --|> Base`)
+//
+// The style-class alternative stops at the first character that cannot
+// continue a style name, so it can never swallow the arrow itself: after
+// ":::hot" the "-->" of ":::hot-->Done" is left in place, because a "-" is
+// only consumed when a name character follows it. The generic alternative is
+// bounded by whitespace and takes the LAST tilde inside that token, so a
+// nested parameter ("~Map~String,List~Int~~") is consumed whole.
+//
+// See mermaidStripOperandDecorations for why these three have to be skipped
+// before the arrow test, and mermaidDirectiveShape for the rule they serve.
+var mermaidOperandDecoration = regexp.MustCompile(
+	`^(?:"[^"]*"|:{2,}[A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*|~\S*~)`,
+)
+
+// mermaidStripOperandDecorations trims leading whitespace from s and then
+// removes every operand decoration written at the front of it — see
+// mermaidOperandDecoration for the three shapes — repeating until what is
+// left starts with something that is not a decoration. The result is the
+// text the arrow test in mermaidDirectiveShape must look at.
+//
+// Repeating rather than stripping once is required: an operand can carry more
+// than one decoration at a time, e.g. `Task:::hot "1" --> Item`, and both
+// have to be out of the way before the "-->" is the first thing left.
+func mermaidStripOperandDecorations(s string) string {
+	for {
+		s = strings.TrimLeft(s, " \t")
+		loc := mermaidOperandDecoration.FindStringIndex(s)
+		if loc == nil {
+			return s
+		}
+		s = s[loc[1]:]
+	}
+}
+
 // mermaidDirectiveShape reports whether rest — the text that FOLLOWS a
 // directive keyword matched as a whole word, see mermaidKeywordRest — has
 // directive shape rather than node-statement shape.
 //
 // # Why this function exists at all
 //
-// This bug class has been found and "fixed" four separate times, and the
+// This bug class has been found and "fixed" five separate times, and the
 // first three fixes all failed the same way: each moved or guarded ONE
 // dispatch branch and left the next one open. Round one matched keywords as
 // bare prefixes, so a state named "notes" or "styleGuide" was dropped.
@@ -984,7 +1045,13 @@ var mermaidLeadingArrow = regexp.MustCompile(
 // "style : +enabled()") still being dropped, because those sit further down
 // the dispatch. Round four is this function: the decision is made once, from
 // the line's SHAPE, so no dispatch position has to be got right for it to
-// hold.
+// hold. Round five kept that single decision and fixed what it looked AT — it
+// used to test the very first token after the keyword, which is not always
+// the arrow, because an operand may carry a quoted cardinality, a
+// ":::styleName" assignment or a "~T~" type parameter of its own first.
+// `style "1" --> "n" Done` and `note:::hot --> Done` were still being dropped
+// as directives. Those decorations are now skipped before the arrow test —
+// see mermaidStripOperandDecorations.
 //
 // # The invariant
 //
@@ -992,10 +1059,18 @@ var mermaidLeadingArrow = regexp.MustCompile(
 // statement only when it has node-statement shape. Concretely, after a
 // keyword the two shapes are:
 //
-//	directive          keyword ARGUMENT...   ("style Foo fill:#f9f", "note left of X")
-//	directive          keyword: TEXT         ("accTitle: My accessible title")
-//	node statement     keyword ARROW ...     ("note --> Done", "note <|-- Done")
-//	node statement     keyword : DESCRIPTION ("note : ready", "style : +enabled()")
+//	directive          keyword ARGUMENT...      ("style Foo fill:#f9f", "note left of X")
+//	directive          keyword: TEXT            ("accTitle: My accessible title")
+//	node statement     keyword [DECO] ARROW ... (`note --> Done`, `style "1" --> "n" Done`)
+//	node statement     keyword : DESCRIPTION    ("note : ready", "style : +enabled()")
+//
+// DECO is the operand's own decorations, skipped by
+// mermaidStripOperandDecorations. The arrow still has to be the first thing
+// after them: an ordinary WORD before the arrow keeps the line a directive,
+// which is what stops a title like "title Order flow -- v2" or a note whose
+// prose quotes an arrow ("note right of X : uses A --> B") from being torn
+// into two garbage nodes. That is why the test is "does an arrow start here",
+// not "does the line contain an arrow anywhere".
 //
 // The one genuinely ambiguous pair is "accTitle: text" (a directive) against
 // "accTitle : text" (a state or class named accTitle, with a description).
@@ -1008,24 +1083,30 @@ var mermaidLeadingArrow = regexp.MustCompile(
 // function closes, just for one keyword instead of all of them, and mermaid
 // itself accepts a state named "accTitle".
 //
+// A run of two or more colons is never that separator — it is the style
+// suffix — so it is stripped as a decoration BEFORE the tight-colon test
+// runs, and `note:::hot --> Done` reaches the arrow test rather than being
+// claimed by the "accTitle:" branch.
+//
 // # If you change this
 //
 // Keep the decision here. Do not re-add a keyword test to a dispatch branch,
 // and do not make a call site's POSITION load-bearing for it — that is the
-// shape all four regressions had in common.
+// shape all five regressions had in common.
 func mermaidDirectiveShape(rest string) bool {
 	if rest == "" {
 		return true // the bare keyword alone: no node-statement shape to compete with
 	}
-	if strings.HasPrefix(rest, ":") {
-		return true // "accTitle:" — colon tight against the keyword, mermaid's own spelling
-	}
-	arg := strings.TrimLeft(rest, " \t")
+	arg := mermaidStripOperandDecorations(rest)
 	switch {
 	case arg == "":
-		return true // keyword plus trailing blanks only
+		return true // keyword plus decorations and/or trailing blanks only
 	case strings.HasPrefix(arg, ":"):
-		return false // "Name : description" — the colon form of a node statement
+		// A single colon: tight against the keyword it is mermaid's own
+		// "accTitle:" spelling, after whitespace it separates a node
+		// statement's description. arg == rest means nothing was skipped,
+		// so the colon really is written tight.
+		return arg == rest
 	case mermaidLeadingArrow.MatchString(arg):
 		return false // "Name --> Other" — a relation or transition
 	}
@@ -1608,6 +1689,14 @@ func (c *classTranspiler) blockHeader(header string, _ int) bool {
 	return true
 }
 
+// inRawText implements mermaidBlockHandler: always false. classDiagram
+// grammar has no multi-line free-text region — its notes are the single-line
+// `note "text"` and `note for X "text"` forms, each dropped within the one
+// line that carries it — so there is never a stretch of lines this transpiler
+// wants the scanner to stop interpreting. stateTranspiler is where the flag
+// does real work.
+func (c *classTranspiler) inRawText() bool { return false }
+
 // line implements mermaidBlockHandler: a block's closing "}" restores
 // whatever class was open before it (or none), a line at depth > 0 while a
 // class body is open is a member line, and everything else is a top-level
@@ -1806,21 +1895,35 @@ func (s *stateTranspiler) blockHeader(header string, _ int) bool {
 	return true
 }
 
-// line implements mermaidBlockHandler: a block's closing "}" restores
-// whatever composite was open before it (or none); a line while a
-// multi-line note is open is note body and is dropped until "end note"
-// closes it; everything else is a top-level (or composite-body) statement.
+// inRawText implements mermaidBlockHandler: true while a multi-line note is
+// open, which tells scanMermaidBlocks to hand every line straight to line
+// without reading it as a block header or a block close — see
+// mermaidBlockHandler's doc comment. A note body is prose written by a human,
+// so it can contain a stray "}" or end in a "{"; neither is structure and
+// neither may reach the brace stack.
+func (s *stateTranspiler) inRawText() bool { return s.inNote }
+
+// line implements mermaidBlockHandler: a line while a multi-line note is open
+// is note body and is dropped until "end note" closes it; a block's closing
+// "}" restores whatever composite was open before it (or none); everything
+// else is a top-level (or composite-body) statement.
+//
+// The note test comes FIRST, ahead of the "}" test, for the same reason
+// scanMermaidBlocks asks inRawText before looking at braces: while a note is
+// open there is no structure to read, so a body line that happens to be a
+// lone "}" is note text and must not pop a composite. Swapping these two back
+// re-opens that hole even with the scanner's own gate in place.
 func (s *stateTranspiler) line(text string, _ int) {
+	if s.inNote {
+		if text == "end note" {
+			s.inNote = false
+		}
+		return
+	}
 	if text == "}" {
 		if n := len(s.compositeStack); n > 0 {
 			s.currentComposite = s.compositeStack[n-1]
 			s.compositeStack = s.compositeStack[:n-1]
-		}
-		return
-	}
-	if s.inNote {
-		if text == "end note" {
-			s.inNote = false
 		}
 		return
 	}

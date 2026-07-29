@@ -448,6 +448,12 @@ type recordedBlockCall struct {
 type fakeBlockHandler struct {
 	calls []recordedBlockCall
 	named map[string]bool // header text -> "counts toward depth" to return
+
+	// rawUntil, when non-empty, makes inRawText report true until the line
+	// with exactly this text has been delivered — the fake's stand-in for a
+	// stateTranspiler sitting inside an open multi-line note.
+	rawUntil string
+	raw      bool
 }
 
 func (f *fakeBlockHandler) blockHeader(header string, depth int) bool {
@@ -457,7 +463,16 @@ func (f *fakeBlockHandler) blockHeader(header string, depth int) bool {
 
 func (f *fakeBlockHandler) line(text string, depth int) {
 	f.calls = append(f.calls, recordedBlockCall{"line", text, depth})
+	if f.raw && text == f.rawUntil {
+		f.raw = false
+		return
+	}
+	if !f.raw && f.rawUntil != "" && text == "open raw" {
+		f.raw = true
+	}
 }
+
+func (f *fakeBlockHandler) inRawText() bool { return f.raw }
 
 func TestScanMermaidBlocks_NamedBlock_IncrementsDepth(t *testing.T) {
 	source := "class Foo {\n  +bar() void\n}"
@@ -2581,13 +2596,20 @@ func TestClassTranspiler_ClassDeclarationStillWinsOverTheRelationParse(t *testin
 // --- ONE discriminator: directive shape versus node-statement shape ---
 //
 // This pair of tables is the regression net for a bug class that was found
-// and "fixed" four separate times. Each earlier fix moved or guarded ONE
+// and "fixed" five separate times. Each earlier fix moved or guarded ONE
 // dispatch branch and left the next one open:
 //
 //	round 1  keywords matched as bare prefixes    -> "notes", "styleGuide" dropped
 //	round 2  word-boundary test added             -> nodes named EXACTLY "note" still dropped
 //	round 3  relation/transition parsed first     -> arrow forms saved, COLON forms still dropped
 //	round 4  mermaidDirectiveShape, this net      -> decided once, from the line's shape
+//	round 5  operand decorations skipped first    -> `style "1" --> "n" Done` no longer dropped
+//
+// Round 5 did not move the decision again — it fixed what the round-4 rule
+// LOOKED AT. Testing the first token after the keyword misses an arrow that a
+// quoted cardinality, a ":::styleName" suffix or a "~T~" type parameter is
+// standing in front of. The rule now skips those three and keeps asking the
+// same question of whatever is left.
 //
 // Both tables therefore carry the SAME two lists, verbatim: every directive
 // that must still be dropped, and every node/state/class named exactly a
@@ -2683,9 +2705,30 @@ func TestMermaidDirectiveShape_Table(t *testing.T) {
 		// is "does an arrow token start here", not "does a word start here".
 		{"aggregation arrow starting with a letter", " o-- Done", false},
 
-		// only the FIRST token decides. A note directive may quote an arrow
-		// inside its own prose and is still a directive.
+		// an ordinary WORD before the arrow keeps the line a directive. A note
+		// directive may quote an arrow inside its own prose, and a title may
+		// contain a dash pair, and neither is a relation.
 		{"arrow later in the line", " right of X : uses A --> B", true},
+		{"title prose containing a dash pair", " My Diagram -- Draft", true},
+
+		// --- round 5: operand decorations may sit between the name and the
+		// arrow, and none of them makes the line a directive ---
+		{"quoted cardinality before the arrow", ` "1" --> "n" Done`, false},
+		{"quoted range before a composition arrow", ` "0..1" *-- Item`, false},
+		{"quoted cardinality before a letter-initial arrow", ` "1" o-- "n" Leaf`, false},
+		{"style suffix before the arrow", ":::hot --> Done", false},
+		{"style suffix with a dash in its name", ":::hot-pink --> Done", false},
+		{"style suffix written tight against the arrow", ":::hot-->Done", false},
+		{"generic parameter before the arrow", "~T~ --|> Done", false},
+		{"nested generic parameter before the arrow", "~Map~String,List~Int~~ --> Done", false},
+		{"style suffix and cardinality together", `:::hot "1" --> "n" Done`, false},
+		{"style suffix then the colon description form", ":::hot : ready", false},
+
+		// decorations with no arrow after them are still a directive — the
+		// strip only decides WHERE the arrow test looks, never its answer.
+		{"style suffix alone", ":::hot", true},
+		{"quoted argument that is not a cardinality", ` "A,B" someClass`, true},
+		{"decoration then an ordinary word", `:::hot Foo fill:#f9f`, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2711,9 +2754,11 @@ func TestMermaidDeclarationShape_TightColonIsNotADeclaration(t *testing.T) {
 }
 
 func TestClassTranspiler_NoteProseContainingAnArrow_StillDropsAsADirective(t *testing.T) {
-	// only the first token after the keyword decides, so a note whose text
-	// quotes an arrow is still a note — not a relation between "note right
-	// of X" and something.
+	// an ordinary WORD before the arrow keeps the line a directive, so a note
+	// whose text quotes an arrow is still a note — not a relation between
+	// "note right of X" and something. This is why round 5 skips only the
+	// operand's own decorations and does not search the whole line for an
+	// arrow.
 	src := "classDiagram\n    Alpha <|-- Beta\n    note right of Alpha : uses Ghost --> Phantom\n    Beta <|-- Gamma\n"
 
 	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
@@ -2817,6 +2862,49 @@ func TestClassTranspiler_DirectiveShapeVersusNodeStatementShape(t *testing.T) {
 		},
 		{name: "notified and hrefBox", fragment: "notified --> hrefBox", nodes: 5, edges: 3, want: []string{"[notified]", "[hrefBox]"}},
 		{name: "linker", fragment: "linker --> Done", nodes: 5, edges: 3, want: []string{"[linker]", "[Done]"}},
+
+		// --- must survive: operand decorations before the arrow (round 5) ---
+		//
+		// A relation operand may carry a quoted cardinality, a ":::styleName"
+		// assignment or a "~T~" type parameter of its own, all of which sit
+		// BETWEEN the class name and the arrow. The round-4 rule looked at the
+		// first token after the keyword and so read every one of these as a
+		// directive argument, dropping the whole relation.
+		{
+			name: "style, cardinality on both sides", fragment: `style "1" --> "n" Done`, nodes: 5, edges: 3,
+			want: []string{"[style]", "[Done]"},
+		},
+		{
+			name: "note, style suffix then arrow", fragment: "note:::hot --> Done", nodes: 5, edges: 3,
+			want: []string{"[note]", "[Done]"}, notWant: []string{"hot"},
+		},
+		{
+			name: "title, quoted range then composition arrow", fragment: `title "0..1" *-- Item`, nodes: 5, edges: 3,
+			want: []string{"[title]", "[Item]"},
+		},
+		{
+			name: "direction, cardinality then aggregation arrow", fragment: `direction "1" o-- "n" Leaf`, nodes: 5, edges: 3,
+			want: []string{"[direction]", "[Leaf]"},
+		},
+		{
+			name: "note, generic parameter then arrow", fragment: "note~T~ --|> Done", nodes: 5, edges: 3,
+			want: []string{"[note]", "[Done]"},
+		},
+		{
+			name: "note, style suffix and cardinality together", fragment: `note:::hot "1" --> "n" Done`, nodes: 5, edges: 3,
+			want: []string{"[note]", "[Done]"}, notWant: []string{"hot"},
+		},
+
+		// --- must still be dropped: a WORD before the dash pair (round 5) ---
+		//
+		// Skipping operand decorations must not become "an arrow anywhere in
+		// the line". A title whose prose contains a dash pair is still a
+		// title, not a relation between "title My Diagram" and "Draft".
+		{name: "title prose with a dash pair", fragment: "title My Diagram -- Draft", nodes: 3, edges: 2, notWant: []string{"Draft"}},
+		{
+			name: "note prose quoting an arrow", fragment: "note right of Alpha : uses Ghost --> Phantom", nodes: 3, edges: 2,
+			notWant: []string{"Ghost", "Phantom"},
+		},
 	}
 	runDirectiveShapeCases(t, "classDiagram", "Alpha <|-- Beta", "Beta <|-- Gamma", tests)
 }
@@ -2879,8 +2967,167 @@ func TestStateTranspiler_DirectiveShapeVersusNodeStatementShape(t *testing.T) {
 		// Foo is not being declared), the mirror image of the classDiagram
 		// table's declaration row.
 		{name: "class Foo drops here", fragment: "class Foo", nodes: 3, edges: 2, notWant: []string{"[Foo]"}},
+
+		// --- must survive: operand decorations before the arrow (round 5) ---
+		//
+		// stateDiagram-v2 grammar has one of the three decorations the class
+		// table exercises: the ":::className" style assignment (there is no
+		// cardinality and no generic parameter in this grammar). Before round
+		// 5 the ":::" made the line look like mermaid's own "accTitle:" tight
+		// colon and the whole transition was dropped as a note directive.
+		//
+		// The rendered key keeps the suffix ("note:hot" — the colon run is
+		// collapsed by mermaidSafeText) because stateNodeKey does not
+		// normalize a style suffix the way classOperand does. That gap is
+		// older and separate from this discriminator, and it applies to every
+		// state name equally: an ordinary "Foo:::hot --> Bar" renders
+		// "Foo:hot" too. What this row pins is the discriminator's own job —
+		// a state named exactly a keyword now behaves like any other state.
+		// If the state key ever does learn to strip the suffix, this want
+		// becomes "[note]".
+		{
+			name: "note, style suffix then transition", fragment: "note:::hot --> Done", nodes: 5, edges: 3,
+			want: []string{"[note:hot]", "[Done]"},
+		},
+
+		// --- must still be dropped: a WORD before the dash pair (round 5) ---
+		{name: "title prose with a dash pair", fragment: "title My Diagram -- Draft", nodes: 3, edges: 2, notWant: []string{"Draft"}},
+		{
+			name: "note prose quoting an arrow", fragment: "note right of Alpha : uses Ghost --> Phantom", nodes: 3, edges: 2,
+			notWant: []string{"Ghost", "Phantom"},
+		},
 	}
 	runDirectiveShapeCases(t, "stateDiagram-v2", "Alpha --> Beta", "Beta --> Gamma", tests)
+}
+
+// --- a multi-line note body is text, never structure ---
+//
+// A note body is prose a human typed, so it can contain a stray "}" or a line
+// that happens to end in "{". Both used to reach the brace stack: the scanner
+// tested for braces before it ever asked whether a note was open, and
+// stateTranspiler.line tested for "}" before it tested inNote. A "}" inside a
+// note body therefore closed the enclosing composite early and a "{" pushed a
+// phantom block that ate the composite's real closing brace — either way the
+// states written AFTER the note were attributed to the wrong composite, or a
+// bogus state was declared out of the note's own text.
+//
+// Every case below is checked against the same diagram with plain note text
+// (noteBodyControl): the brace in the body must make NO difference at all.
+
+// noteBodyControl is the reference diagram — same shape as each case, with a
+// note body containing nothing special.
+const noteBodyControl = `stateDiagram-v2
+    state Outer {
+        note left of Inner
+            plain note text
+        end note
+        Inner --> Deeper
+    }
+    Top --> Done
+`
+
+func TestStateTranspiler_BraceInsideNoteBody_DoesNotDisturbCompositeTracking(t *testing.T) {
+	want, ok := transpileMermaid(noteBodyControl, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	require.Contains(t, want, "|contains|", "the control really does open a composite")
+
+	tests := []struct{ name, source string }{
+		{
+			// the lone "}" used to pop Outer three lines early, so Inner and
+			// Deeper lost their "contains" edges and the composite's real "}"
+			// was then discarded as unbalanced.
+			name: "lone closing brace in the body",
+			source: `stateDiagram-v2
+    state Outer {
+        note left of Inner
+            pseudo code:
+            }
+        end note
+        Inner --> Deeper
+    }
+    Top --> Done
+`,
+		},
+		{
+			// a body line ending in "{" used to push a transparent block, so
+			// the composite's real "}" popped THAT instead and Outer stayed
+			// open — Top and Done were then attributed to Outer.
+			name: "body line ending in an opening brace",
+			source: `stateDiagram-v2
+    state Outer {
+        note left of Inner
+            if cond {
+        end note
+        Inner --> Deeper
+    }
+    Top --> Done
+`,
+		},
+		{
+			// both at once, and neither is balanced against the other.
+			name: "both braces in the body",
+			source: `stateDiagram-v2
+    state Outer {
+        note left of Inner
+            if cond {
+            }
+        end note
+        Inner --> Deeper
+    }
+    Top --> Done
+`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := transpileMermaid(tc.source, mermaidUnconstrainedWidth)
+			require.True(t, ok)
+			assert.Equal(t, want, got, "a brace inside a note body must be inert")
+		})
+	}
+}
+
+func TestStateTranspiler_StateHeaderInsideNoteBody_DeclaresNothing(t *testing.T) {
+	// the worst shape of this bug: a note body quoting diagram syntax used to
+	// reach blockHeader, which declared a real state out of the note's text
+	// AND made it the current composite, so every state after the note was
+	// recorded as its child.
+	source := `stateDiagram-v2
+    [*] --> Idle
+    note left of Idle
+        state Bogus {
+    end note
+    Real --> Done
+`
+	got, ok := transpileMermaid(source, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.NotContains(t, got, "Bogus", "no state may be declared out of note prose")
+	assert.NotContains(t, got, "|contains|", "note prose may not open a composite")
+	assert.Contains(t, got, "[Real]")
+	assert.Contains(t, got, "[Done]")
+	assert.Equal(t, 4, flowchartNodeCount(got), "(start), Idle, Real, Done — nothing else")
+}
+
+func TestScanMermaidBlocks_RawText_BypassesBraceHandling(t *testing.T) {
+	// the scanner's own half of the fix, checked without a transpiler: while
+	// the handler reports inRawText, braces are delivered verbatim to line
+	// and blockHeader is never called, so the depth the handler sees after
+	// the raw region is the one it had before.
+	source := "class Foo {\n  open raw\n  }\n  nested {\n  close raw\n  +bar() void\n}"
+	h := &fakeBlockHandler{named: map[string]bool{"class Foo": true}, rawUntil: "close raw"}
+
+	scanMermaidBlocks(source, h)
+
+	assert.Equal(t, []recordedBlockCall{
+		{"header", "class Foo", 0},
+		{"line", "open raw", 1},
+		{"line", "}", 1},
+		{"line", "nested {", 1},
+		{"line", "close raw", 1},
+		{"line", "+bar() void", 1},
+		{"line", "}", 1},
+	}, h.calls, "no brace inside the raw region may move depth or open a block")
 }
 
 // --- Review fixes: frontmatter, classDiagram-v2 ---
