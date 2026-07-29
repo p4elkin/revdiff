@@ -35,8 +35,9 @@ both of which read the real keymap and so list it automatically in this build.
 - `app/ui/mdpreview_transpile_test.go` — its tests.
 - `app/ui/mdpreview_flowchart.go` — the `graph`/`flowchart` normalization pass: rewrites the
   constructs the vendored parser mis-parses (node shape suffixes, non-`-->` link forms, a `|`
-  inside a node label) into the subset it reads correctly. Text-level, structure-preserving —
-  it is NOT a transpiler and does not use `flowchartBuilder`.
+  inside a node label) into the subset it reads correctly, and drops the styling and layout
+  directives it cannot draw at all. Text-level, structure-preserving — it is NOT a transpiler
+  and does not use `flowchartBuilder`.
 - `app/ui/mdpreview_flowchart_test.go` — its tests.
 
 A clean rebase never conflicts on these six files — they don't exist upstream. All conflict
@@ -176,8 +177,8 @@ types, the other fixes the two the renderer already claimed to support:
   (see `transpileMermaid` in `mdpreview_transpile.go`).
 - **Normalized in place:** `graph` and `flowchart`. These are **no longer a pure pass-through.**
   They now go through `normalizeFlowchartSource` in `mdpreview_flowchart.go`, which rewrites the
-  three constructs the vendored parser silently mis-parses and copies everything else through
-  byte for byte. See "graph/flowchart normalization" below.
+  constructs the vendored parser silently mis-parses, drops the directive lines it cannot draw,
+  and copies everything else through byte for byte. See "graph/flowchart normalization" below.
 - **Native, untouched path:** `sequenceDiagram`. It takes a completely different code path inside
   the vendored library and is pinned as byte-identical to a direct `RenderDiagram` call.
 - **Still fall back to the verbatim fence text:** `erDiagram`, `gantt`, `quadrantChart`, and any
@@ -192,8 +193,9 @@ The vendored parser reads exactly three shapes — `Id`, `Id[label]`, and `lhs -
 optional `-->|label|`. Anything else is mis-parsed silently, so the old pass-through shipped
 broken art for most real fences. Measured 2026-07-29 over the 138 unique `graph`/`flowchart`
 fences in the author's document corpus (every `.md` under `~/.claude/plans` and `~/dev`,
-excluding vendor/node_modules), **86 of 138 contained at least one mis-parsed construct.** What
-`normalizeFlowchartSource` rewrites, and what each one did before:
+excluding vendor/node_modules), **86 of 138 contained at least one mis-parsed construct**, and
+**76 of 138 actually drew at least one stray box** — a box whose label is a whole source line.
+What `normalizeFlowchartSource` rewrites, and what each one did before:
 
 - **Shape suffixes → square brackets.** `A{d}`, `A(d)`, `A([d])`, `A((d))`, `A(((d)))`,
   `A[[d]]`, `A[(d)]`, `A{{d}}`, `A>d]` all become `A[d]`; the node id is untouched. Before, a
@@ -207,11 +209,36 @@ excluding vendor/node_modules), **86 of 138 contained at least one mis-parsed co
 - **`|` inside a node label → `/`.** The edge pattern's label group is greedy, so one stray pipe
   in a label swallowed half the line: `A -->|go| B["x=with|without"]` captured `go| B["x=with`
   as the edge label and left `without"]` as the target node.
+- **Styling and layout directives → dropped.** `style`, `classDef`, `class`, `linkStyle`, a
+  standalone `direction` (the one written inside a `subgraph`), and the interaction directives
+  `click` / `href` / `callback`. Each described how the diagram should look or behave, which the
+  ASCII renderer cannot express, and each drew a box named after the whole line: the vendored
+  `classDef` pattern is anchored at column 0 so an indented one never matched, and none of the
+  others match any pattern at all. This was the largest single defect in the corpus — `style` in
+  36 fences, `classDef` in 33, `class` in 17, `direction` in 16, `linkStyle` in 7; 249 dropped
+  lines in total. Dropping every `classDef` also closes a crash: `parseStyleClass` splits each
+  declaration on `:` and indexes the second field blindly, so a column-0
+  `classDef x stroke-dasharray: 5 5` panicked the vendored parser and took the whole fence down
+  to the verbatim fallback. The one thing given up with it is label-text color, which a column-0
+  `classDef` gives to nodes carrying a `:::className` suffix — no corpus fence does that, and
+  keeping only the column-0 spelling would make the pass's output depend on indentation.
 
-Everything else is copied through unchanged: `subgraph`/`end` blocks, `<br/>` in labels, chained
-`a --> b --> c`, `%%` comments (whole-line and inline tails), node ids, and the styling/layout
-directives. Line count, line order and indentation are preserved, and the pass is a fixed point
-on already-well-formed source.
+A node named after one of those keywords is NOT a directive and is never dropped:
+`style-review --> x`, `classDefault --> y`, `direction --> up`, `class[Class registry] --> B`.
+The rule is the shared `mermaidDirectiveShape` discriminator (see `mdpreview_transpile.go`),
+reached through `flowchartDirective`, which masks labels first (so a keyword id carrying a label
+cannot look like a keyword followed by arguments) and runs the link rewrite first (so the
+discriminator's arrow test sees a `-->` whatever link form the author wrote — it does not know
+`===` or `-.->`). That discriminator is the one place this decision is made for all three
+diagram types; do not add a keyword test anywhere else.
+
+Everything else is copied through unchanged: `subgraph`/`end` blocks, `accTitle`/`accDescr`
+(unrenderable too, but they carry author prose rather than presentation, so removing them would
+delete text), `<br/>` in labels, chained `a --> b --> c`, `%%` comments (whole-line and inline
+tails), and node ids. Line order and indentation are preserved, the line count is preserved
+except for the dropped directives, and the pass is a fixed point on already-well-formed source.
+When dropping would leave a fence with no statement at all, the original source is returned
+instead, so this pass can never be the reason a fence disappears from the preview.
 
 **It is a text-level pass, not a rebuild through `flowchartBuilder`, and that is deliberate.**
 41% of these fences use `subgraph`, which the builder has no concept of — re-emitting through it
@@ -219,14 +246,12 @@ would drop every grouping box and replace author node ids with synthetic `n0, n1
 `subgraph` body cannot reference. Fixing one fifth of the corpus by regressing two fifths is not
 a trade worth making.
 
-Residual after the pass: **2 of 138 fences** still contain a construct the renderer draws wrongly
-— both are the `~~~` invisible link, which is deliberately not normalized. It exists purely for
-layout, and the renderer has no invisible edge, so turning it into `-->` would draw a
-relationship the author explicitly hid. Separately, styling and layout directive lines still each
-draw a stray box, because the vendored `classDef` pattern is anchored at column 0 and every other
-directive matches no pattern at all: `style` in 36 fences, `classDef` in 33, `class` in 17,
-`direction` in 16, `linkStyle` in 7. Dropping those lines is a deletion rather than a
-normalization, so it stays out of this pass's scope — a separate change if it is ever wanted.
+Residual after the pass: **2 of 138 fences**, down from 76, still draw a stray box — both from
+the `~~~` invisible link, which is deliberately not normalized. It exists purely for layout, and
+the renderer has no invisible edge, so turning it into `-->` would draw a relationship the author
+explicitly hid. Two smaller leaks are known and accepted: an `accTitle`/`accDescr` line would
+still draw a box named after itself (no corpus fence has one), and mermaid's `%%{init: ...}%%`
+theme block is read as an ordinary `%%` comment and simply ignored.
 
 ## Known limitations
 

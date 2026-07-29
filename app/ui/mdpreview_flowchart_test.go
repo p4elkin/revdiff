@@ -22,6 +22,22 @@ func normalizeFlowchartBody(t *testing.T, line string) string {
 	return strings.TrimPrefix(got, header)
 }
 
+// normalizeFlowchartDirectiveFence runs one directive line through the real
+// entry point NEXT TO a node statement that has to survive it, and hands back
+// what the whole fence became. The extra node line is not decoration: a fence
+// that dropping would leave with nothing but its header is returned unchanged
+// by design, so a table asserting a line was dropped needs something else in
+// the fence to keep.
+func normalizeFlowchartDirectiveFence(t *testing.T, line string) string {
+	t.Helper()
+	return normalizeFlowchartSource(flowchartKeptFence + line + "\n")
+}
+
+// flowchartKeptFence is what normalizeFlowchartDirectiveFence's fence must be
+// reduced to once the directive line is gone — no leftover blank line, no
+// change to the statement that stays.
+const flowchartKeptFence = "flowchart TD\n    A --> B\n"
+
 func TestNormalizeFlowchartSource_ShapeSuffixes_BecomeSquareBrackets(t *testing.T) {
 	tests := []struct {
 		name, input, want string
@@ -121,6 +137,21 @@ func TestNormalizeFlowchartSource_WellFormedConstructs_NotDisturbed(t *testing.T
 		{"node id with a dash", "my-node --> other-node"},
 		{"already normalized edge label", "A -->|does a thing| B[target]"},
 		{"quoted label with a colon", `A --> B["GET /api/x: y"]`},
+		// Node ids that merely BEGIN with a dropped directive's keyword, and
+		// nodes named exactly after one. None of these is a directive, so none
+		// of them may be dropped or otherwise touched.
+		{"node id starting with style", "style-review --> x"},
+		{"node id starting with classDef", "classDefault --> y"},
+		{"node id starting with class", "classRegistry --> z"},
+		{"node id starting with direction", "directionUp --> x"},
+		{"node id starting with linkStyle", "linkStyleGuide --> x"},
+		{"node named exactly direction", "direction --> up"},
+		{"node named exactly class", "class --> registry"},
+		{"node named exactly style, carrying a label", "style[Style pass] --> B"},
+		{"node named exactly click on the right of an arrow", "A --> click"},
+		{"directive keyword inside a node label", "A --> B[style guide]"},
+		{"directive keyword inside a quoted node label", `A --> B["classDef hot fill:#f9f"]`},
+		{"directive keyword inside an edge label", "A -->|classDef hot| B"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,11 +160,40 @@ func TestNormalizeFlowchartSource_WellFormedConstructs_NotDisturbed(t *testing.T
 	}
 }
 
-func TestNormalizeFlowchartSource_StructuralLines_LeftVerbatim(t *testing.T) {
-	// subgraph/end and the styling+layout directives are skipped WHOLE: a
-	// subgraph header's `Id [Label]` is not a node shape, and a `style`/
-	// `classDef` line's punctuation is not link syntax. Their contents are
-	// still normalized — the block structure is what stays put.
+func TestNormalizeFlowchartSource_StylingAndLayoutDirectives_Dropped(t *testing.T) {
+	// Each of these renders as a box named after the whole line, because the
+	// vendored `classDef` pattern is anchored at column 0 and the rest match no
+	// pattern at all. They carry styling, layout or interaction intent the
+	// ASCII renderer cannot draw, so the line goes away entirely — no blank
+	// line left behind, and the statement beside it untouched.
+	tests := []struct{ name, line string }{
+		{"style", "    style A fill:#f9f,stroke:#333"},
+		{"style with spaces after the colons", "    style C fill: #dbeafe, stroke: #1e40af"},
+		{"style at column 0", "style A fill:#eee"},
+		{"style with an inline comment", "    style A fill:#eee %% brand color"},
+		{"classDef", "    classDef hot fill:#f9f,stroke:#333"},
+		{"classDef at column 0", "classDef hot fill:#f9f"},
+		{"class", "    class A,B hot"},
+		{"class with one id", "    class A hot"},
+		{"linkStyle", "    linkStyle 0 stroke:#333,stroke-width:2px"},
+		{"linkStyle default", "    linkStyle default stroke:#2f9e44"},
+		{"direction inside a subgraph", "    direction TB"},
+		{"direction LR", "    direction LR"},
+		{"click", "    click A \"https://example.com\" \"tooltip\""},
+		{"href", "    href A \"https://example.com\""},
+		{"callback", "    callback A cb \"tooltip\""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, flowchartKeptFence, normalizeFlowchartDirectiveFence(t, tc.line))
+		})
+	}
+}
+
+func TestNormalizeFlowchartSource_SubgraphBlock_KeptWhileItsDirectivesGo(t *testing.T) {
+	// subgraph/end are skipped WHOLE — a subgraph header's `Id [Label]` is not
+	// a node shape — while the styling and layout directives around and inside
+	// the block are dropped. The block's own contents are still normalized.
 	src := "flowchart LR\n" +
 		"    subgraph Constructor [StudySetup]\n" +
 		"      direction TB\n" +
@@ -147,25 +207,50 @@ func TestNormalizeFlowchartSource_StructuralLines_LeftVerbatim(t *testing.T) {
 
 	want := "flowchart LR\n" +
 		"    subgraph Constructor [StudySetup]\n" +
-		"      direction TB\n" +
 		"      ADV[\"advanced\"]\n" +
 		"      GR[gradation]\n" +
 		"      ADV --> GR\n" +
-		"    end\n" +
-		"    classDef hot fill:#f9f,stroke:#333\n" +
-		"    style Constructor fill:#eee\n" +
-		"    click ADV \"https://example.com\"\n"
+		"    end\n"
 
 	assert.Equal(t, want, normalizeFlowchartSource(src))
 }
 
+func TestNormalizeFlowchartSource_AccessibilityDirectives_LeftVerbatim(t *testing.T) {
+	// accTitle/accDescr are not dropped: unlike styling and layout they carry
+	// author PROSE, so removing them would delete text rather than
+	// presentation. They are still skipped by the rewrites.
+	src := "flowchart LR\n    accTitle: My accessible title\n    accDescr: what it shows\n    A --- B\n"
+	want := "flowchart LR\n    accTitle: My accessible title\n    accDescr: what it shows\n    A --> B\n"
+	assert.Equal(t, want, normalizeFlowchartSource(src))
+}
+
 func TestNormalizeFlowchartSource_NodeNamedAfterAStructuralKeyword_StillNormalized(t *testing.T) {
-	// The skip list is matched with the shared whole-word/shape discriminator
-	// (mermaidDirective), not a bare prefix test, so a node genuinely NAMED
-	// "style" or "end" is still a node statement and still gets normalized.
+	// The skip and drop lists are matched with the shared whole-word/shape
+	// discriminator (mermaidDirective), not a bare prefix test, so a node
+	// genuinely NAMED "style" or "end" is still a node statement: it is
+	// normalized, and it is never dropped.
 	assert.Equal(t, "end --> A[x]", normalizeFlowchartBody(t, "end --> A{x}"))
 	assert.Equal(t, "style --> A[x]", normalizeFlowchartBody(t, "style --- A{x}"))
 	assert.Equal(t, "endpoint --> A[x]", normalizeFlowchartBody(t, "endpoint --- A{x}"))
+	assert.Equal(t, "class --> A[x]", normalizeFlowchartBody(t, "class -.- A{x}"))
+	assert.Equal(t, "style --> A[x]", normalizeFlowchartBody(t, "style ==> A{x}"))
+	assert.Equal(t, "direction -->|then| A[x]", normalizeFlowchartBody(t, "direction -- then --> A{x}"))
+}
+
+func TestNormalizeFlowchartSource_NothingButDirectives_SourceUnchanged(t *testing.T) {
+	// Dropping must never empty a fence. When no statement would survive, the
+	// pass hands the ORIGINAL source back rather than a header-only diagram —
+	// a safety valve, so an over-eager drop can never silently erase a fence.
+	tests := []struct{ name, src string }{
+		{"header and directives only", "flowchart LR\n    classDef hot fill:#f9f\n    style A fill:#eee\n"},
+		{"header, a comment and directives", "flowchart LR\n    %% colors\n    style A fill:#eee\n"},
+		{"header only", "flowchart LR\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.src, normalizeFlowchartSource(tc.src))
+		})
+	}
 }
 
 func TestNormalizeFlowchartSource_InlineComment_TailLeftAlone(t *testing.T) {
@@ -190,9 +275,11 @@ func TestNormalizeFlowchartSource_Idempotent(t *testing.T) {
 	src := "flowchart LR\n" +
 		"    A{decide} -- yes --> B([done])\n" +
 		"    A -.- C[(store|cache)]\n" +
-		"    subgraph S [Group]\n      D --- E\n    end\n"
+		"    subgraph S [Group]\n      direction TB\n      D --- E\n    end\n" +
+		"    classDef hot fill:#f9f\n    class A hot\n    style B fill:#eee\n"
 	once := normalizeFlowchartSource(src)
 	assert.Equal(t, once, normalizeFlowchartSource(once))
+	assert.NotContains(t, once, "classDef", "the directive lines are gone after the first pass")
 }
 
 func TestNormalizeFlowchartSource_UnbalancedLabel_LeftAlone(t *testing.T) {
@@ -250,6 +337,74 @@ func TestNormalizeFlowchartSource_RealCorpusFence_RendersWithoutStrayBoxes(t *te
 
 	assert.Contains(t, after, "gradation flag?", "the diamond's text must survive as a real box label")
 	assert.Contains(t, after, "gradation=with/without,transitivity", "the pipe in the label must render as a slash")
+}
+
+func TestNormalizeFlowchartSource_DirectiveLines_DrawNoStrayBox(t *testing.T) {
+	// Rendered proof for the drop list: every one of these lines is drawn as a
+	// box named after itself before the pass, and gone from the art after it,
+	// while the two real nodes and their edge stay.
+	directives := []string{
+		"    style A fill:#f9f,stroke:#333",
+		"    classDef hot fill:#f9f,stroke:#333",
+		"    class A,B hot",
+		"    linkStyle 0 stroke:#333,stroke-width:2px",
+		"    click A \"https://example.com\"",
+		"    href B \"https://example.com\"",
+		"    callback A cb \"tip\"",
+	}
+	src := "flowchart LR\n    subgraph G [Group]\n      direction TB\n      A --> B\n    end\n" +
+		strings.Join(directives, "\n") + "\n"
+
+	before, err := mermaidcmd.RenderDiagram(src, nil)
+	require.NoError(t, err)
+	for _, line := range append(directives, "      direction TB") {
+		require.Contains(t, before, strings.TrimSpace(line),
+			"fixture sanity: the raw fence must still draw this directive as a box")
+	}
+
+	after, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+	for _, line := range append(directives, "      direction TB") {
+		assert.NotContains(t, after, strings.TrimSpace(line), "the directive must draw no box at all")
+	}
+	assert.Contains(t, after, "Group", "the subgraph the directives sat in must still be drawn")
+	assert.Contains(t, after, "►", "the surviving edge must still be drawn")
+}
+
+func TestNormalizeFlowchartSource_KeywordNamedNodes_StillRenderNodesAndEdges(t *testing.T) {
+	// The other half of the drop rule, rendered: a node whose id IS a dropped
+	// keyword, or merely starts with one, keeps its box and its edge.
+	src := "flowchart LR\n" +
+		"    class --> registry\n" +
+		"    direction --> up\n" +
+		"    style-review --> done\n"
+
+	after, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+	for _, label := range []string{"class", "registry", "direction", "up", "style-review", "done"} {
+		assert.Contains(t, after, label, "the node must still be drawn")
+	}
+	assert.Equal(t, 3, strings.Count(after, "►"), "each statement must still draw its own edge")
+	for _, line := range []string{"class --> registry", "direction --> up", "style-review --> done"} {
+		assert.NotContains(t, after, line, "the statement must be an edge, not a box named after the whole line")
+	}
+}
+
+func TestNormalizeFlowchartSource_ClassDefWithoutAColon_NoLongerKillsTheFence(t *testing.T) {
+	// A column-0 classDef is the one directive the vendored parser does read,
+	// and parseStyleClass indexes the split of each declaration blindly: a
+	// declaration with no ':' panics it, which used to take the whole fence
+	// down to the verbatim fallback. Dropping the line removes that path.
+	src := "flowchart LR\nclassDef dashed stroke-dasharray: 5 5\nA --> B\n"
+
+	assert.Panics(t, func() { _, _ = mermaidcmd.RenderDiagram(src, nil) },
+		"fixture sanity: the raw fence must still panic the vendored parser")
+
+	after, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+	assert.Contains(t, after, "A")
+	assert.Contains(t, after, "B")
+	assert.NotContains(t, after, "stroke-dasharray")
 }
 
 func TestNormalizeFlowchartSource_DiamondNode_RendersAsOneBox(t *testing.T) {

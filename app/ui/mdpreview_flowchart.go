@@ -33,12 +33,20 @@ import (
 //     pattern is `^(.+)\s*-->\s*\|(.+)\|\s*(.+)$` with a GREEDY label group,
 //     so `A -->|go| B["x=with|without"]` captures `go| B["x=with` as the edge
 //     label and leaves `without"]` as the target node.
+//   - A styling or layout directive draws a box named after itself. The
+//     vendored `classDef` pattern is anchored at column 0, so an indented one
+//     never matches, and `style`, `class`, `direction`, `linkStyle`, `click`
+//     and friends match no pattern at all. Every one of those lines falls
+//     through to parseNode and becomes a node whose label is the whole line.
 //
 // Corpus scan over the unique `flowchart`/`graph` fences in the user's plan
 // documents: round/stadium shapes ~28%, diamond shapes ~33%, undirected `---`
-// ~11%, pipe-in-label ~3% — about 60% hit at least one. The constructs that
-// already work and must NOT be disturbed are just as common: `<br/>` in a
-// label ~80%, `subgraph` ~41%, chained `a --> b --> c` ~9%.
+// ~11%, pipe-in-label ~3% — about 60% hit at least one. Styling and layout
+// directives are the single most common defect of all: `style` in 26% of
+// fences, `classDef` in 24%, `class` in 12%, `direction` in 12%, `linkStyle`
+// in 5%. The constructs that already work and must NOT be disturbed are just
+// as common: `<br/>` in a label ~80%, `subgraph` ~41%, chained
+// `a --> b --> c` ~9%.
 //
 // # Why a text-level pass, not a rebuild through flowchartBuilder
 //
@@ -53,10 +61,12 @@ import (
 // cannot tolerate, since it names its members by id.
 //
 // So this pass rewrites the SOURCE TEXT and leaves its structure alone: same
-// lines, same order, same subgraph blocks, same node ids, same comments. Only
-// the three mis-parsed constructs above are rewritten, in place. Anything the
-// pass does not recognize is copied through byte for byte, which makes the
-// whole pass a fixed point on already-well-formed source — see
+// order, same subgraph blocks, same node ids, same comments. The three
+// mis-parsed constructs above are rewritten in place, and the styling and
+// layout directives are removed outright (see flowchartDroppedKeywords for why
+// removal is the only honest option there). Anything the pass does not
+// recognize is copied through byte for byte, which makes the whole pass a
+// fixed point on already-well-formed source — see
 // TestNormalizeFlowchartSource_Idempotent.
 //
 // Two other approaches were considered and rejected. Patching the vendored
@@ -397,45 +407,105 @@ func normalizeFlowchartNodes(line string) string {
 //
 // `subgraph` and `end` carry the block structure this pass promises to leave
 // alone, and a subgraph header's `Id [Label]` is not a node shape even though
-// it looks exactly like one. The rest are styling, layout, interaction and
-// accessibility directives whose punctuation (`fill:#f9f`, a URL, a
-// comma-separated node list) has nothing to do with links or shapes, so
-// running the rewrites over them could only ever do harm.
+// it looks exactly like one. `accTitle` and `accDescr` are accessibility
+// directives: the renderer cannot draw them either, but unlike everything in
+// flowchartDroppedKeywords they carry author PROSE, so removing them would
+// delete text rather than presentation. Either way the rewrites must not run
+// over them — their punctuation has nothing to do with links or shapes.
 //
 // A subgraph's CONTENTS are still normalized — only the header and the
 // closing `end` are skipped.
 var flowchartStructuralKeywords = []string{
-	"subgraph", "end", "direction",
-	"classDef", "class", "style", "linkStyle", "click",
-	"accTitle", "accDescr",
+	"subgraph", "end", "accTitle", "accDescr",
+}
+
+// flowchartDroppedKeywords lists the statement keywords whose lines are
+// REMOVED from the source before it reaches the renderer.
+//
+// Every one of them describes how a diagram should LOOK or BEHAVE — a fill
+// color, a style class and its assignment, an edge's stroke, a subgraph's
+// internal layout direction, a click target — and the ASCII renderer can draw
+// none of it. Left in, each line draws a box named after itself (see this
+// file's doc comment), which is the largest single defect the corpus scan
+// found: 36 fences carried a `style`, 33 a `classDef`, 17 a `class`, 16 a
+// standalone `direction`, 7 a `linkStyle`. Dropping them therefore removes a
+// spurious box each and loses nothing that could have been drawn.
+//
+// `direction` here is the STANDALONE statement, the one written inside a
+// subgraph block. The fence's own first line (`flowchart LR`) also sets a
+// direction and is never touched — normalizeFlowchartSource skips the header
+// before any of this runs.
+//
+// One thing is genuinely given up. A `classDef` written at column 0 is the one
+// directive the vendored parser does read, and paired with a `:::className`
+// suffix on a node it colors that node's label text. An indented one has never
+// worked (the pattern is anchored), no fence in the corpus does it at all, and
+// keeping only the column-0 spelling would make this pass's output depend on
+// indentation. Dropping every `classDef` also closes a crash: parseStyleClass
+// splits each declaration on ':' and indexes the second field blindly, so a
+// column-0 `classDef x stroke-dasharray: 5 5` panics the vendored parser and
+// takes the whole fence down to the verbatim fallback.
+var flowchartDroppedKeywords = []string{
+	"style", "classDef", "class", "linkStyle", "direction",
+	"click", "href", "callback",
+}
+
+// flowchartDirective reports which of keywords text is a directive statement
+// for, or "" when it is a node or edge statement instead. This is the one
+// place either flowchart keyword list is matched.
+//
+// Two things happen before the shared discriminator sees the text, and both
+// are needed to keep a NODE from being read as a directive:
+//
+//   - Labels are masked (see flowchartMaskLabels), so a node id that is a
+//     keyword and carries a label — `class[Class registry] --> B` — reads as
+//     `class______________ --> B`. The mask byte cannot end an identifier, so
+//     the whole-word test in mermaidKeywordRest rejects the keyword and the
+//     line stays a node statement.
+//   - Links are normalized FIRST by the caller, so the arrow test in
+//     mermaidDirectiveShape sees a `-->` whatever the author wrote. That test
+//     knows classDiagram's and stateDiagram's arrows, which do not include
+//     `===` or `-.->`; without the rewrite, `style ==> B` and `class -.- B`
+//     would have no arrow to find and would be dropped as directives.
+func flowchartDirective(text string, keywords []string) string {
+	return mermaidDirective(strings.TrimSpace(flowchartMaskLabels(text)), keywords)
 }
 
 // normalizeFlowchartLine normalizes one body line: links first, then node
 // shapes (see this file's doc comment for why that order is load-bearing).
+// keep is false when the line is a styling or layout directive and must be
+// dropped from the source entirely — see flowchartDroppedKeywords.
 //
-// A line matching flowchartStructuralKeywords is returned verbatim. The match
-// goes through the shared mermaidDirective discriminator rather than a prefix
-// test, so a node genuinely NAMED after one of those keywords is still treated
-// as a node statement — `end --> A{x}` normalizes, `end` alone does not. That
-// is the same trap mermaidDirectiveShape's own doc comment describes, reached
-// from a third diagram type; reusing the discriminator is what keeps it fixed
-// in one place.
+// Both keyword lists are matched through the shared mermaidDirective
+// discriminator rather than a prefix test, so a node genuinely NAMED after one
+// of those keywords is still treated as a node statement: `end --> A{x}`
+// normalizes, `style ==> B` normalizes and survives, `style-review --> x` is
+// untouched, and only `style A fill:#f9f` is dropped. That is the same trap
+// mermaidDirectiveShape's own doc comment describes, reached from a third
+// diagram type; reusing the discriminator is what keeps it fixed in one place.
 //
 // An inline `%%` comment is split off and re-appended untouched. The vendored
 // parser cuts every line at its first `%%` before parsing, so the tail is dead
 // text as far as rendering goes — rewriting an author's prose there would
-// change what a reader sees in the source for no rendering gain.
-func normalizeFlowchartLine(line string) string {
+// change what a reader sees in the source for no rendering gain. A dropped
+// directive takes its own comment tail with it: the tail annotates a line that
+// is no longer there.
+func normalizeFlowchartLine(line string) (normalized string, keep bool) {
 	body, comment, hasComment := strings.Cut(line, "%%")
-	if mermaidDirective(strings.TrimSpace(body), flowchartStructuralKeywords) != "" {
-		return line
+	linked := normalizeFlowchartLinks(body)
+
+	if flowchartDirective(linked, flowchartStructuralKeywords) != "" {
+		return line, true
+	}
+	if flowchartDirective(linked, flowchartDroppedKeywords) != "" {
+		return "", false
 	}
 
-	normalized := normalizeFlowchartNodes(normalizeFlowchartLinks(body))
+	normalized = normalizeFlowchartNodes(linked)
 	if hasComment {
-		return normalized + "%%" + comment
+		return normalized + "%%" + comment, true
 	}
-	return normalized
+	return normalized, true
 }
 
 // normalizeFlowchartSource rewrites a whole `graph`/`flowchart` fence into the
@@ -448,25 +518,49 @@ func normalizeFlowchartLine(line string) string {
 // through untouched. The header is skipped because it is a declaration, not a
 // statement: `flowchart LR` has no node or link in it, and the vendored parser
 // rejects the whole diagram if anything unexpected follows the direction
-// keyword.
+// keyword. Skipping it is also what keeps a fence's own `flowchart LR` safe
+// while a standalone `direction TB` inside a subgraph is dropped.
 //
-// Line count, line order and leading indentation are all preserved, so the
-// result stays diff-comparable against the fence the author wrote. That is
-// deliberate: when something still renders wrongly, the normalized source is
-// meant to be readable next to the original.
+// A dropped directive line is REMOVED rather than blanked. A blank line is
+// harmless to the vendored parser today, but leaving one would make the pass's
+// output depend on a parser detail it has no reason to depend on, and the line
+// is gone either way.
+//
+// Line order and leading indentation are preserved, and so is the line count
+// except for the directives that are dropped, so the result stays
+// diff-comparable against the fence the author wrote. That is deliberate: when
+// something still renders wrongly, the normalized source is meant to be
+// readable next to the original.
+//
+// When dropping would leave the fence with no statement at all, the ORIGINAL
+// source is returned instead. A header-only diagram renders as blank art,
+// which would make the fence vanish from the preview; handing the original
+// back keeps this pass from ever being the reason a fence disappears, however
+// the drop rule is changed later.
 func normalizeFlowchartSource(source string) string {
 	lines := strings.Split(source, "\n")
-	headerSeen := false
-	for i, line := range lines {
+	out := make([]string, 0, len(lines))
+	headerSeen, statements := false, 0
+	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "%%") {
+		switch {
+		case trimmed == "" || strings.HasPrefix(trimmed, "%%"):
+			out = append(out, line)
 			continue
-		}
-		if !headerSeen {
+		case !headerSeen:
 			headerSeen = true
+			out = append(out, line)
 			continue
 		}
-		lines[i] = normalizeFlowchartLine(line)
+		normalized, keep := normalizeFlowchartLine(line)
+		if !keep {
+			continue
+		}
+		out = append(out, normalized)
+		statements++
 	}
-	return strings.Join(lines, "\n")
+	if statements == 0 {
+		return source
+	}
+	return strings.Join(out, "\n")
 }
