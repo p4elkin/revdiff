@@ -67,6 +67,14 @@ const (
 	// bounds the tail (see the plan's "Keeping boxes readable" section).
 	classMaxMembers = 12
 
+	// classCardinalityMaxRunes caps a cardinality value classCardinalityTable
+	// does not recognize. Every entry that table DOES hold normalizes to at
+	// most three runes ("0/1"), so an unrecognized one is already the wide
+	// case; this keeps it from growing an edge label without bound while
+	// still leaving room for the longest shape an author plausibly writes by
+	// hand ("0..many" is 7).
+	classCardinalityMaxRunes = 8
+
 	// classInheritanceLabel is the word used for the two generalization/
 	// realization relation arrows (<|-- and <|..). It is UML-inexact: solid
 	// <|-- is generalization (inheritance), so "extends" would be the more
@@ -582,6 +590,31 @@ func (b *flowchartBuilder) empty() bool {
 	return len(b.order) == 0
 }
 
+// flowchartTopology is everything source() derives from the accumulated
+// edges before it can emit a single line: the declaration order and each
+// node's child list. Both come out of one O(V+E) walk (see topology), and
+// both are needed twice — the order to predict the layout AND to emit the
+// declarations, the child list to predict the layout AND, indirectly, to
+// build the order. Passing this one value around is what keeps that walk to
+// a single run per source() call instead of the three it took when each
+// step recomputed what it needed from the builder.
+type flowchartTopology struct {
+	// order is the topological declaration order (see declarationOrder).
+	order []string
+	// children maps each node key to the keys it has edges to, in edge
+	// insertion order, self-loops excluded (see parentCounts).
+	children map[string][]string
+}
+
+// topology computes both derived structures once, and is the only place
+// parentCounts is called from. declarationOrder consumes (and mutates) the
+// parent counts, so those stay local here — nothing needs them afterwards,
+// while the child list outlives the call.
+func (b *flowchartBuilder) topology() flowchartTopology {
+	remainingParents, children := b.parentCounts()
+	return flowchartTopology{order: b.declarationOrder(remainingParents, children), children: children}
+}
+
 // declarationOrder returns node keys in the order their `nX[label]`
 // declaration lines must be emitted: a TOPOLOGICAL order — every edge's
 // source is declared before its target — tie-broken by first-seen order so
@@ -609,9 +642,11 @@ func (b *flowchartBuilder) empty() bool {
 // are emitted in first-seen order — every node is still declared exactly
 // once, and the first of them becomes a root, so the renderer always has
 // somewhere to start.
-func (b *flowchartBuilder) declarationOrder() []string {
-	remainingParents, children := b.parentCounts()
-
+//
+// Both inputs come from one parentCounts call made by topology, the only
+// caller. remainingParents is drained as the walk proceeds and must not be
+// reused afterwards.
+func (b *flowchartBuilder) declarationOrder(remainingParents map[string]int, children map[string][]string) []string {
 	out := make([]string, 0, len(b.order))
 	declared := make(map[string]bool, len(b.order))
 	for len(out) < len(b.order) {
@@ -695,25 +730,22 @@ func (b *flowchartBuilder) nextDeclarable(remainingParents map[string]int, decla
 // every later node is either a root itself or was already placed by an
 // earlier parent — exactly the invariant the renderer relies on to avoid
 // walking a node it has not positioned yet.
-func (b *flowchartBuilder) levels() map[string]int {
-	order := b.declarationOrder()
-	_, children := b.parentCounts()
-
-	claimed := make(map[string]bool, len(order))
-	level := make(map[string]int, len(order))
-	placed := make(map[string]bool, len(order))
-	for _, key := range order {
+func (t flowchartTopology) levels() map[string]int {
+	claimed := make(map[string]bool, len(t.order))
+	level := make(map[string]int, len(t.order))
+	placed := make(map[string]bool, len(t.order))
+	for _, key := range t.order {
 		if !claimed[key] {
 			level[key], placed[key] = 0, true
 		}
 		claimed[key] = true
-		for _, child := range children[key] {
+		for _, child := range t.children[key] {
 			claimed[child] = true
 		}
 	}
 
-	for _, key := range order {
-		for _, child := range children[key] {
+	for _, key := range t.order {
+		for _, child := range t.children[key] {
 			if placed[child] {
 				continue
 			}
@@ -725,11 +757,13 @@ func (b *flowchartBuilder) levels() map[string]int {
 
 // widestLevel returns k: the largest number of nodes sharing one layout
 // level (see levels) — the axis mermaidLabelCap actually needs, since
-// flowchart TD places same-level siblings side by side (graph.go).
-func (b *flowchartBuilder) widestLevel() int {
-	level := b.levels()
-	counts := make(map[int]int, len(b.order))
-	for _, key := range b.order {
+// flowchart TD places same-level siblings side by side (graph.go). Counting
+// over t.order rather than the builder's own insertion order is equivalent:
+// declarationOrder emits every node key exactly once, only rearranged.
+func (t flowchartTopology) widestLevel() int {
+	level := t.levels()
+	counts := make(map[int]int, len(t.order))
+	for _, key := range t.order {
 		counts[level[key]]++
 	}
 	k := 1
@@ -758,23 +792,29 @@ func (b *flowchartBuilder) hasAnyEdgeLabel() bool {
 // diagram's own topology (widestLevel, hasAnyEdgeLabel) — no iteration, no
 // dependency on the cap while building (see the plan's "The width cap is
 // adaptive" section) — then every label line and edge label is truncated to
-// it. Declarations are emitted via declarationOrder (see its doc comment for
+// it. Declarations are emitted in declarationOrder (see its doc comment for
 // why the order is load-bearing, not cosmetic); edges follow, each either
 // `from -->|label| to` or plain `from --> to` when mermaidEdgeLabel reports
 // no label survived. Returns "" when empty() — callers must check that
 // first, since an empty flowchart source is itself something the vendored
 // parser rejects (a builder-empty diagram is meant to fall back to the
 // original source, not to this empty string — see transpileMermaid).
+//
+// The declaration order and the child list are derived ONCE, into a single
+// flowchartTopology value the width prediction and the declaration loop then
+// share. They used to be recomputed per step, which ran the topological walk
+// twice and the O(V+E) parentCounts walk three times for one call.
 func (b *flowchartBuilder) source() string {
 	if b.empty() {
 		return ""
 	}
 
-	capRunes := mermaidLabelCap(b.paneWidth, b.widestLevel(), b.hasAnyEdgeLabel())
+	topo := b.topology()
+	capRunes := mermaidLabelCap(b.paneWidth, topo.widestLevel(), b.hasAnyEdgeLabel())
 
 	var out strings.Builder
 	out.WriteString("flowchart TD\n")
-	for _, key := range b.declarationOrder() {
+	for _, key := range topo.order {
 		n := b.nodes[key]
 		fmt.Fprintf(&out, "%s[%s]\n", n.id, strings.Join(n.renderLabelLines(capRunes), "<br/>"))
 	}
@@ -921,6 +961,8 @@ func mermaidHasAnyKeyword(text string, keywords []string) bool {
 	return false
 }
 
+// --- classDiagram transpiler ---
+//
 // classIgnoredStatementKeywords lists classDiagram statement keywords that
 // carry no information the flowchart-source builder needs: styling/metadata
 // directives (style, cssClass, classDef), doc/interaction directives (note,
@@ -933,7 +975,12 @@ func mermaidHasAnyKeyword(text string, keywords []string) bool {
 //
 // Each entry matches as a whole word, never as a bare prefix — see
 // mermaidKeywordPrefix for why a class genuinely named "linkTarget" or
-// "titleCase" must not be mistaken for one of these directives.
+// "titleCase" must not be mistaken for one of these directives. The whole
+// word test is still not enough on its own: a class named EXACTLY "link" or
+// "title" is indistinguishable from the directive by any prefix rule, since
+// both are followed by a space. classTranspiler.statement therefore parses
+// the line as a relation FIRST and only consults this list when no relation
+// parsed — see that method's doc comment.
 var classIgnoredStatementKeywords = []string{
 	"note", "click", "callback", "link", "href",
 	"style", "cssClass", "classDef",
@@ -952,18 +999,22 @@ var classIgnoredStatementKeywords = []string{
 // whole member. A real lollipop always writes the "()" as its own token with
 // a space in front of it, while a method signature never does — the paren
 // closes directly against the method name.
+//
+// This is the one dropped statement kind classTranspiler.statement tests
+// BEFORE the relation parse, and it has to be: a lollipop line really does
+// contain a "--" token, so classArrowPattern's plain "--" fallback would
+// happily manufacture a bogus relation out of the "()" text if the relation
+// parse saw the line first.
 var classLollipopRelation = regexp.MustCompile(`(?:^|\s)(?:\(\)--|--\(\))`)
 
-// classIgnoredStatement reports whether text is one of the classDiagram
-// statement kinds this patch deliberately drops rather than transpiles: the
-// prefixes above, plus mermaid's lollipop interface notation
-// (classLollipopRelation), which — left unchecked — would otherwise match
-// classArrowPattern's plain "--" fallback and manufacture a bogus relation
-// out of the "()" text.
+// classIgnoredStatement reports whether text opens with one of the
+// classDiagram directive keywords this patch deliberately drops rather than
+// transpiles — see classIgnoredStatementKeywords. The lollipop check is
+// deliberately NOT folded in here: the two run at different points of
+// classTranspiler.statement's dispatch (lollipop before the relation parse,
+// this after it), so keeping them separate is what lets the caller order them
+// independently.
 func classIgnoredStatement(text string) bool {
-	if classLollipopRelation.MatchString(text) {
-		return true
-	}
 	return mermaidHasAnyKeyword(text, classIgnoredStatementKeywords)
 }
 
@@ -1263,14 +1314,14 @@ var classCardinalityTable = map[string]string{
 
 // classCardinality normalizes one quoted cardinality value per
 // classCardinalityTable; anything the table does not recognize is
-// sanitized and capped at 8 runes rather than dropped outright, so an
-// author's unusual cardinality text still shows up in shortened form
-// instead of vanishing.
+// sanitized and capped at classCardinalityMaxRunes rather than dropped
+// outright, so an author's unusual cardinality text still shows up in
+// shortened form instead of vanishing.
 func classCardinality(raw string) string {
 	if norm, ok := classCardinalityTable[raw]; ok {
 		return norm
 	}
-	return mermaidTruncate(mermaidSafeText(raw), 8)
+	return mermaidTruncate(mermaidSafeText(raw), classCardinalityMaxRunes)
 }
 
 // classComposeCardinality joins a relation's two normalized cardinalities
@@ -1464,8 +1515,27 @@ func (c *classTranspiler) line(text string, depth int) {
 // ensureTitle), a dropped "direction" statement, an ignored statement kind,
 // or — if none of those match — a line this patch cannot parse, silently
 // omitted per the plan's Failure modes table.
+//
+// The dispatch order is the load-bearing part, and the rule behind it is
+// this: a line that PARSES as a relation is a relation, whatever its first
+// token happens to be called. A class can legitimately be named "note",
+// "link", "style" or "title", and "note <|-- Done" is then an ordinary
+// inheritance relation, not a note directive. No keyword matcher can tell
+// the two apart — both are the bare word followed by a space — so the
+// relation parse runs first and the ignored-keyword list is consulted only
+// once no relation parsed. That is also what keeps a directive safe: a real
+// "style Foo fill:#f9f" or "title My Diagram" carries no relation arrow at
+// all, so the relation parse declines it and the keyword list still drops it.
+//
+// Two checks sit outside that rule, one on each side:
+//   - the lollipop notation is tested FIRST, because it does contain a "--"
+//     token the relation parser would otherwise claim (see
+//     classLollipopRelation).
+//   - the "ClassName : member" colon form is tested LAST, because directives
+//     carry colons of their own ("classDef hi fill:red") and would misparse
+//     as a member line.
 func (c *classTranspiler) statement(text string) {
-	if mermaidKeywordPrefix(text, "direction") || classIgnoredStatement(text) {
+	if classLollipopRelation.MatchString(text) {
 		return
 	}
 	if key, title, ok := classDeclFromStatement(text); ok {
@@ -1473,6 +1543,9 @@ func (c *classTranspiler) statement(text string) {
 		return
 	}
 	if c.statementRelation(text) {
+		return
+	}
+	if mermaidKeywordPrefix(text, "direction") || classIgnoredStatement(text) {
 		return
 	}
 	if key, after, ok := splitOnFirstColon(text); ok && key != "" {
@@ -1640,16 +1713,36 @@ func (s *stateTranspiler) line(text string, _ int) {
 }
 
 // statement handles one stateDiagram-v2 line that is not a block header, a
-// block close, or note body: a dropped "direction" statement, an ignored
-// statement kind, a note open (single-line dropped inline, multi-line opens
-// s.inNote), a "state ..." declaration, a transition, the "A : description"
-// colon form, or — if none of those match — a line this patch cannot parse,
-// silently omitted per the plan's Failure modes table. The order matters the
-// same way it does in classTranspiler.statement: the transition and
-// declaration checks must run BEFORE the generic colon-description fallback,
-// or "Draft --> InReview : submit" would be misread as an "identifier :
-// description" statement keyed on the whole "Draft --> InReview" text.
+// block close, or note body: a transition, a dropped "direction" statement,
+// an ignored statement kind, a note open (single-line dropped inline,
+// multi-line opens s.inNote), a "state ..." declaration, the
+// "A : description" colon form, or — if none of those match — a line this
+// patch cannot parse, silently omitted per the plan's Failure modes table.
+//
+// The dispatch order follows the same rule as classTranspiler.statement, for
+// the same reason: a line that PARSES as a transition is a transition,
+// whatever its first token happens to be called. States really do get named
+// "note", "style", "title", "class" and "direction", and "note --> Done" is
+// then an ordinary transition. Since a directive and a state of the same
+// name are both just that word followed by a space, no keyword matcher can
+// separate them — so the transition parse runs first, and every keyword
+// check below it only ever sees lines with no "-->" in them. Running the
+// note check first was the version that silently dropped such lines, and for
+// "note" specifically it dropped far more than one: startNoteIfAny would
+// open a multi-line note nothing ever closed, swallowing the rest of the
+// diagram.
+//
+// Real directives are unaffected by the reordering: "direction LR",
+// "style Foo fill:#f9f", "title My Diagram", "classDef hi bold",
+// "class Foo hi" and every "note ... of X" shape carry no transition arrow,
+// so the transition parse declines them and they reach their own checks
+// exactly as before. The colon-description fallback stays last, since
+// several of those directives carry a colon of their own.
 func (s *stateTranspiler) statement(text string) {
+	if fromRaw, toRaw, label, ok := parseStateTransition(text); ok {
+		s.statementTransition(fromRaw, toRaw, label)
+		return
+	}
 	if mermaidKeywordPrefix(text, "direction") || stateIgnoredStatement(text) {
 		return
 	}
@@ -1658,10 +1751,6 @@ func (s *stateTranspiler) statement(text string) {
 	}
 	if key, title, annotation, ok := stateDeclFromStatement(text); ok {
 		s.applyStateDecl(key, title, annotation)
-		return
-	}
-	if fromRaw, toRaw, label, ok := parseStateTransition(text); ok {
-		s.statementTransition(fromRaw, toRaw, label)
 		return
 	}
 	if key, after, ok := splitOnFirstColon(text); ok && key != "" {
@@ -1779,6 +1868,13 @@ var stateNoteOpenPattern = regexp.MustCompile(`^note\s+(?:left|right)\s+of\s+\S`
 // transition ("notes --> done") starts with the four letters "note", and a
 // bare-prefix match would open a note block that nothing ever closes,
 // discarding every remaining line of the diagram instead of drawing it.
+//
+// Neither guard can help with a state named EXACTLY "note", since "note"
+// and "note ..." are the same text either way. That case is handled by
+// dispatch order instead: statement parses the line as a transition first,
+// so a transition line never reaches this function at all — "note --> Done"
+// is recorded as an edge and returns long before any note handling. Keep
+// this function below the transition parse if statement is ever reordered.
 func (s *stateTranspiler) startNoteIfAny(text string) bool {
 	if !mermaidKeywordPrefix(text, "note") {
 		return false
@@ -1869,7 +1965,10 @@ func stateNodeKey(raw, scope string, isTarget bool) string {
 // mermaidKeywordPrefix for why a state genuinely named "styleGuide" or
 // "titleFetch" must not be mistaken for one of these directives. "class"
 // therefore needs no trailing space to keep it apart from "classDef": the
-// word match already stops "class" from swallowing it.
+// word match already stops "class" from swallowing it. A state named EXACTLY
+// "class" or "style" needs more than a word match, though — that one is
+// handled by parsing transitions before this list is consulted, see
+// stateTranspiler.statement.
 var stateIgnoredStatementKeywords = []string{
 	"classDef", "class", "style", "accTitle", "accDescr", "title",
 }

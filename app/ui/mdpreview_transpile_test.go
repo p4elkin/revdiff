@@ -407,7 +407,7 @@ func TestFlowchartBuilder_WidestLevel_FeedsK(t *testing.T) {
 	b.addEdge("Impl2", "IFace", classInheritanceLabel)
 	b.addEdge("Impl3", "IFace", classInheritanceLabel)
 
-	assert.Equal(t, 3, b.widestLevel())
+	assert.Equal(t, 3, b.topology().widestLevel())
 }
 
 func TestFlowchartBuilder_DeclarationOrder_SourcesBeforeTargets_PinnedAgainstFanIn(t *testing.T) {
@@ -420,7 +420,7 @@ func TestFlowchartBuilder_DeclarationOrder_SourcesBeforeTargets_PinnedAgainstFan
 	b.addEdge("B", "A", "x")
 	b.addEdge("C", "A", "y")
 
-	assert.Equal(t, []string{"B", "C", "A"}, b.declarationOrder())
+	assert.Equal(t, []string{"B", "C", "A"}, b.topology().order)
 }
 
 func TestFlowchartBuilder_DeclarationOrder_NodeWithNoEdgesAtAll_KeepsItsFirstSeenSlot(t *testing.T) {
@@ -428,7 +428,7 @@ func TestFlowchartBuilder_DeclarationOrder_NodeWithNoEdgesAtAll_KeepsItsFirstSee
 	b.addEdge("Src", "Dst", "x")
 	b.setTitle("Standalone", "Standalone") // never mentioned in any edge, first-seen after Dst
 
-	got := b.declarationOrder()
+	got := b.topology().order
 	assert.Equal(t, []string{"Src", "Dst", "Standalone"}, got,
 		"leftover (never-a-source) nodes must keep their own first-seen relative order")
 }
@@ -663,19 +663,30 @@ func TestClassTranspiler_QuotedCardinalityWithColon_KeepsTheRelationAndMakesNoPh
 
 // --- classDiagram transpiler: classIgnoredStatement ---
 
-func TestClassIgnoredStatement_Lollipop(t *testing.T) {
-	assert.True(t, classIgnoredStatement("Class1 ()-- Class2"))
-	assert.True(t, classIgnoredStatement("Class1 --() Class2"), "the mirrored lollipop form too")
-	assert.True(t, classIgnoredStatement("()-- Class2"), "at start of line")
-	assert.False(t, classIgnoredStatement("A --> B"))
+func TestClassLollipopRelation_Lollipop(t *testing.T) {
+	assert.True(t, classLollipopRelation.MatchString("Class1 ()-- Class2"))
+	assert.True(t, classLollipopRelation.MatchString("Class1 --() Class2"), "the mirrored lollipop form too")
+	assert.True(t, classLollipopRelation.MatchString("()-- Class2"), "at start of line")
+	assert.False(t, classLollipopRelation.MatchString("A --> B"))
 }
 
-func TestClassIgnoredStatement_LollipopIsATokenNotASubstring(t *testing.T) {
+func TestClassLollipopRelation_IsATokenNotASubstring(t *testing.T) {
 	// A method signature closes its paren directly against the method name,
 	// so "()" is never its own token there. A substring test for "()--"
 	// dropped the whole member line.
-	assert.False(t, classIgnoredStatement("Node : +splitForCreate()--Update"))
-	assert.False(t, classIgnoredStatement("Foo : +calc()--x"))
+	assert.False(t, classLollipopRelation.MatchString("Node : +splitForCreate()--Update"))
+	assert.False(t, classLollipopRelation.MatchString("Foo : +calc()--x"))
+}
+
+func TestClassTranspiler_LollipopStatement_DroppedNotTurnedIntoARelation(t *testing.T) {
+	// end-to-end companion to the two regexp tests above: the lollipop check
+	// runs BEFORE the relation parse, so classArrowPattern's plain "--"
+	// fallback never gets to manufacture an edge out of the "()" text.
+	got, ok := transpileMermaid("classDiagram\n    A <|-- B\n    Class1 ()-- Class2\n", mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.NotContains(t, got, "Class1")
+	assert.NotContains(t, got, "Class2")
+	assert.Equal(t, 1, strings.Count(got, "-->"), "only the real relation survives")
 }
 
 // --- classDiagram transpiler: parseClassDecl ---
@@ -854,13 +865,17 @@ func TestClassCardinality_Table(t *testing.T) {
 		{"0..n", "n"},
 		{"many", "n"},
 		{"?", "?"},                            // not in the table: sanitized (no-op here) and left as-is
-		{strings.Repeat("x", 12), "xxxxx..."}, // not in the table: sanitized (no-op) then capped at 8 runes
+		{strings.Repeat("x", 12), "xxxxx..."}, // not in the table: sanitized (no-op) then capped
 	}
 	for _, tc := range tests {
 		t.Run(tc.raw, func(t *testing.T) {
 			assert.Equal(t, tc.want, classCardinality(tc.raw))
 		})
 	}
+
+	// the unrecognized-value cap is a named constant, so pin the row above to
+	// it rather than to the literal it happens to equal today.
+	assert.Equal(t, classCardinalityMaxRunes, utf8.RuneCountInString(classCardinality(strings.Repeat("x", 12))))
 }
 
 func TestParseClassRelation_CardinalityOrder_FlipsWithArrow(t *testing.T) {
@@ -1876,7 +1891,7 @@ func TestRenderMermaidSource_RealCorpusStateDiagram_TopologicalOrderBringsArtIns
 
 	b := newFlowchartBuilder(80)
 	scanMermaidBlocks(source, newStateTranspiler(b))
-	k := b.widestLevel()
+	k := b.topology().widestLevel()
 	require.Equal(t, 3, k, "this corpus diagram's widest layout level holds three states")
 	assert.Equal(t, mermaidLabelMinRunes, mermaidLabelCap(80, k, b.hasAnyEdgeLabel()),
 		"the adaptive cap must still shrink to its floor here — do not weaken or delete it")
@@ -1943,7 +1958,7 @@ func TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane(t
 
 	b := newFlowchartBuilder(80)
 	scanMermaidBlocks(source, newClassTranspiler(b))
-	k := b.widestLevel()
+	k := b.topology().widestLevel()
 	require.Equal(t, 3, k, "this corpus diagram's widest layout level holds three classes")
 	assert.Equal(t, mermaidLabelMinRunes, mermaidLabelCap(80, k, b.hasAnyEdgeLabel()),
 		"the cap is already on its floor here and has nothing left to give")
@@ -2361,6 +2376,207 @@ func TestIgnoredStatements_RealDirectivesStillDropped(t *testing.T) {
 	}
 }
 
+// --- Relations parse before the ignored-keyword lists are consulted ---
+//
+// A whole-word keyword match still cannot separate a node named EXACTLY like
+// a directive from the directive itself: "note --> Done" and "note right of
+// X : text" both open with the bare word plus a space. The dispatch order is
+// what separates them — a line that parses as a relation or transition is a
+// relation, whatever its first token is called. These tests pin both halves:
+// the nodes that must survive, and the directives that must still drop.
+
+func TestStateTranspiler_StateNamedExactlyAKeyword_TransitionSurvives(t *testing.T) {
+	tests := []struct{ name, src, wantFrom, wantTo string }{
+		{"note", "stateDiagram-v2\n    note --> Done\n", "note", "Done"},
+		{"style", "stateDiagram-v2\n    style --> review\n", "style", "review"},
+		{"title", "stateDiagram-v2\n    title --> approved\n", "title", "approved"},
+		{"direction", "stateDiagram-v2\n    direction --> up\n", "direction", "up"},
+		{"class", "stateDiagram-v2\n    class --> loaded\n", "class", "loaded"},
+		{"classDef", "stateDiagram-v2\n    classDef --> applied\n", "classDef", "applied"},
+		{"accTitle", "stateDiagram-v2\n    accTitle --> shown\n", "accTitle", "shown"},
+		{"as the target", "stateDiagram-v2\n    Draft --> note\n", "Draft", "note"},
+		{"with a label", "stateDiagram-v2\n    style --> review : submit\n", "style", "review"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := transpileMermaid(tc.src, mermaidUnconstrainedWidth)
+			require.True(t, ok, "the diagram must not come out empty")
+			assert.Contains(t, got, "n0["+tc.wantFrom+"]")
+			assert.Contains(t, got, "n1["+tc.wantTo+"]")
+			assert.Contains(t, got, "n0 -->", "the transition itself must be recorded")
+		})
+	}
+}
+
+func TestStateTranspiler_StateNamedExactlyNote_DoesNotSwallowTheRestOfTheDiagram(t *testing.T) {
+	// the worst case of the whole class: "note" as a transition subject used
+	// to reach startNoteIfAny, which dropped the line — and, for a shape
+	// without a colon, would have opened a note block nothing ever closes.
+	src := "stateDiagram-v2\n    note --> Done\n    Done --> archived\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.Contains(t, got, "n0[note]")
+	assert.Contains(t, got, "n1[Done]")
+	assert.Contains(t, got, "n2[archived]")
+	assert.Equal(t, 2, strings.Count(got, "-->"), "both transitions must survive")
+}
+
+func TestStateTranspiler_KeywordLikeStateNames_StillSurvive(t *testing.T) {
+	// the round-3 cases: a longer identifier that merely STARTS with a
+	// keyword, including the kebab-case shapes mermaidIdentRune covers.
+	tests := []struct{ name, src, wantFrom, wantTo string }{
+		{"plural", "stateDiagram-v2\n    notes --> done\n", "notes", "done"},
+		{"kebab both sides", "stateDiagram-v2\n    style-review --> title-approval\n", "style-review", "title-approval"},
+		{"camel", "stateDiagram-v2\n    styleGuide --> titleFetch\n", "styleGuide", "titleFetch"},
+		{"dotted", "stateDiagram-v2\n    class.Registry --> link.check\n", "class.Registry", "link.check"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := transpileMermaid(tc.src, mermaidUnconstrainedWidth)
+			require.True(t, ok)
+			assert.Contains(t, got, "n0["+tc.wantFrom+"]")
+			assert.Contains(t, got, "n1["+tc.wantTo+"]")
+		})
+	}
+}
+
+func TestStateTranspiler_RealDirectives_StillDroppedEndToEnd(t *testing.T) {
+	// every directive kind that carries no transition arrow must still be
+	// dropped after the reordering, and must not disturb the diagram around
+	// it. The anchor transition "Draft --> Done" is checked on every row so a
+	// directive that swallowed following lines would show up here.
+	tests := []struct{ name, directive, mustNotContain string }{
+		{"single-line note", "note right of Draft : needs review", "needs"},
+		{"style", "style Draft fill:#f9f", "fill"},
+		{"title", "title My Diagram", "My"},
+		{"direction", "direction LR", "LR"},
+		{"classDef", "classDef foo bold", "bold"},
+		{"class css", "class Draft cssClassName", "cssClassName"},
+		{"accTitle", "accTitle: Lifecycle", "Lifecycle"},
+		{"accDescr", "accDescr: How it flows", "flows"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "stateDiagram-v2\n    Draft --> Done\n    " + tc.directive + "\n    Done --> archived\n"
+
+			got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+			require.True(t, ok)
+
+			assert.NotContains(t, got, tc.mustNotContain, "the directive's own text must not reach the output")
+			assert.Contains(t, got, "n0[Draft]")
+			assert.Contains(t, got, "n1[Done]")
+			assert.Contains(t, got, "n2[archived]", "the line after the directive must still render")
+			assert.Equal(t, 2, strings.Count(got, "-->"))
+		})
+	}
+}
+
+func TestStateTranspiler_MultiLineNote_StillSkippedUntilEndNote(t *testing.T) {
+	// the multi-line opener has no colon and no arrow, so it still reaches
+	// startNoteIfAny and still suppresses its body — including a body line
+	// that looks like a transition, which belongs to the note, not the
+	// diagram.
+	src := "stateDiagram-v2\n" +
+		"    Draft --> Done\n" +
+		"    note left of Draft\n" +
+		"      body text\n" +
+		"      Ghost --> Phantom\n" +
+		"    end note\n" +
+		"    Done --> archived\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.NotContains(t, got, "body")
+	assert.NotContains(t, got, "Ghost", "a transition inside the note body is note text, not a transition")
+	assert.NotContains(t, got, "Phantom")
+	assert.Contains(t, got, "n2[archived]", "the line after \"end note\" must still render")
+	assert.Equal(t, 2, strings.Count(got, "-->"))
+}
+
+func TestClassTranspiler_ClassNamedExactlyAKeyword_RelationSurvives(t *testing.T) {
+	tests := []struct{ name, src, wantSubject, wantObject string }{
+		// "<|--" flips, so the emitted edge runs object -> subject: n0 is the
+		// right-hand class of the source line (see classArrowTable).
+		{"note", "classDiagram\n    note <|-- Done\n", "note", "Done"},
+		{"style", "classDiagram\n    style <|-- review\n", "style", "review"},
+		{"link", "classDiagram\n    link <|-- target\n", "link", "target"},
+		{"title", "classDiagram\n    title <|-- approved\n", "title", "approved"},
+		{"href", "classDiagram\n    href <|-- resolved\n", "href", "resolved"},
+		{"click", "classDiagram\n    click <|-- handled\n", "click", "handled"},
+		{"callback", "classDiagram\n    callback <|-- fired\n", "callback", "fired"},
+		{"cssClass", "classDiagram\n    cssClass <|-- applied\n", "cssClass", "applied"},
+		{"classDef", "classDiagram\n    classDef <|-- applied\n", "classDef", "applied"},
+		{"accTitle", "classDiagram\n    accTitle <|-- shown\n", "accTitle", "shown"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := transpileMermaid(tc.src, mermaidUnconstrainedWidth)
+			require.True(t, ok, "the diagram must not come out empty")
+			assert.Contains(t, got, "n0["+tc.wantObject+"]")
+			assert.Contains(t, got, "n1["+tc.wantSubject+"]")
+			assert.Contains(t, got, "n0 -->|"+classInheritanceLabel+"| n1")
+		})
+	}
+}
+
+func TestClassTranspiler_RelationWithKeywordNamedClass_DoesNotDropFollowingLines(t *testing.T) {
+	src := "classDiagram\n    note <|-- Done\n    Done <|-- Archived\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.Contains(t, got, "[note]")
+	assert.Contains(t, got, "[Done]")
+	assert.Contains(t, got, "[Archived]")
+	assert.Equal(t, 2, strings.Count(got, "-->"), "both relations must survive")
+}
+
+func TestClassTranspiler_RealDirectives_StillDroppedEndToEnd(t *testing.T) {
+	tests := []struct{ name, directive, mustNotContain string }{
+		{"floating note", `note "a floating note"`, "floating"},
+		{"note for", `note for Base "explains Base"`, "explains"},
+		{"click", "click Base call handler()", "handler"},
+		{"callback", "callback Base cb", " cb"},
+		{"link", `link Base "https://example.com"`, "example"},
+		{"href", `href Base "https://example.com"`, "example"},
+		{"style", "style Base fill:#f9f", "fill"},
+		{"cssClass", `cssClass "Base" highlight`, "highlight"},
+		{"classDef", "classDef highlight fill:red", "highlight"},
+		{"title", "title My Diagram", "My"},
+		{"direction", "direction LR", "LR"},
+		{"accTitle", "accTitle: Model", "Model"},
+		{"accDescr", "accDescr: How it hangs together", "hangs"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "classDiagram\n    Base <|-- Mid\n    " + tc.directive + "\n    Mid <|-- Leaf\n"
+
+			got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+			require.True(t, ok)
+
+			assert.NotContains(t, got, tc.mustNotContain, "the directive's own text must not reach the output")
+			assert.Contains(t, got, "[Base]")
+			assert.Contains(t, got, "[Mid]")
+			assert.Contains(t, got, "[Leaf]", "the line after the directive must still render")
+			assert.Equal(t, 2, strings.Count(got, "-->"))
+		})
+	}
+}
+
+func TestClassTranspiler_ClassDeclarationStillWinsOverTheRelationParse(t *testing.T) {
+	// "class Foo" is a declaration keyword in classDiagram grammar, not a
+	// class name, so the declaration check stays ahead of the relation parse.
+	got, ok := transpileMermaid("classDiagram\n    class Repo~T~\n    Repo <|-- GitRepo\n", mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.Contains(t, got, "[Repo~T~]", "the declaration supplied the title, generic parameter and all")
+	assert.Contains(t, got, "[GitRepo]")
+	assert.Equal(t, 1, strings.Count(got, "-->"))
+}
+
 // --- Review fixes: frontmatter, classDiagram-v2 ---
 
 func TestMermaidStripFrontmatter_Table(t *testing.T) {
@@ -2454,15 +2670,15 @@ func TestFlowchartBuilder_WidestLevel_CycleLaidOutAsAChain(t *testing.T) {
 	twoNodeCycle := newFlowchartBuilder(mermaidUnconstrainedWidth)
 	twoNodeCycle.addEdge("A", "B", "")
 	twoNodeCycle.addEdge("B", "A", "")
-	assert.Equal(t, map[string]int{"A": 0, "B": 1}, twoNodeCycle.levels(),
+	assert.Equal(t, map[string]int{"A": 0, "B": 1}, twoNodeCycle.topology().levels(),
 		"the first-seen node roots the chain, the other hangs one level below it")
-	assert.Equal(t, 1, twoNodeCycle.widestLevel())
+	assert.Equal(t, 1, twoNodeCycle.topology().widestLevel())
 
 	threeNodeCycle := newFlowchartBuilder(mermaidUnconstrainedWidth)
 	threeNodeCycle.addEdge("A", "B", "")
 	threeNodeCycle.addEdge("B", "C", "")
 	threeNodeCycle.addEdge("C", "A", "")
-	assert.Equal(t, 1, threeNodeCycle.widestLevel())
+	assert.Equal(t, 1, threeNodeCycle.topology().widestLevel())
 
 	// a back-transition hanging off a real root behaves the same way: the
 	// root keeps level 0 and the cycle below it is laid out in real levels.
@@ -2470,7 +2686,7 @@ func TestFlowchartBuilder_WidestLevel_CycleLaidOutAsAChain(t *testing.T) {
 	withRoot.addEdge("Start", "A", "")
 	withRoot.addEdge("A", "B", "")
 	withRoot.addEdge("B", "A", "")
-	assert.Equal(t, 1, withRoot.widestLevel(), "one node per level when the cycle hangs off a single root")
+	assert.Equal(t, 1, withRoot.topology().widestLevel(), "one node per level when the cycle hangs off a single root")
 }
 
 func TestFlowchartBuilder_DeclarationOrder_Cycle_EveryNodeDeclaredExactlyOnce(t *testing.T) {
@@ -2483,7 +2699,7 @@ func TestFlowchartBuilder_DeclarationOrder_Cycle_EveryNodeDeclaredExactlyOnce(t 
 	b.addEdge("C", "A", "")
 	b.setTitle("Loner", "Loner")
 
-	assert.Equal(t, []string{"Loner", "A", "B", "C"}, b.declarationOrder(),
+	assert.Equal(t, []string{"Loner", "A", "B", "C"}, b.topology().order,
 		"the parentless node goes first, then the cycle in first-seen order")
 }
 
@@ -2495,8 +2711,8 @@ func TestFlowchartBuilder_DeclarationOrder_SelfLoop_DoesNotBlockItsOwnNode(t *te
 	b.addEdge("Retry", "Retry", "again")
 	b.addEdge("Retry", "Done", "")
 
-	assert.Equal(t, []string{"Retry", "Done"}, b.declarationOrder())
-	assert.Equal(t, map[string]int{"Retry": 0, "Done": 1}, b.levels())
+	assert.Equal(t, []string{"Retry", "Done"}, b.topology().order)
+	assert.Equal(t, map[string]int{"Retry": 0, "Done": 1}, b.topology().levels())
 }
 
 func TestFlowchartBuilder_DeclarationOrder_ThreeLevelHierarchyDeclaredParentFirst(t *testing.T) {
@@ -2515,7 +2731,7 @@ func TestFlowchartBuilder_DeclarationOrder_ThreeLevelHierarchyDeclaredParentFirs
 	b.addEdge("Leaf", "Mid", classInheritanceLabel)  // Mid  <|-- Leaf
 	b.addEdge("Leaf2", "Mid", classInheritanceLabel) // Mid  <|-- Leaf2
 
-	order := b.declarationOrder()
+	order := b.topology().order
 	assert.Equal(t, []string{"Leaf", "Leaf2", "Mid", "Base"}, order)
 
 	pos := map[string]int{}
@@ -2527,9 +2743,35 @@ func TestFlowchartBuilder_DeclarationOrder_ThreeLevelHierarchyDeclaredParentFirs
 			"every edge source must be declared before its target: %s -> %s", e.from, e.to)
 	}
 
-	assert.Equal(t, map[string]int{"Leaf": 0, "Leaf2": 0, "Mid": 1, "Base": 2}, b.levels(),
+	assert.Equal(t, map[string]int{"Leaf": 0, "Leaf2": 0, "Mid": 1, "Base": 2}, b.topology().levels(),
 		"three distinct levels, not a flattened two")
-	assert.Equal(t, 2, b.widestLevel(), "the two leaves share the widest level")
+	assert.Equal(t, 2, b.topology().widestLevel(), "the two leaves share the widest level")
+}
+
+func TestFlowchartBuilder_Source_ThreeLevelHierarchy_ByteExact(t *testing.T) {
+	// Companion pin to the test above, on the SOURCE rather than the order.
+	// source() derives the declaration order and the child list once now,
+	// into a single flowchartTopology, instead of recomputing them per step;
+	// this test is what proves the emitted text did not shift by a byte when
+	// that caching went in.
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	b.setTitle("Base", "Base")
+	b.setTitle("Mid", "Mid")
+	b.setTitle("Leaf", "Leaf")
+	b.setTitle("Leaf2", "Leaf2")
+	b.addEdge("Mid", "Base", classInheritanceLabel)
+	b.addEdge("Leaf", "Mid", classInheritanceLabel)
+	b.addEdge("Leaf2", "Mid", classInheritanceLabel)
+
+	want := "flowchart TD\n" +
+		"n2[Leaf]\n" +
+		"n3[Leaf2]\n" +
+		"n1[Mid]\n" +
+		"n0[Base]\n" +
+		"n1 -->|implements| n0\n" +
+		"n2 -->|implements| n1\n" +
+		"n3 -->|implements| n1\n"
+	assert.Equal(t, want, b.source())
 }
 
 func TestStateTranspiler_BlockHeaderNotAStateDeclaration_IsTransparent(t *testing.T) {
