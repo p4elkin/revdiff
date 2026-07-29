@@ -1517,7 +1517,7 @@ func TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHand
 	// handled" here exactly like an unrecognized kind, letting
 	// renderMermaidSource fall back to the ORIGINAL classDiagram source
 	// (which the vendored parser's "unsupported graph type" check then
-	// rejects — see TestRenderMermaidFences_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim
+	// rejects — see TestMermaidPlaceholderDocument_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim
 	// for the full pipeline down to the verbatim fence text).
 	got, ok := transpileMermaid("classDiagram\n    %% just a comment\n", mermaidUnconstrainedWidth)
 	assert.False(t, ok)

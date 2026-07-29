@@ -10,9 +10,16 @@ into the glamour output unstyled and flush-left. On screen that reads as "the di
 render". That is the bug.
 
 Measured over every mermaid fence in `.md` files under `~/.claude/plans` and `~/dev`, excluding
-vendor, node_modules, and worktree copies: 251 fences. 206 render today (flowchart 111,
+vendor and node_modules: 251 fences. 206 render today (flowchart 111,
 sequenceDiagram 60, graph 35). 45 do not: classDiagram 36, stateDiagram-v2 6, gantt 2,
 quadrantChart 1. `erDiagram` appears zero times.
+
+This count was taken in one pass and did not de-duplicate fences that appear more than once
+because the same repo was checked out in several git worktrees at scan time. A re-run with a
+different number of worktrees checked out will give a different total. The 18-fence
+classDiagram/stateDiagram-v2 corpus that this plan's width and label measurements are pinned
+against (see the Failure modes table below) is deduplicated to one copy per fence, and does
+reproduce exactly.
 
 This change covers `classDiagram` and `stateDiagram-v2` — 42 of the 45 broken fences.
 `erDiagram`, `gantt`, and `quadrantChart` keep today's fallback. Bumping the dependency was checked
@@ -788,18 +795,18 @@ are stubs that report not-handled.
 **Overview requirements, checked one by one:**
 
 - classDiagram fences now render as box art (not verbatim). Confirmed by
-  `TestRenderMermaidFences_ClassDiagram_NoLongerFallsBackVerbatim` and
+  `TestRenderMarkdownDocument_ClassDiagram_NoLongerFallsBackVerbatim` and
   `TestRenderMermaidSource_ClassDiagram_RendersRealBoxArt`
   (`app/ui/mdpreview_transpile_test.go`).
 - stateDiagram-v2 fences now render as box art. Confirmed by
-  `TestRenderMermaidFences_StateDiagram_NoLongerFallsBackVerbatim` and
+  `TestRenderMarkdownDocument_StateDiagram_NoLongerFallsBackVerbatim` and
   `TestRenderMermaidSource_StateDiagram_RendersRealBoxArt`.
 - erDiagram and gantt still fall back verbatim (the plan's scope line). Confirmed by
-  `TestRenderMermaidFences_ErDiagram_StillFallsBackVerbatim` and
-  `TestRenderMermaidFences_Gantt_StillFallsBackVerbatim`.
+  `TestMermaidPlaceholderDocument_ErDiagram_StillFallsBackVerbatim` and
+  `TestMermaidPlaceholderDocument_Gantt_StillFallsBackVerbatim`.
 - quadrantChart still falls back verbatim. Before this task it was only exercised at the
   `mermaidDiagramKind` extraction level, not through the full fallback pipeline — added
-  `TestRenderMermaidFences_QuadrantChart_StillFallsBackVerbatim` to close that gap (it takes the
+  `TestMermaidPlaceholderDocument_QuadrantChart_StillFallsBackVerbatim` to close that gap (it takes the
   same shared `default:` branch in `transpileMermaid`, `app/ui/mdpreview_transpile.go:1632`, as the
   now-adjacent erDiagram/gantt tests).
 - The 206 already-working fence types (`graph`, `flowchart`, `sequenceDiagram`) take a
@@ -823,8 +830,8 @@ are stubs that report not-handled.
 
 | # | condition | verified by |
 |---|---|---|
-| 1 | kind not recognized → original source, today's behaviour | test: `TestTranspileMermaid_UnrecognizedKind_NotHandled`, `TestRenderMermaidFences_ErDiagram_StillFallsBackVerbatim`, `_Gantt_...`, `_QuadrantChart_...` |
-| 2 | recognized kind, builder empty → original source, renderer rejects, verbatim | test (added this task — previously untested and the only two `if b.empty()` branches in `transpileMermaid` were uncovered): `TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled`, `_StateDiagram_...`, and full-pipeline `TestRenderMermaidFences_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim` |
+| 1 | kind not recognized → original source, today's behaviour | test: `TestTranspileMermaid_UnrecognizedKind_NotHandled`, `TestMermaidPlaceholderDocument_ErDiagram_StillFallsBackVerbatim`, `_Gantt_...`, `_QuadrantChart_...` |
+| 2 | recognized kind, builder empty → original source, renderer rejects, verbatim | test (added this task — previously untested and the only two `if b.empty()` branches in `transpileMermaid` were uncovered): `TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled`, `_StateDiagram_...`, and full-pipeline `TestMermaidPlaceholderDocument_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim` |
 | 3 | recognized kind, some lines unparseable → those dropped, rest renders | test: `TestClassTranspiler_IgnoredStatements_NoteStyleClickClassDefDoNotCorruptDiagram`, `TestStateTranspiler_IgnoredStatements_ClassDefStyleAccTitleDoNotCorruptDiagram` |
 | 4 | transpile succeeds, render still errors → verbatim | inspection only. No adversarial input tried during this task's audit reaches this branch — the transpiler's exhaustive sanitizing (see "Sanitizing" tables) makes every emitted flowchart source provably valid to the vendored parser in every case exercised. The branch exists as defense in depth (`renderMermaidSource`'s `err != nil` check, `app/ui/mdpreview_transpile.go:1658`), not as a reachable behavior this task could reproduce |
 | 5 | panic in our code or theirs → existing `recover()`, verbatim | inspection only for the recover itself (no test forces an actual panic to prove `recover()` catches it) + test in the opposite direction: `TestRenderMermaidSource_AdversarialSources_NeverPanic` proves the known-hazardous inputs it tries do not need to rely on `recover()` at all, which is stronger evidence of robustness but not a direct test of the recover path |
@@ -843,11 +850,16 @@ are stubs that report not-handled.
 regenerated the profile manually (`go test -coverprofile=... ./...` then the same
 `grep`+`go tool cover -func` steps `make test` runs) to inspect per-function numbers for this one
 file. Before this task's fixes: 96.0% of statements covered (386/402), with several 0%-covered
-branches. After the fixes below: **98.8% of statements covered (397/402)**, 55 of 60 functions at
+branches. After the fixes below: 98.8% of statements covered (397/402), 55 of 60 functions at
 100%, average per-function coverage ~99.0% — in line with (and mostly above) the rest of the
 `app/ui` package's own per-function numbers (e.g. `sgr.go:scan` 81.8%, `view.go:lineNumberSegment`
 90.9%, `vimmotion.go:repeatDiffAction` 91.7%), so this file is not an outlier against the project's
 existing standard.
+
+**Re-measured 2026-07-29:** later fixer rounds added more code and tests to this file after Task 6
+closed, so the numbers above are a historical snapshot, not the current state. The same
+`go tool cover -func` method run today gives **99.4% of statements covered (486/489)**, 73 of 75
+functions at 100%, average per-function coverage ~99.7%.
 
 Real, plan-relevant gaps found and fixed (added tests, listed with the file:line of the branch each
 now covers):
@@ -856,7 +868,7 @@ now covers):
   (`mdpreview_transpile.go:1621-1623`, `1628-1630`) were completely uncovered — this is also
   Failure-modes row 2, which had zero test coverage anywhere before this task. Added
   `TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled`,
-  `_StateDiagram_...`, and the full-pipeline `TestRenderMermaidFences_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim`.
+  `_StateDiagram_...`, and the full-pipeline `TestMermaidPlaceholderDocument_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim`.
 - `scanMermaidBlocks`'s unbalanced-extra-`}` branch (`mdpreview_transpile.go:673-674`) — explicitly
   documented in the function's own doc comment, never tested. Added
   `TestScanMermaidBlocks_UnbalancedExtraClosingBrace_SilentlyIgnored`.
@@ -878,7 +890,7 @@ now covers):
 - `mermaidLabelCap`'s `k < 1` defensive clamp (`mdpreview_transpile.go:313-315`) was untested. Added
   `TestMermaidLabelCap_KLessThanOne_ClampedToOne`.
 - quadrantChart's fallback (an explicit Overview claim) was untested at the `renderMermaidFences`
-  level. Added `TestRenderMermaidFences_QuadrantChart_StillFallsBackVerbatim`.
+  level. Added `TestMermaidPlaceholderDocument_QuadrantChart_StillFallsBackVerbatim`.
 
 Remaining uncovered branches, judged NOT material (all are defensive/dead-code paths unreachable
 through any real call site given the file's own documented invariants, not gaps in behavior this

@@ -157,8 +157,8 @@ previewing — same root cause as Task 5, caught at three more sites):**
 
 `app/ui/diffview.go` and `app/ui/model.go` are the most actively developed files upstream and
 the most likely to conflict — this was flagged going in (see the plan's "Patch discipline"
-section) and confirmed empirically: `model.go` alone carries 5 of the patch's 17 existing-file
-hunks (keymap 4, model 5, diffview 1, mouse 3, view 3, diffnav 1).
+section) and confirmed empirically: `model.go` alone carries 6 of the patch's 19 existing-file
+hunks (keymap 4, model 6, diffview 1, mouse 3, view 4, diffnav 1).
 
 ## Mermaid diagram type coverage
 
