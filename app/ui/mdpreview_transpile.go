@@ -2281,14 +2281,28 @@ func stateDeclFromStatement(text string) (key, title, annotation string, ok bool
 }
 
 // transpileMermaid dispatches on source's own diagram kind (see
-// mermaidDiagramKind) to produce synthetic flowchart source for the diagram
-// types this patch adds support for. classDiagram is fully wired (Task 3):
-// classTranspiler walks the source via scanMermaidBlocks into a
-// paneWidth-aware flowchartBuilder. stateDiagram-v2 and plain stateDiagram
-// are fully wired too (Task 4), the same way, via stateTranspiler. Either
-// way, a builder that ends up empty (every statement was a comment or
-// something this patch ignores) falls back to "not handled" exactly like an
-// unrecognized kind — see flowchartBuilder's empty doc comment.
+// mermaidDiagramKind) to produce flowchart source the vendored renderer can
+// actually read. Three groups of kinds reach it:
+//
+//   - classDiagram is fully wired (Task 3): classTranspiler walks the source
+//     via scanMermaidBlocks into a paneWidth-aware flowchartBuilder.
+//     stateDiagram-v2 and plain stateDiagram are wired the same way (Task 4),
+//     via stateTranspiler. Either way, a builder that ends up empty (every
+//     statement was a comment or something this patch ignores) falls back to
+//     "not handled" exactly like an unrecognized kind — see
+//     flowchartBuilder's empty doc comment.
+//   - graph and flowchart are NOT transpiled — they are already the renderer's
+//     own input language. They go through normalizeFlowchartSource instead,
+//     which rewrites the constructs the vendored parser mis-parses (shape
+//     suffixes, non-`-->` link forms, a '|' inside a node label) and copies
+//     everything else through byte for byte. See mdpreview_flowchart.go's doc
+//     comment for the corpus measurement and for why that pass is text-level
+//     rather than a rebuild through flowchartBuilder. These two used to be a
+//     pure pass-through, and that was the bug: about 60% of real fences hit at
+//     least one mis-parsed construct.
+//   - everything else, sequenceDiagram included, is not handled here at all.
+//     sequenceDiagram in particular takes a completely different code path
+//     inside the vendored library and must keep reaching it untouched.
 //
 // A leading YAML frontmatter block is stripped first (see
 // mermaidStripFrontmatter): it would otherwise both hide the real diagram
@@ -2313,6 +2327,8 @@ func transpileMermaid(source string, paneWidth int) (string, bool) {
 			return "", false
 		}
 		return b.source(), true
+	case "graph", "flowchart":
+		return normalizeFlowchartSource(source), true
 	default:
 		return "", false
 	}

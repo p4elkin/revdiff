@@ -1504,9 +1504,32 @@ func TestTranspileMermaid_StateDiagramWithoutV2Suffix_AlsoRecognized(t *testing.
 }
 
 func TestTranspileMermaid_UnrecognizedKind_NotHandled(t *testing.T) {
-	got, ok := transpileMermaid("graph TD\n    A --> B", mermaidUnconstrainedWidth)
+	// erDiagram is one of the three kinds PATCH.md lists as still falling back
+	// to the verbatim fence text. This used to use a `graph TD` source, which
+	// stopped being an unrecognized kind once graph/flowchart gained the
+	// normalization pass — see TestTranspileMermaid_Graph_NormalizesInPlace.
+	got, ok := transpileMermaid("erDiagram\n    CUSTOMER ||--o{ ORDER : places", mermaidUnconstrainedWidth)
 	assert.False(t, ok)
 	assert.Empty(t, got)
+}
+
+func TestTranspileMermaid_Graph_NormalizesInPlace(t *testing.T) {
+	// graph/flowchart are handled, but NOT transpiled: the result is the same
+	// source with the mis-parsed constructs rewritten, not synthetic
+	// flowchartBuilder output. The header and every node id must survive.
+	got, ok := transpileMermaid("graph TD\n    A --- B{decide}", mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.Equal(t, "graph TD\n    A --> B[decide]", got)
+}
+
+func TestTranspileMermaid_Flowchart_WellFormedSourceUnchanged(t *testing.T) {
+	// A fence already written in the subset the vendored parser reads must come
+	// back byte-identical, so the pass cannot disturb the ~40% of corpus fences
+	// that render correctly today.
+	const src = "flowchart LR\n    subgraph S [Group]\n      A --> B[label<br/>more]\n    end\n    B -->|does a thing| C\n"
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.Equal(t, src, got)
 }
 
 func TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled(t *testing.T) {
@@ -1534,7 +1557,18 @@ func TestTranspileMermaid_StateDiagram_AllStatementsIgnored_BuilderEmpty_NotHand
 
 // --- renderMermaidSource ---
 
-func TestRenderMermaidSource_Graph_ByteIdenticalToDirectRenderDiagram(t *testing.T) {
+// The two tests below used to assert that a graph and a flowchart fence
+// rendered byte-identically to a direct mermaidcmd.RenderDiagram call — the
+// pin on graph/flowchart being a pure pass-through. That pass-through is now
+// the thing being fixed (see mdpreview_flowchart.go's doc comment), so both
+// tests keep their subject and swap their claim: a fence with nothing to
+// normalize is still byte-identical, and a fence with something to normalize
+// is deliberately NOT. The sequenceDiagram pin below is untouched — that kind
+// really does still go straight through.
+
+func TestRenderMermaidSource_Graph_NothingToNormalize_ByteIdenticalToDirectRenderDiagram(t *testing.T) {
+	// `A --> B` is already in the subset the vendored parser reads, so the
+	// normalization pass must leave the render bit for bit as it was.
 	src := "graph TD\n    A --> B"
 	want, err := mermaidcmd.RenderDiagram(src, nil)
 	require.NoError(t, err)
@@ -1544,14 +1578,34 @@ func TestRenderMermaidSource_Graph_ByteIdenticalToDirectRenderDiagram(t *testing
 	assert.Equal(t, want, got)
 }
 
-func TestRenderMermaidSource_Flowchart_ByteIdenticalToDirectRenderDiagram(t *testing.T) {
-	src := "flowchart LR\n    A --> B"
-	want, err := mermaidcmd.RenderDiagram(src, nil)
+func TestRenderMermaidSource_Graph_UndirectedLink_RendersAsEdgeNotABox(t *testing.T) {
+	src := "graph TD\n    A --- B"
+
+	direct, err := mermaidcmd.RenderDiagram(src, nil)
 	require.NoError(t, err)
+	require.Contains(t, direct, "A --- B",
+		"fixture sanity: the vendored parser must still draw the undirected link as one box named after the whole line")
 
 	got, err := renderMermaidSource(src, 80)
 	require.NoError(t, err)
-	assert.Equal(t, want, got)
+	assert.NotEqual(t, direct, got, "the graph pass-through is gone on purpose — see mdpreview_flowchart.go")
+	assert.NotContains(t, got, "A --- B", "the link must not survive as a box label")
+	assert.Contains(t, got, "▼", "the link must be drawn as a real arrow between two boxes (TD, so the head points down)")
+}
+
+func TestRenderMermaidSource_Flowchart_ShapeSuffix_DrawsOneBoxNotTwo(t *testing.T) {
+	src := "flowchart LR\n    A --> B{decision}\n    B --> C"
+
+	direct, err := mermaidcmd.RenderDiagram(src, nil)
+	require.NoError(t, err)
+	require.Contains(t, direct, "B{decision}",
+		"fixture sanity: the vendored parser must still split the diamond into its own stray box")
+
+	got, err := renderMermaidSource(src, 80)
+	require.NoError(t, err)
+	assert.NotEqual(t, direct, got, "the flowchart pass-through is gone on purpose — see mdpreview_flowchart.go")
+	assert.NotContains(t, got, "B{decision}", "the shape suffix must not survive into the art")
+	assert.Equal(t, 1, strings.Count(got, "decision"), "the diamond's label must be drawn exactly once")
 }
 
 func TestRenderMermaidSource_SequenceDiagram_ByteIdenticalToDirectRenderDiagram(t *testing.T) {
