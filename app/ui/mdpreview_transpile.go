@@ -506,9 +506,6 @@ type flowchartBuilder struct {
 	order []string // node keys, first-seen order (via node/addEdge/setTitle/...)
 	nodes map[string]*flowchartNode
 
-	edgeSrcOrder []string        // node keys, first-seen-as-an-edge-SOURCE order
-	seenAsSrc    map[string]bool // set membership for edgeSrcOrder, O(1) dedup
-
 	edges    []flowchartEdge
 	edgeSeen map[string]bool // dedup key: from + "\x00" + to + "\x00" + label
 }
@@ -520,7 +517,6 @@ func newFlowchartBuilder(paneWidth int) *flowchartBuilder {
 	return &flowchartBuilder{
 		paneWidth: paneWidth,
 		nodes:     make(map[string]*flowchartNode),
-		seenAsSrc: make(map[string]bool),
 		edgeSeen:  make(map[string]bool),
 	}
 }
@@ -570,11 +566,6 @@ func (b *flowchartBuilder) addEdge(fromKey, toKey, label string) {
 	b.node(fromKey)
 	b.node(toKey)
 
-	if !b.seenAsSrc[fromKey] {
-		b.seenAsSrc[fromKey] = true
-		b.edgeSrcOrder = append(b.edgeSrcOrder, fromKey)
-	}
-
 	dedupKey := fromKey + "\x00" + toKey + "\x00" + label
 	if b.edgeSeen[dedupKey] {
 		return
@@ -592,68 +583,141 @@ func (b *flowchartBuilder) empty() bool {
 }
 
 // declarationOrder returns node keys in the order their `nX[label]`
-// declaration lines must be emitted: first-seen-as-an-edge-source order,
-// then any node never used as a source, in ITS OWN first-seen order. This is
-// not cosmetic — see the plan's "Declaration order" section. The vendored
-// renderer computes layout roots by INSERTION order into its own internal
-// node list (graph.go's createMapping: a node is a root unless an
+// declaration lines must be emitted: a TOPOLOGICAL order — every edge's
+// source is declared before its target — tie-broken by first-seen order so
+// the result is deterministic for a given diagram.
+//
+// This is not cosmetic; see the plan's "Declaration order" section. The
+// vendored renderer computes layout roots by INSERTION order into its own
+// internal node list (graph.go's createMapping: a node is a root unless an
 // earlier-processed node already claimed it as a child), which mirrors the
 // order names first appear anywhere in our emitted text. Declaring every
 // node up front (regardless of source/target role) would make every single
-// node a root and collapse the whole diagram into one row; declaring a
-// fan-in's sources before its shared target instead reproduces the correct
-// multi-level layout, because by the time the target's own declaration is
-// parsed, at least one source has already registered it as a child.
+// node a root and collapse the whole diagram into one row.
+//
+// A weaker rule — "all edge sources first, in first-seen-as-a-source order,
+// then everything else" — fixes the simple fan-in but still flattens deeper
+// hierarchies, because an intermediate node is itself an edge source. A
+// three-level chain written parent-first, `A <|-- B` then `B <|-- C`, makes B
+// the first source seen and declares it before A, so the renderer treats B as
+// a root and draws B in the SAME row as its own children. Measured on one
+// real corpus classDiagram, that flattening cost 121 cells of width against
+// 73 for the topological order, on top of drawing the hierarchy wrong.
+//
+// Cycles have no topological order at all (state diagrams loop routinely).
+// When no node is left whose parents are all declared, the remaining nodes
+// are emitted in first-seen order — every node is still declared exactly
+// once, and the first of them becomes a root, so the renderer always has
+// somewhere to start.
 func (b *flowchartBuilder) declarationOrder() []string {
+	remainingParents, children := b.parentCounts()
+
 	out := make([]string, 0, len(b.order))
-	out = append(out, b.edgeSrcOrder...)
-	for _, k := range b.order {
-		if !b.seenAsSrc[k] {
-			out = append(out, k)
+	declared := make(map[string]bool, len(b.order))
+	for len(out) < len(b.order) {
+		key, ok := b.nextDeclarable(remainingParents, declared)
+		if !ok {
+			// a cycle: nothing is left with all its parents declared
+			for _, k := range b.order {
+				if !declared[k] {
+					declared[k] = true
+					out = append(out, k)
+				}
+			}
+			break
+		}
+
+		declared[key] = true
+		out = append(out, key)
+		for _, child := range children[key] {
+			remainingParents[child]--
 		}
 	}
 	return out
 }
 
-// levels assigns each node a layout level, mirroring closely enough the
-// vendored renderer's own level assignment (graph.go's createMapping) to
-// predict k — the widest level — without ever invoking the renderer: a root
-// is a node never used as an edge target (level 0); every other node sits
-// one level below the DEEPEST parent that reaches it, since a fan-in target
-// can have more than one source. That needs a fixed-point relaxation rather
-// than one topological sweep in edge order — a target reached by an
-// already-relaxed deep parent late in the edge list must still be allowed to
-// sink further. Bounded at len(b.order) passes (always enough for a DAG;
-// classDiagram/stateDiagram-v2 relation graphs are DAGs by construction) —
-// bounded rather than unconditional so a cycle (state diagrams can loop)
-// cannot spin this forever; a cycle's own levels are then merely
-// approximate, which only affects the cap's tightness, never correctness or
-// termination.
-func (b *flowchartBuilder) levels() map[string]int {
-	isTarget := make(map[string]bool, len(b.order))
+// parentCounts builds the two structures declarationOrder's topological walk
+// needs: how many not-yet-declared parents each node still has, and each
+// node's child list. A self-loop (a state that transitions to itself) is
+// skipped on both sides — counting it would leave the node permanently
+// blocked on itself and push the whole diagram onto the cycle path.
+// Duplicate edges between the same pair are deliberately NOT collapsed: the
+// count and the child list stay in step, so decrementing once per child
+// entry drains the count exactly.
+func (b *flowchartBuilder) parentCounts() (remainingParents map[string]int, children map[string][]string) {
+	remainingParents = make(map[string]int, len(b.order))
+	children = make(map[string][]string, len(b.order))
 	for _, e := range b.edges {
-		isTarget[e.to] = true
+		if e.from == e.to {
+			continue
+		}
+		children[e.from] = append(children[e.from], e.to)
+		remainingParents[e.to]++
 	}
+	return remainingParents, children
+}
 
-	level := make(map[string]int, len(b.order))
-	for _, key := range b.order {
-		if !isTarget[key] {
-			level[key] = 0
+// nextDeclarable returns the earliest-first-seen node that is not declared
+// yet and has no undeclared parent left, or ok == false when none is left
+// (the cycle case declarationOrder handles). Scanning b.order from the start
+// every time is what makes the tie-break "earliest first seen wins" rather
+// than "whatever the last decrement happened to free".
+func (b *flowchartBuilder) nextDeclarable(remainingParents map[string]int, declared map[string]bool) (key string, ok bool) {
+	for _, k := range b.order {
+		if !declared[k] && remainingParents[k] == 0 {
+			return k, true
+		}
+	}
+	return "", false
+}
+
+// levels assigns each node a layout level by replaying the vendored
+// renderer's own placement rule (graph.go's createMapping) over the very
+// declaration order this builder is about to emit, so k — the widest level —
+// is predicted without ever invoking the renderer.
+//
+// The renderer's rule has two steps, and both are reproduced exactly here.
+// First it walks its node list in insertion order and calls a node a ROOT
+// unless some earlier node already named it as a child; every root goes to
+// level 0. Then it walks the same list again and gives each of a node's
+// still-unplaced children the node's own level plus one — first parent to
+// reach a child wins, later parents are skipped.
+//
+// That "first parent wins" detail is why this is a replay and not a
+// longest-path computation. A node reached both from level 0 and from level 1
+// lands on level 1, not level 2, because the level-0 parent is processed
+// first. Computing the deepest parent instead over-estimates the depth, which
+// under-estimates how many nodes share the widest level, which hands
+// mermaidLabelCap a k that is too small.
+//
+// Cycles need no special case. declarationOrder always emits a first node
+// that no earlier node claimed, so there is always at least one root, and
+// every later node is either a root itself or was already placed by an
+// earlier parent — exactly the invariant the renderer relies on to avoid
+// walking a node it has not positioned yet.
+func (b *flowchartBuilder) levels() map[string]int {
+	order := b.declarationOrder()
+	_, children := b.parentCounts()
+
+	claimed := make(map[string]bool, len(order))
+	level := make(map[string]int, len(order))
+	placed := make(map[string]bool, len(order))
+	for _, key := range order {
+		if !claimed[key] {
+			level[key], placed[key] = 0, true
+		}
+		claimed[key] = true
+		for _, child := range children[key] {
+			claimed[child] = true
 		}
 	}
 
-	for range b.order {
-		changed := false
-		for _, e := range b.edges {
-			if parentLevel, ok := level[e.from]; ok {
-				if want := parentLevel + 1; want > level[e.to] {
-					level[e.to] = want
-					changed = true
-				}
+	for _, key := range order {
+		for _, child := range children[key] {
+			if placed[child] {
+				continue
 			}
-		}
-		if !changed {
-			break
+			level[child], placed[child] = level[key]+1, true
 		}
 	}
 	return level
@@ -795,18 +859,39 @@ func scanMermaidBlocks(source string, h mermaidBlockHandler) {
 	}
 }
 
+// mermaidIdentRune reports whether r can CONTINUE a diagram identifier —
+// a state name, a class name — and therefore must never be read as the
+// boundary that ends a directive keyword (see mermaidKeywordPrefix).
+//
+// Letters, digits and "_" are the obvious members. The other three are the
+// ones a narrower rule gets wrong in practice: real diagrams name states and
+// classes in kebab-case ("style-review", "title-approval", "note-taking"),
+// in dotted form ("link.check", "class.Registry"), and with path-like
+// segments ("style/guide"). None of those three characters can begin the
+// ARGUMENT of a real directive either — every directive this file drops is
+// written as "keyword<space>..." or "keyword:<space>..." — so treating them
+// as identifier characters costs nothing and saves the statement.
+func mermaidIdentRune(r rune) bool {
+	switch r {
+	case '_', '-', '.', '/':
+		return true
+	}
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
 // mermaidKeywordPrefix reports whether text opens with keyword as a WHOLE
-// word: either text is exactly keyword, or the character right after it is
-// not a letter, digit or underscore.
+// word: either text is exactly keyword, or the character right after it
+// cannot continue an identifier (see mermaidIdentRune).
 //
 // A plain strings.HasPrefix is wrong here, and not harmlessly so. Diagram
 // authors name states and classes after ordinary words, and several of those
 // names begin with a keyword this patch drops — "notes", "styleGuide",
-// "titleFetch", "directionUp", "linkTarget". Matched as bare prefixes, every
-// statement mentioning such a name is silently discarded, and for the "note"
-// keyword in particular the damage is not one line: startNoteIfAny would open
-// a multi-line note and swallow the entire rest of the diagram waiting for an
-// "end note" that never comes.
+// "titleFetch", "directionUp", "linkTarget", and the kebab-case
+// "style-review" / "title-approval" shapes mermaidIdentRune covers. Matched
+// as bare prefixes, every statement mentioning such a name is silently
+// discarded, and for the "note" keyword in particular the damage is not one
+// line: startNoteIfAny would open a multi-line note and swallow the entire
+// rest of the diagram waiting for an "end note" that never comes.
 func mermaidKeywordPrefix(text, keyword string) bool {
 	rest, ok := strings.CutPrefix(text, keyword)
 	if !ok {
@@ -816,7 +901,7 @@ func mermaidKeywordPrefix(text, keyword string) bool {
 		return true
 	}
 	r, _ := utf8.DecodeRuneInString(rest)
-	return r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	return !mermaidIdentRune(r)
 }
 
 // mermaidHasAnyKeyword reports whether text opens with any of keywords, each
@@ -855,14 +940,28 @@ var classIgnoredStatementKeywords = []string{
 	"accTitle", "accDescr", "title",
 }
 
+// classLollipopRelation matches mermaid's lollipop interface notation in
+// either direction — "Class1 ()-- Class2" and "Class1 --() Class2" — as a
+// WHOLE token: the "()" half must be preceded by start-of-line or
+// whitespace.
+//
+// The boundary is what makes this a token test rather than a substring test,
+// and it matters. A plain strings.Contains(text, "()--") also fires on an
+// ordinary member line whose method signature happens to run a call into a
+// following "--", e.g. "Node : +splitForCreate()--Update", and drops the
+// whole member. A real lollipop always writes the "()" as its own token with
+// a space in front of it, while a method signature never does — the paren
+// closes directly against the method name.
+var classLollipopRelation = regexp.MustCompile(`(?:^|\s)(?:\(\)--|--\(\))`)
+
 // classIgnoredStatement reports whether text is one of the classDiagram
 // statement kinds this patch deliberately drops rather than transpiles: the
 // prefixes above, plus mermaid's lollipop interface notation
-// ("Class1 ()-- Class2"), which — left unchecked — would otherwise match
+// (classLollipopRelation), which — left unchecked — would otherwise match
 // classArrowPattern's plain "--" fallback and manufacture a bogus relation
 // out of the "()" text.
 func classIgnoredStatement(text string) bool {
-	if strings.Contains(text, "()--") {
+	if classLollipopRelation.MatchString(text) {
 		return true
 	}
 	return mermaidHasAnyKeyword(text, classIgnoredStatementKeywords)
@@ -1232,8 +1331,18 @@ var classAnyColonRun = regexp.MustCompile(`:+`)
 // LONE single colon. Scanning for the first colon-run whose length is
 // exactly 1 finds the real separator even when an earlier ":::" run would
 // otherwise fool a naive first-colon cut.
+//
+// The scan runs over a quote-masked copy, for exactly the reason
+// parseClassRelation does the same (see classMaskQuotedSegments): a quoted
+// cardinality may legitimately carry a colon of its own — `Customer "1:n"
+// --> Order` is valid mermaid — and that colon sits earlier in the line than
+// any real label separator. Cutting there would split the relation
+// mid-token, leaving a body of `Customer "1` with no arrow in it at all, so
+// the whole relation is dropped and the leftover text manufactures a
+// phantom node. Every index into the mask still addresses the same byte of
+// text, so the two slices below are taken from the ORIGINAL string.
 func classSplitTrailingLabel(text string) (body, label string, ok bool) {
-	for _, loc := range classAnyColonRun.FindAllStringIndex(text, -1) {
+	for _, loc := range classAnyColonRun.FindAllStringIndex(classMaskQuotedSegments(text), -1) {
 		if loc[1]-loc[0] == 1 {
 			return strings.TrimSpace(text[:loc[0]]), strings.TrimSpace(text[loc[1]:]), true
 		}

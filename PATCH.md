@@ -123,16 +123,16 @@ previewing — same root cause as Task 5, caught at three more sites):**
 `docs/plans/completed/20260728-markdown-preview-diagram-transpile.md`):**
 
 - `app/ui/mdpreview.go`
-  - line 168: `renderMermaidBlock` gained a fourth parameter, `paneWidth int` — the diff pane's
+  - line 173: `renderMermaidBlock` gained a fourth parameter, `paneWidth int` — the diff pane's
     current width, needed by the transpiler's adaptive label-width cap
-  - line 188: `renderMermaidBlock` now calls `renderMermaidSource(strings.Join(body, "\n"),
+  - line 193: `renderMermaidBlock` now calls `renderMermaidSource(strings.Join(body, "\n"),
     paneWidth)` instead of `mermaidcmd.RenderDiagram(strings.Join(body, "\n"), nil)` directly —
     the one-line hook that gives `mdpreview_transpile.go` a chance to rewrite a `classDiagram` or
     `stateDiagram-v2` fence into `flowchart` source before it ever reaches the third-party
     renderer
-  - line 267: `mermaidPlaceholderDocument` gained a matching `paneWidth int` parameter, passed
-    straight through to `renderMermaidBlock` at line 270
-  - `renderMermaidFences` (line 66) deliberately keeps its original one-argument signature: it
+  - line 272: `mermaidPlaceholderDocument` gained a matching `paneWidth int` parameter, passed
+    straight through to `renderMermaidBlock` at line 275
+  - `renderMermaidFences` (line 71) deliberately keeps its original one-argument signature: it
     passes the `mermaidUnconstrainedWidth` sentinel internally, so its eleven existing callers in
     `mdpreview_test.go` needed no change. It has **no production caller** — production always
     reaches the renderer through `renderMarkdownDocument` → `mermaidPlaceholderDocument`, which
@@ -195,28 +195,80 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
 - **Most transpiled classDiagram/stateDiagram-v2 fences are wider than an 80-column pane, and the
-  adaptive label cap only reduces that — it does not prevent it.** Measured 2026-07-29 over every
-  distinct class/state mermaid fence in the author's document corpus (15 fences), rendered at a
-  pane width of 80: widths `36, 79, 80, 81, 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284`.
-  **Three of fifteen fit**; the median is 101.
+  adaptive label cap only reduces that — it does not prevent it.** Re-measured 2026-07-29 over
+  every class/state mermaid fence in the author's document corpus (18 fences), rendered at a pane
+  width of 80: widths `36, 50, 59, 73, 81, 84, 92, 101, 101, 102, 103, 106, 109, 125, 137, 144,
+  182, 210`. **Four of eighteen fit**; the median is 102.
+
+  These numbers replace an earlier, worse set (`36, 79, 80, 81, 82, 88, 96, 101, 102, 109, 113,
+  144, 187, 243, 284` over 15 fences, three fitting, median 101 — the run also deduplicated
+  identical fences, hence 15 rather than 18). The improvement came from making
+  `flowchartBuilder.declarationOrder` a real topological order: the old "edge sources first" rule
+  made every intermediate node a layout root, so multi-level hierarchies were drawn flattened into
+  fewer, much wider rows. The widest corpus diagram went from 284 cells to 210, and one fence came
+  back inside the pane. `levels()` now replays the renderer's own placement rule as well, so the
+  predicted `k` matches the real layout on all 18 fences (it disagreed on 11 of 18 before).
 
   The per-line label cap (`mermaidLabelCap` in `mdpreview_transpile.go`) shrinks label lines as the
   number of nodes on the widest layout level (`k`) grows, and it is worth keeping, but it cannot
-  guarantee a fit for two reasons. It floors at 16 runes per line, so from `k >= 3` up it is
-  already on the floor with nothing left to give. And its model of the renderer's horizontal
-  placement is approximate: `widestLevel` stops matching the real placement once edges skip levels
-  (which real diagrams do constantly), and the `labelJog` term was calibrated on a fixed
-  10-character relation word while a stateDiagram transition label is free text that reserves
-  `len(label)+3` columns of its own. Overflow therefore happens at every `k`, not only at `k >= 4`
-  — an earlier version of this note and of the plan both claimed a `k >= 4` boundary, which the
-  corpus measurement disproves.
+  guarantee a fit. It floors at 16 runes per line, so from `k >= 3` up it is already on the floor
+  with nothing left to give, and the `labelJog` term was calibrated on a fixed 10-character
+  relation word while a stateDiagram transition label is free text that reserves `len(label)+3`
+  columns of its own. Overflow therefore happens at every `k`, not only at `k >= 4` — an earlier
+  version of this note and of the plan both claimed a `k >= 4` boundary, which the corpus
+  measurement disproves.
 
   This is the same "no horizontal panning" limitation as the item above — the preview cannot scroll
   sideways to reveal the clipped part — so the only current remedy is a wider terminal. Horizontal
   panning in preview mode is the real fix and needs its own plan. Two tests pin the honest
   behaviour on verbatim corpus fences so the claim cannot quietly drift back:
-  `TestRenderMermaidSource_RealCorpusStateDiagram_CapShrinksButArtStillOverflowsPane` and
-  `TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane`.
+  `TestRenderMermaidSource_RealCorpusStateDiagram_TopologicalOrderBringsArtInsidePane` (the fence
+  the topological order rescued, 88 cells before and 73 now) and
+  `TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane` (still 81 cells with
+  the cap on its floor).
+- **A node with several outgoing labelled edges only gets ONE of those labels drawn, and past about
+  four targets the labels merge into a token that is in none of them.** This is the vendored
+  `mermaid-ascii` renderer, not the transpiler: the transpiler emits every label it parsed, but the
+  renderer routes all of a node's outgoing edges along one shared horizontal row and writes labels
+  onto that single row. Measured over the 18-fence corpus at a pane width of 80: **10 of 18 fences
+  lose at least one edge label**, worst case 4 of 6 lost on one fence. At six outgoing edges the
+  six labels `contains / needs / emits / uses / sends / polls` render as `contains` plus the
+  nonsense token `pollss`.
+
+  Note this is fan-out to DIFFERENT targets, not several parallel edges between one pair — an
+  earlier version of the plan's Failure-modes table described only the parallel-edge case, which is
+  much rarer. It is also independent of the width limitation above: one fence loses a label at
+  column ~90 while its art is 144 cells wide, so a wider terminal does not bring the label back.
+
+  Fixing it means changing the vendored renderer's label placement, which is out of scope for this
+  patch. Two tests pin the current behaviour so a vendor bump that changes it cannot pass
+  silently: `TestRenderMermaidSource_FanOutToDifferentTargets_VendoredRendererDropsEdgeLabels` and
+  `TestRenderMermaidSource_WideFanOut_VendoredRendererMergesEdgeLabelsIntoOneToken`.
+- **When the label cap is on its floor, two different labels or titles can truncate to the same
+  string, so the diagram reads as ambiguous rather than merely short.** Measured over the 18-fence
+  corpus: 7 fences contain at least one such collision, and every one of them sits at the 16-rune
+  floor. Three real examples:
+
+  - three transitions out of one state — `reviewer resolves request-changes`, `reviewer resolves
+    approve`, `reviewer resolves reject (hard)` — all render as `reviewer·res...`;
+  - two different conditions, `decision==approve AND publicationDate in future` and
+    `decision==approve publicationDate ≤ now`, both render as `decision==app...`;
+  - two classes, `SimpleWorkflowEngine` and `SimpleWorkflowManager`, become two boxes both titled
+    `SimpleWorkflo...`.
+
+  In all three the cap did not buy a fit anyway (those fences measure 109, 101 and 182 cells
+  against an 80-column pane), so the readability is spent for nothing. There is no cheap fix. The
+  only lever is the floor, and raising it is not free: at a floor of 24 runes the collisions drop
+  from 7 fences to 3, but the corpus median width goes from 102 to 124 cells, the widest from 210
+  to 257, and one fence that currently fits stops fitting. A real fix means either horizontal
+  panning (so labels need not be short) or a disambiguating suffix, both of which need their own
+  plan. The truncation does at least always keep its `...` ellipsis, so a truncated label is never
+  mistaken for a complete one.
+
+  A related, separate case: some collisions do not come from the width cap at all. `resolve
+  {outcome}` and `resolve {outcome} (act without claiming)` both render as `resolve` because
+  `mermaidCutParenthetical` and the brace cut are content rules that run regardless of width. That
+  shortening is deliberate (see the plan's "Edge label" section) and is not affected by the cap.
 
 ## Dependencies added
 

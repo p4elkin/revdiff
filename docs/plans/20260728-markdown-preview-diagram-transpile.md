@@ -261,9 +261,16 @@ independent of the per-line cap. Diagrams whose relations are all unlabeled — 
 and undirected rows in the arrow table — pay nothing, which is why the term is conditional.
 
 `k` is topology only, so it does not depend on the cap — compute `k`, then the cap, then render
-labels. No iteration. Levels come from a walk over the built graph: roots are the nodes never used
-as an edge target, and every other node sits one below its deepest parent. That matches the
-renderer's own level assignment once the declaration order below is fixed.
+labels. No iteration. Levels come from a walk over the built graph that replays the renderer's own
+placement rule (`graph.go`'s `createMapping`) over the declaration order described below: a node is
+a root unless an earlier-declared node already claimed it as a child, and every other node gets the
+level of the FIRST parent that reaches it, plus one.
+
+An earlier version of this section said "one below its deepest parent". That is a longest path, and
+the renderer does not compute one — a later, deeper parent finds the child already placed and skips
+it. Computing the deepest parent over-estimates depth, which under-counts how many nodes share the
+widest level, which hands the cap a `k` that is too small. It disagreed with the real layout on 11
+of the 18 corpus fences; the replay matches all 18.
 
 Worked values at an 80-column pane, with labeled relations (the common case), on the **synthetic
 fan-in shape the formula was derived from** — an interface with `k` implementors, each a plain box,
@@ -280,28 +287,35 @@ one labeled edge each. All cross-checked against the probe's measurements:
 do not describe real diagrams, and the "so the clip boundary is k=4" conclusion this section used
 to draw from them was wrong.**
 
-Every distinct `classDiagram` / `stateDiagram` fence in the corpus was re-rendered at a pane width
-of 80 (15 fences after de-duplicating identical sources). Measured widths, sorted:
+Every `classDiagram` / `stateDiagram` fence in the corpus was re-rendered at a pane width of 80.
+Measured widths, sorted (18 fences, re-measured 2026-07-29 after the topological declaration
+order):
 
 ```
-36, 79, 80, 81, 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284
+36, 50, 59, 73, 81, 84, 92, 101, 101, 102, 103, 106, 109, 125, 137, 144, 182, 210
 ```
 
-**Three of fifteen fit an 80-column pane.** The median is 101. Overflow starts at `k=1`
-(a single tall class with long member lines measures 82) and there are overflowing diagrams at
-every `k` the corpus contains — 81 at `k=3`, 88 and 113 at `k=2`, 96 at `k=1`.
+**Four of eighteen fit an 80-column pane.** The median is 102. Overflow starts at `k=1` and there
+are overflowing diagrams at every `k` the corpus contains.
 
-Two things the formula does not model explain the gap:
+The first run of this measurement, before the declaration order was fixed, was much worse: `36, 79,
+80, 81, 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284` over 15 de-duplicated fences, three
+fitting, median 101. Most of the improvement is the topological order — see the "Declaration order"
+section — which stopped the renderer from flattening multi-level hierarchies into fewer, much wider
+rows.
 
-- `widestLevel` predicts the renderer's horizontal placement only while edges connect adjacent
-  levels. Once an edge skips a level — which real diagrams do constantly, and the corpus
-  stateDiagrams do on nearly every transition — the renderer's own placement no longer matches the
-  level counts this walk produces, so `k` under-reports the real side-by-side width.
+One thing the formula still does not model explains the remaining gap:
+
 - `labelJog = 8 * floor(k/2)` was calibrated on the fixed 10-character `implements` label. A
   stateDiagram transition label is free text up to the cap and reserves `len(label) + 3` columns of
   its own (`mapping_edge.go:161`), so the real jog cost scales with the label, not with `k` alone.
-  The `architecture-proposal.md` stateDiagram measures 113 cells at `k=2` with a cap of 29; the
-  same diagram with every label removed still measures 82.
+  The `architecture-proposal.md` stateDiagram measures 101 cells with the cap on its floor; the
+  same diagram with every label removed is far narrower.
+
+`widestLevel` is no longer a source of error. It used to predict the renderer's placement only
+while edges connected adjacent levels, and disagreed with the real layout on 11 of the 18 fences.
+`levels()` now replays the renderer's own placement rule over the emitted declaration order, and
+the predicted `k` matches the rendered layout on all 18.
 
 **What the cap is actually for, then.** It reduces overflow, it does not prevent it. It is worth
 keeping — without it the widest corpus diagram is far worse, and `k=1` diagrams do land inside the
@@ -316,10 +330,11 @@ is why the cap cannot rescue a wide diagram: from `k=3` up it is already on the 
 nothing left to give.
 
 Pinned in `mdpreview_transpile_test.go` by
-`TestRenderMermaidSource_RealCorpusStateDiagram_CapShrinksButArtStillOverflowsPane` and
-`TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane`, which use verbatim
-corpus fences and assert both halves of the truth: the cap really does shrink, and the art really
-is still wider than the pane. The synthetic table above stays pinned too
+`TestRenderMermaidSource_RealCorpusStateDiagram_TopologicalOrderBringsArtInsidePane` (the one
+corpus fence the topological order brought back inside the pane: 88 cells before, 73 now) and
+`TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane` (81 cells with the cap
+on its floor). Both use verbatim corpus fences and assert the measured truth on each side: the cap
+really does shrink, and for most diagrams the art really is still wider than the pane. The synthetic table above stays pinned too
 (`TestMermaidLabelCap_AdaptiveTable_80ColumnPane`) — it is a correct description of the formula,
 just not of real diagrams.
 
@@ -428,8 +443,26 @@ declare-all-then-edges gives 183 cells and 7 rows; declaring sources before targ
 and 15 rows, identical to putting labels inline on the edge lines. With 4 implementors it is 232
 versus 175.
 
-So `flowchartBuilder.source` emits declarations in **first-seen-as-an-edge-source order**, then any
-node never used as a source. A test pins the emitted declaration order for a fan-in.
+So `flowchartBuilder.source` emits declarations in **topological order** — every edge's source
+before its target, tie-broken by first-seen order — with a fallback to first-seen order for the
+nodes of a cycle, which has no topological order at all. Tests pin the emitted order for a fan-in,
+for a three-level hierarchy, for a self-loop, and for a cycle.
+
+**Corrected 2026-07-29.** The first implementation used the weaker rule "all edge sources first, in
+first-seen-as-a-source order, then everything else". That fixes the simple fan-in but still
+flattens deeper hierarchies, because an intermediate node is itself an edge source. A three-level
+chain written parent-first — `A <|-- B` then `B <|-- C` — makes B the first source seen and
+declares it before A, so the renderer treats B as a layout root and draws B in the same row as its
+own children. Measured on a real corpus classDiagram (`magnolia-content-model/README.md`): the old
+order drew two levels at 121 cells, the topological order draws the correct three levels at 73.
+Over the whole 18-fence corpus the widest diagram went from 284 cells to 210 and the median from
+109 to 102.
+
+`flowchartBuilder.levels` replays the renderer's placement rule over that same order, rather than
+computing a longest path: the renderer gives an unplaced child the level of the FIRST parent that
+reaches it, so a longest-path computation over-estimates depth and hands `mermaidLabelCap` a `k`
+that is too small. With both changes the predicted `k` matches the real rendered layout on all 18
+corpus fences; it disagreed on 11 of 18 before.
 
 **Node ids are synthetic** (`n0`, `n1`, ...), never derived from user text. Because node labels only
 ever appear on arrow-free declaration lines, the whole `-->` / `<-->` / `|` hazard class is
@@ -468,8 +501,10 @@ TD case inside the pane down to `k=3`. Not worth the machinery.
 | transpile succeeds, render still errors | verbatim, identical to today |
 | panic in our code or theirs | existing `recover()` at `mdpreview.go:167`, verbatim |
 | render returns whitespace only | existing blank check at `mdpreview.go:174`, verbatim |
-| art wider than the pane at an 80-column pane | clipped on the right, with no way to scroll it into view. **Measured: 12 of the corpus's 15 distinct class/state fences overflow at width 80** (widths 36, 79, 80, 81, 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284). This happens at every `k`, not only at `k>=4` as this table used to claim — see the corrected "The width cap is adaptive" section. The adaptive cap reduces the overflow; it does not prevent it. Unavoidable without horizontal panning, which is out of scope here |
-| three or more parallel edges between one pair | renders, but the renderer drops one of the labels (`mapping_edge.go:96-104` offers only two alternate routings) |
+| art wider than the pane at an 80-column pane | clipped on the right, with no way to scroll it into view. **Re-measured after the topological declaration order: 14 of the corpus's 18 class/state fences overflow at width 80** (widths 36, 50, 59, 73, 81, 84, 92, 101, 101, 102, 103, 106, 109, 125, 137, 144, 182, 210; median 102). The earlier run measured 36, 79, 80, 81, 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284 over 15 deduplicated fences — the widest dropped from 284 cells to 210 once `declarationOrder` stopped flattening multi-level hierarchies. This happens at every `k`, not only at `k>=4` as this table used to claim — see the corrected "The width cap is adaptive" section. The adaptive cap reduces the overflow; it does not prevent it. Unavoidable without horizontal panning, which is out of scope here |
+| a node with two or more outgoing labelled edges to DIFFERENT targets | renders, but only ONE of those labels is drawn. The vendored renderer routes all of a node's outgoing edges along a single shared horizontal row and writes labels onto that one row, so the rest are simply not there — the arrows look unlabelled. **Measured: 10 of the corpus's 18 fences lose at least one edge label**, worst case 4 of 6 on one fence. Past about four targets the labels do not just vanish, they overwrite each other into a token that is in none of them: six labels `contains / needs / emits / uses / sends / polls` render as `contains` plus the nonsense `pollss`. Independent of the width row above — one fence loses a label at column ~90 while its art is 144 cells wide, so a wider terminal does not recover it. Pinned by `TestRenderMermaidSource_FanOutToDifferentTargets_VendoredRendererDropsEdgeLabels` and `TestRenderMermaidSource_WideFanOut_VendoredRendererMergesEdgeLabelsIntoOneToken` |
+| several parallel edges between ONE pair | renders, but the renderer drops one of the labels (`mapping_edge.go:96-104` offers only two alternate routings). This is the rarer case; the row above is the one that actually bites on real diagrams. An earlier version of this table listed only this row and described it as the whole of the label-loss behaviour, which the corpus measurement disproves |
+| two distinct labels or titles that truncate to the same capped string | renders, but reads as ambiguous rather than merely short — e.g. `SimpleWorkflowEngine` and `SimpleWorkflowManager` become two boxes both titled `SimpleWorkflo...`. **Measured: 7 of 18 fences contain at least one such collision, all of them at the 16-rune cap floor.** No cheap fix: raising the floor to 24 runes cuts the collisions to 3 fences but pushes the corpus median width from 102 to 124 cells and the widest from 210 to 257. The `...` ellipsis is always kept, so a truncated label is never mistaken for a complete one. See PATCH.md's Known limitations for the three real examples |
 
 The user can never see a crash or a mangled half-diagram. Every exit lands on the same `verbatim()`
 closure that ships today.
@@ -505,10 +540,12 @@ would make three quarters of real class diagrams clip rather than one quarter.
 
 ⚠️ **This decision was itself only half right, found by the 2026-07-29 review.** The `labelJog`
 term is real and worth keeping, but it does not restore a `k=4` clip boundary, because there is no
-clip boundary in `k` at all. Re-measured over the whole corpus at width 80, only 3 of 15 distinct
-class/state fences fit, and the overflowing ones span every `k` from 1 upward. Both the "clip
-boundary" phrasing above and the rejected option's "three quarters vs one quarter" estimate are
-wrong. The corrected numbers live in the "The width cap is adaptive" section.
+clip boundary in `k` at all. Re-measured over the whole corpus at width 80, only 4 of 18 class/state
+fences fit, and the overflowing ones span every `k` from 1 upward. Both the "clip boundary" phrasing
+above and the rejected option's "three quarters vs one quarter" estimate are wrong. The corrected
+numbers live in the "The width cap is adaptive" section — they improved from the first review pass
+(3 of 15 fitting, median 101) once `declarationOrder` became topological, but the conclusion that
+there is no clip boundary in `k` is unchanged.
 
 Also noted from row 4: the corpus class this plan calls "19-member" has 18 members today. It has
 drifted since the plan was drafted. The arithmetic is unchanged, since both counts exceed the
@@ -792,8 +829,9 @@ are stubs that report not-handled.
 | 4 | transpile succeeds, render still errors → verbatim | inspection only. No adversarial input tried during this task's audit reaches this branch — the transpiler's exhaustive sanitizing (see "Sanitizing" tables) makes every emitted flowchart source provably valid to the vendored parser in every case exercised. The branch exists as defense in depth (`renderMermaidSource`'s `err != nil` check, `app/ui/mdpreview_transpile.go:1658`), not as a reachable behavior this task could reproduce |
 | 5 | panic in our code or theirs → existing `recover()`, verbatim | inspection only for the recover itself (no test forces an actual panic to prove `recover()` catches it) + test in the opposite direction: `TestRenderMermaidSource_AdversarialSources_NeverPanic` proves the known-hazardous inputs it tries do not need to rely on `recover()` at all, which is stronger evidence of robustness but not a direct test of the recover path |
 | 6 | render returns whitespace only → existing blank check, verbatim | inspection only. The check (`app/ui/mdpreview.go:189`) is shared, pre-existing code, identical regardless of diagram kind; not re-derived or modified by this plan, and no test in this file specifically forces a classDiagram/stateDiagram-v2 transpile to render as whitespace-only |
-| 7 | art wider than the 80-col pane → clipped, no way to scroll it into view | **Row rewritten 2026-07-29** — the old wording ("widest layout level 4+ nodes") was wrong, see the corrected "The width cap is adaptive" section. Tests: `TestMermaidLabelCap_AdaptiveTable_80ColumnPane` still pins the formula on the synthetic shape, and two new tests pin the honest behavior on verbatim corpus fences — `TestRenderMermaidSource_RealCorpusStateDiagram_CapShrinksButArtStillOverflowsPane` (k=2, cap 29, art 88 cells) and `TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane` (k=3, cap on its floor, art 81 cells). Both assert the cap still shrinks AND the art still overflows |
-| 8 | 3+ parallel edges between one pair → renders, drops one label | test only proves no panic (`TestRenderMermaidSource_AdversarialSources_NeverPanic`'s "three parallel edges" case). The specific "drops one label" claim is verified only by the Probe findings intro paragraph (external throwaway probe program, Task 1), not by any test in this repo |
+| 7 | art wider than the 80-col pane → clipped, no way to scroll it into view | **Row rewritten 2026-07-29** — the old wording ("widest layout level 4+ nodes") was wrong, see the corrected "The width cap is adaptive" section. Tests: `TestMermaidLabelCap_AdaptiveTable_80ColumnPane` still pins the formula on the synthetic shape, and two new tests pin the honest behavior on verbatim corpus fences — `TestRenderMermaidSource_RealCorpusStateDiagram_TopologicalOrderBringsArtInsidePane` (k=3, cap on its floor, art 73 cells — this fence measured 88 and overflowed before the declaration order became topological; the test was renamed and re-pinned in review iteration 3) and `TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane` (k=3, cap on its floor, art 81 cells). Together they assert both sides of the honest picture: the cap still shrinks, one real fence now fits, and most still overflow |
+| 8 | fan-out from one node to several DIFFERENT targets → renders, only one label drawn, and past ~4 targets the labels merge into a token that is in none of them | **Row rewritten in review iteration 3** — the old row described only "3+ parallel edges between one pair", which is the rare case; the common one is fan-out to different targets, measured losing at least one label on 10 of the 18 corpus fences. Now pinned by two real tests: `TestRenderMermaidSource_FanOutToDifferentTargets_VendoredRendererDropsEdgeLabels` and `TestRenderMermaidSource_WideFanOut_VendoredRendererMergesEdgeLabelsIntoOneToken`. The parallel-edge case keeps its own no-panic coverage (`TestRenderMermaidSource_AdversarialSources_NeverPanic`'s "three parallel edges" case) |
+| 8b | two distinct labels or titles truncating to the same capped string → ambiguous diagram | documented, not fixed. Measured on 7 of 18 corpus fences, all at the 16-rune cap floor. Raising the floor to 24 cuts it to 3 fences but costs 22 cells of median width, so there is no cheap mitigation — recorded in PATCH.md's Known limitations with three real examples |
 | 9 | art wider than pane for any other reason → clipped, as today | inspection + pre-existing generic test (`TestRenderMarkdownDocument_NarrowWidth_ProseRespectsWidthArtOverflows`, `mdpreview_test.go`) — this is inherited clipping behavior, not diagram-type-specific, and predates this plan |
 
 **`make test`:** full suite passes, race detector on, 16 packages ok, 0 failures.

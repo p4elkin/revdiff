@@ -410,7 +410,7 @@ func TestFlowchartBuilder_WidestLevel_FeedsK(t *testing.T) {
 	assert.Equal(t, 3, b.widestLevel())
 }
 
-func TestFlowchartBuilder_DeclarationOrder_FirstSeenAsEdgeSource_PinnedAgainstFanIn(t *testing.T) {
+func TestFlowchartBuilder_DeclarationOrder_SourcesBeforeTargets_PinnedAgainstFanIn(t *testing.T) {
 	// A fan-in: B and C are both edge sources (in that order), A is only
 	// ever a target. Declaring A before its sources would make graph.go's
 	// insertion-order root computation treat A as an extra root too,
@@ -423,7 +423,7 @@ func TestFlowchartBuilder_DeclarationOrder_FirstSeenAsEdgeSource_PinnedAgainstFa
 	assert.Equal(t, []string{"B", "C", "A"}, b.declarationOrder())
 }
 
-func TestFlowchartBuilder_DeclarationOrder_LeftoverNodeNeverASource_AppearsAfterSources(t *testing.T) {
+func TestFlowchartBuilder_DeclarationOrder_NodeWithNoEdgesAtAll_KeepsItsFirstSeenSlot(t *testing.T) {
 	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
 	b.addEdge("Src", "Dst", "x")
 	b.setTitle("Standalone", "Standalone") // never mentioned in any edge, first-seen after Dst
@@ -629,11 +629,53 @@ func TestClassSplitTrailingLabel_NoLabel(t *testing.T) {
 	assert.Empty(t, label)
 }
 
+func TestClassSplitTrailingLabel_ColonInsideQuotedCardinality_IsNotTheLabelSeparator(t *testing.T) {
+	// `"1:n"` is a valid mermaid cardinality. Scanning the raw line cuts
+	// inside it, leaving a body of `Customer "1` with no arrow at all — the
+	// relation is dropped and the leftover text becomes a phantom node.
+	body, label, ok := classSplitTrailingLabel(`Customer "1:n" --> Order`)
+	assert.False(t, ok, "the only colon here is inside a quoted cardinality, so there is no trailing label")
+	assert.Equal(t, `Customer "1:n" --> Order`, body)
+	assert.Empty(t, label)
+
+	// a real trailing label AFTER a colon-carrying cardinality still splits
+	body, label, ok = classSplitTrailingLabel(`Customer "1:n" --> Order : places`)
+	require.True(t, ok)
+	assert.Equal(t, `Customer "1:n" --> Order`, body)
+	assert.Equal(t, "places", label)
+}
+
+func TestClassTranspiler_QuotedCardinalityWithColon_KeepsTheRelationAndMakesNoPhantomNode(t *testing.T) {
+	src := "classDiagram\n" +
+		"    Customer \"1:n\" --> Order\n" +
+		"    Order \"1\" *-- \"1..*\" LineItem\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.Contains(t, got, "[Customer]")
+	assert.Contains(t, got, "[Order]")
+	assert.Contains(t, got, "[LineItem]")
+	assert.NotContains(t, got, "Customer 1", "no phantom node built out of the split cardinality")
+	assert.NotContains(t, got, "--)", "no phantom member built out of the relation's own text")
+	assert.Equal(t, 2, strings.Count(got, "-->"), "both relations must survive")
+}
+
 // --- classDiagram transpiler: classIgnoredStatement ---
 
 func TestClassIgnoredStatement_Lollipop(t *testing.T) {
 	assert.True(t, classIgnoredStatement("Class1 ()-- Class2"))
+	assert.True(t, classIgnoredStatement("Class1 --() Class2"), "the mirrored lollipop form too")
+	assert.True(t, classIgnoredStatement("()-- Class2"), "at start of line")
 	assert.False(t, classIgnoredStatement("A --> B"))
+}
+
+func TestClassIgnoredStatement_LollipopIsATokenNotASubstring(t *testing.T) {
+	// A method signature closes its paren directly against the method name,
+	// so "()" is never its own token there. A substring test for "()--"
+	// dropped the whole member line.
+	assert.False(t, classIgnoredStatement("Node : +splitForCreate()--Update"))
+	assert.False(t, classIgnoredStatement("Foo : +calc()--x"))
 }
 
 // --- classDiagram transpiler: parseClassDecl ---
@@ -1794,22 +1836,31 @@ func mermaidArtWidth(art string) int {
 //
 // The synthetic fan-in fixtures the cap formula was derived from (see
 // TestMermaidLabelCap_AdaptiveTable_80ColumnPane) do fit an 80-column pane at
-// k=2 and k=3. Real corpus diagrams mostly do not. Both tests below use
-// verbatim corpus fences and pin the measured truth: the adaptive cap shrinks
-// the labels, and the art is STILL wider than the pane.
+// k=2 and k=3. Most real corpus diagrams still do not. The tests below use
+// verbatim corpus fences and pin the measured truth on both sides: one
+// diagram that the topological declaration order brought back inside the
+// pane, and one that stays wider than the pane even with the cap on its
+// floor.
 //
-// Measured over every distinct classDiagram/stateDiagram fence in the plan's
-// corpus (15 fences), rendered at a paneWidth of 80: widths 36, 79, 80, 81,
-// 82, 88, 96, 101, 102, 109, 113, 144, 187, 243, 284 — three of fifteen fit.
-// So the cap reduces overflow but does not prevent it, at any k. These tests
-// exist so that stays written down in executable form: the earlier
-// synthetic-only pinning is exactly why the plan carried a wrong "only k>=4
-// clips" claim through implementation.
+// Measured over every classDiagram/stateDiagram fence in the author's
+// document corpus (18 fences), rendered at a paneWidth of 80: widths 36, 50,
+// 59, 73, 81, 84, 92, 101, 101, 102, 103, 106, 109, 125, 137, 144, 182, 210
+// — four of eighteen fit, median 102. So the cap reduces overflow but does
+// not prevent it, at any k. These tests exist so that stays written down in
+// executable form: the earlier synthetic-only pinning is exactly why the plan
+// carried a wrong "only k>=4 clips" claim through implementation.
 
-func TestRenderMermaidSource_RealCorpusStateDiagram_CapShrinksButArtStillOverflowsPane(t *testing.T) {
+func TestRenderMermaidSource_RealCorpusStateDiagram_TopologicalOrderBringsArtInsidePane(t *testing.T) {
 	// Verbatim from /Users/sasha/dev/mx/publication-requests/docs/architecture/
-	// 2026-07-10-workflow-policy-brain-sketch.md. Its widest layout level
-	// holds 2 nodes, so the plan's own table predicts 79 cells — "fits 80".
+	// 2026-07-10-workflow-policy-brain-sketch.md.
+	//
+	// This fence is the clearest single measurement of what the topological
+	// declaration order buys. Under the old "edge sources first" order the
+	// renderer flattened it, three states shared the widest row, and the art
+	// measured 88 cells against an 80-column pane. Under the topological
+	// order the levels come out right and the same fence measures 73 cells —
+	// it fits. The cap is still doing work (it sits on its floor here), but
+	// it is no longer being asked to rescue a layout that was wrong.
 	source := `stateDiagram-v2
     [*] --> Draft: open · C1 (Request)
     Draft --> InReview: submit + validate · C2 (Request/Content)
@@ -1826,17 +1877,16 @@ func TestRenderMermaidSource_RealCorpusStateDiagram_CapShrinksButArtStillOverflo
 	b := newFlowchartBuilder(80)
 	scanMermaidBlocks(source, newStateTranspiler(b))
 	k := b.widestLevel()
-	require.Equal(t, 2, k, "this corpus diagram's widest layout level holds two states")
-	assert.Equal(t, 29, mermaidLabelCap(80, k, b.hasAnyEdgeLabel()),
-		"the adaptive cap must still shrink below the 32-rune ceiling — do not weaken or delete it")
+	require.Equal(t, 3, k, "this corpus diagram's widest layout level holds three states")
+	assert.Equal(t, mermaidLabelMinRunes, mermaidLabelCap(80, k, b.hasAnyEdgeLabel()),
+		"the adaptive cap must still shrink to its floor here — do not weaken or delete it")
 
 	art, err := renderMermaidSource(source, 80)
 	require.NoError(t, err)
 	width := mermaidArtWidth(art)
-	assert.Greater(t, width, 80,
-		"honest behavior: a real k=2 corpus stateDiagram overflows an 80-column pane despite the cap (measured 88); "+
-			"the cap reduces overflow, it does not guarantee fit")
-	assert.Less(t, width, 130, "sanity band — a much larger number means the cap stopped working entirely, got %d", width)
+	assert.LessOrEqual(t, width, 80,
+		"the topological declaration order brings this fence inside an 80-column pane (measured 73); "+
+			"a regression here means the declaration order stopped being topological, got %d", width)
 }
 
 func TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane(t *testing.T) {
@@ -1904,6 +1954,72 @@ func TestRenderMermaidSource_RealCorpusClassDiagram_FloorCapStillOverflowsPane(t
 	assert.Greater(t, width, 80,
 		"honest behavior: even on the cap's floor a real k=3 corpus classDiagram overflows an 80-column pane (measured 81)")
 	assert.Less(t, width, 130, "sanity band — a much larger number means the cap stopped working entirely, got %d", width)
+}
+
+// --- accepted limitation: the vendored renderer draws one edge label per
+// shared routing row ---
+//
+// The transpiler emits every edge label it parsed. The vendored renderer then
+// routes all of one node's outgoing edges along a single horizontal row and
+// writes labels onto that row, so a fan-out to several DIFFERENT targets ends
+// up with only one label drawn — and past about four targets the labels
+// overwrite each other into a token that is not any of them.
+//
+// This is inside mermaid-ascii (mapping_edge.go / draw.go), not in anything
+// this patch owns, so it is documented rather than fixed — see PATCH.md's
+// Known limitations and the plan's Failure-modes table. Measured over the
+// author's 18-fence corpus at a pane width of 80: 10 of 18 fences lose at
+// least one edge label this way. The tests below pin the behavior so a future
+// vendor bump that changes it does not pass silently.
+
+func TestRenderMermaidSource_FanOutToDifferentTargets_VendoredRendererDropsEdgeLabels(t *testing.T) {
+	source := "classDiagram\n" +
+		"    A --> B : uses\n" +
+		"    A --> C : owns\n" +
+		"    A --> D : reads\n"
+
+	transpiled, ok := transpileMermaid(source, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	for _, label := range []string{"uses", "owns", "reads"} {
+		require.Contains(t, transpiled, "|"+label+"|", "the transpiler emits every label; the loss is downstream")
+	}
+
+	art, err := renderMermaidSource(source, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+
+	drawn := 0
+	for _, label := range []string{"uses", "owns", "reads"} {
+		if strings.Contains(art, label) {
+			drawn++
+		}
+	}
+	assert.Less(t, drawn, 3,
+		"accepted limitation: the renderer cannot draw one label per fan-out edge, got %d of 3 in\n%s", drawn, art)
+}
+
+func TestRenderMermaidSource_WideFanOut_VendoredRendererMergesEdgeLabelsIntoOneToken(t *testing.T) {
+	// Past about four targets the dropped labels do not merely disappear:
+	// each one is written over the previous one on the same routing row, and
+	// what is left is a token that appears in no label at all. Here six
+	// labels collapse to "pollss" — the tail of "polls" printed over the
+	// tail of an earlier label.
+	source := "classDiagram\n" +
+		"    First --> B : contains\n" +
+		"    First --> C : needs\n" +
+		"    First --> D : emits\n" +
+		"    First --> E : uses\n" +
+		"    First --> F : sends\n" +
+		"    First --> G : polls\n"
+
+	art, err := renderMermaidSource(source, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+
+	assert.Contains(t, art, "pollss",
+		"pins the merge artifact: a token that is in none of the six labels\n%s", art)
+	for _, label := range []string{"needs", "emits", "uses", "sends"} {
+		assert.NotContains(t, art, label, "the middle labels are overwritten entirely")
+	}
+	assert.Contains(t, art, "contains", "only the straight-down edge keeps its own label")
 }
 
 func TestRenderMarkdownDocument_ClassDiagramArtSurvivesGlamourWithoutReflow(t *testing.T) {
@@ -2096,12 +2212,69 @@ func TestMermaidKeywordPrefix_Table(t *testing.T) {
 		{"not a prefix at all", "Draft --> Done", "note", false},
 		{"longer keyword still matches its own word", "classDef hi fill:red", "classDef", true},
 		{"shorter keyword stops at the longer word", "classDef hi fill:red", "class", false},
+
+		// kebab-case, dotted and path-like names are ordinary identifiers in
+		// real diagrams, and a hyphen/dot/slash right after a keyword must
+		// therefore NOT read as the end of that keyword.
+		{"kebab-case name", "style-review --> title-approval", "style", false},
+		{"kebab-case name, second keyword", "title-approval --> [*]", "title", false},
+		{"kebab-case note", "note-taking --> done", "note", false},
+		{"dotted name", "link.check --> done", "link", false},
+		{"path-like name", "style/guide --> done", "style", false},
+		{"kebab-case class directive name", "class-registry --> done", "class", false},
+		{"real directive with a hyphen in its ARGUMENT still matches", "style link-check fill:#fff", "style", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, mermaidKeywordPrefix(tc.text, tc.keyword))
 		})
 	}
+}
+
+func TestStateTranspiler_KebabCaseStateNames_SurviveTheIgnoredKeywordCheck(t *testing.T) {
+	// End to end through the transpiler: "style-review" and "title-approval"
+	// both open with a stateDiagram ignored-statement keyword. Treating the
+	// hyphen as a word boundary dropped both transitions silently, so a state
+	// and two transitions vanished from a diagram that still looked complete.
+	src := "stateDiagram-v2\n" +
+		"    [*] --> draft\n" +
+		"    draft --> link-check\n" +
+		"    link-check --> style-review\n" +
+		"    style-review --> title-approval\n" +
+		"    title-approval --> [*]\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	for _, want := range []string{"[draft]", "[link-check]", "[style-review]", "[title-approval]", "[(start)]", "[(end)]"} {
+		assert.Contains(t, got, want)
+	}
+	assert.Equal(t, 5, strings.Count(got, "-->"), "all five transitions must survive")
+
+	// the real directives they shadow must still be dropped
+	withDirectives := "stateDiagram-v2\n    style-review --> done\n    style done fill:#fff\n    title Lifecycle\n"
+	gotDirectives, ok := transpileMermaid(withDirectives, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.Contains(t, gotDirectives, "[style-review]")
+	assert.NotContains(t, gotDirectives, "fill")
+	assert.NotContains(t, gotDirectives, "Lifecycle")
+}
+
+func TestClassTranspiler_KebabCaseAndDottedClassNames_SurviveTheIgnoredKeywordCheck(t *testing.T) {
+	// same rule on the classDiagram side, whose ignored list adds "link",
+	// "click", "href" and "callback" to the shared style/title/note set.
+	src := "classDiagram\n" +
+		"    link-resolver --> href.builder\n" +
+		"    click/handler --> note-store\n" +
+		"    callback_queue --> titleCase\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	for _, want := range []string{"[link-resolver]", "[href.builder]", "[click/handler]", "[note-store]"} {
+		assert.Contains(t, got, want)
+	}
+	assert.Equal(t, 3, strings.Count(got, "-->"), "all three relations must survive")
 }
 
 func TestStateTranspiler_StateNameStartingWithNote_DoesNotSwallowTheDiagram(t *testing.T) {
@@ -2270,32 +2443,93 @@ func TestFlowchartNode_RenderLabelLines_NoStereotypeTitleOrMembers_FallsBackToSy
 	assert.Equal(t, "flowchart TD\nn0[n0]\n", b.source(), "never an empty label between the brackets")
 }
 
-func TestFlowchartBuilder_WidestLevel_CycleFallsBackToOneFlatLevel(t *testing.T) {
-	// levels() documents its cycle handling as approximate. This pins what
-	// that approximation actually is, since it feeds the width cap directly:
-	// with every node in the cycle also an edge target, there is no root to
-	// relax from, so the level map stays empty and every node reads as
-	// level 0 — k ends up equal to the node count. That is the conservative
-	// direction (a tighter cap, never a wider diagram), and it terminates.
+func TestFlowchartBuilder_WidestLevel_CycleLaidOutAsAChain(t *testing.T) {
+	// A cycle has no topological order, so declarationOrder falls back to
+	// first-seen order and the first node becomes the layout root. The
+	// renderer then draws the rest as a chain hanging off it, with the
+	// closing transition drawn as a back edge — verified against the real
+	// renderer, which puts exactly one box on each row for both shapes
+	// below. levels() replays that same placement, so k is 1 here, not the
+	// node count.
 	twoNodeCycle := newFlowchartBuilder(mermaidUnconstrainedWidth)
 	twoNodeCycle.addEdge("A", "B", "")
 	twoNodeCycle.addEdge("B", "A", "")
-	assert.Empty(t, twoNodeCycle.levels(), "a pure cycle has no root to assign a level from")
-	assert.Equal(t, 2, twoNodeCycle.widestLevel())
+	assert.Equal(t, map[string]int{"A": 0, "B": 1}, twoNodeCycle.levels(),
+		"the first-seen node roots the chain, the other hangs one level below it")
+	assert.Equal(t, 1, twoNodeCycle.widestLevel())
 
 	threeNodeCycle := newFlowchartBuilder(mermaidUnconstrainedWidth)
 	threeNodeCycle.addEdge("A", "B", "")
 	threeNodeCycle.addEdge("B", "C", "")
 	threeNodeCycle.addEdge("C", "A", "")
-	assert.Equal(t, 3, threeNodeCycle.widestLevel())
+	assert.Equal(t, 1, threeNodeCycle.widestLevel())
 
-	// a back-transition hanging off a real root still relaxes normally: the
+	// a back-transition hanging off a real root behaves the same way: the
 	// root keeps level 0 and the cycle below it is laid out in real levels.
 	withRoot := newFlowchartBuilder(mermaidUnconstrainedWidth)
 	withRoot.addEdge("Start", "A", "")
 	withRoot.addEdge("A", "B", "")
 	withRoot.addEdge("B", "A", "")
 	assert.Equal(t, 1, withRoot.widestLevel(), "one node per level when the cycle hangs off a single root")
+}
+
+func TestFlowchartBuilder_DeclarationOrder_Cycle_EveryNodeDeclaredExactlyOnce(t *testing.T) {
+	// the cycle fallback must never drop a node and never declare one twice
+	// — a missing declaration leaves the emitted source referring to an id
+	// that was never introduced.
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	b.addEdge("A", "B", "")
+	b.addEdge("B", "C", "")
+	b.addEdge("C", "A", "")
+	b.setTitle("Loner", "Loner")
+
+	assert.Equal(t, []string{"Loner", "A", "B", "C"}, b.declarationOrder(),
+		"the parentless node goes first, then the cycle in first-seen order")
+}
+
+func TestFlowchartBuilder_DeclarationOrder_SelfLoop_DoesNotBlockItsOwnNode(t *testing.T) {
+	// a state that transitions to itself must not count as its own parent,
+	// or it would never become declarable and push the whole diagram onto
+	// the cycle fallback path.
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	b.addEdge("Retry", "Retry", "again")
+	b.addEdge("Retry", "Done", "")
+
+	assert.Equal(t, []string{"Retry", "Done"}, b.declarationOrder())
+	assert.Equal(t, map[string]int{"Retry": 0, "Done": 1}, b.levels())
+}
+
+func TestFlowchartBuilder_DeclarationOrder_ThreeLevelHierarchyDeclaredParentFirst(t *testing.T) {
+	// The real corpus shape (magnolia-content-model/README.md): a class
+	// hierarchy written parent-first, so the intermediate class is seen as
+	// an edge SOURCE before its own children are declared. Note the emitted
+	// arrows run child -> parent, because "<|--" flips (see classArrowTable),
+	// which is why Leaf is the topological root here and Base the sink.
+	//
+	// Declaring in first-seen-as-a-source order would put Mid first, making
+	// the renderer treat Mid as a layout root and draw it in the same row as
+	// its own children. A topological order keeps every source ahead of its
+	// target, so the three levels stay three levels.
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	b.addEdge("Mid", "Base", classInheritanceLabel)  // Base <|-- Mid
+	b.addEdge("Leaf", "Mid", classInheritanceLabel)  // Mid  <|-- Leaf
+	b.addEdge("Leaf2", "Mid", classInheritanceLabel) // Mid  <|-- Leaf2
+
+	order := b.declarationOrder()
+	assert.Equal(t, []string{"Leaf", "Leaf2", "Mid", "Base"}, order)
+
+	pos := map[string]int{}
+	for i, key := range order {
+		pos[key] = i
+	}
+	for _, e := range b.edges {
+		assert.Less(t, pos[e.from], pos[e.to],
+			"every edge source must be declared before its target: %s -> %s", e.from, e.to)
+	}
+
+	assert.Equal(t, map[string]int{"Leaf": 0, "Leaf2": 0, "Mid": 1, "Base": 2}, b.levels(),
+		"three distinct levels, not a flattened two")
+	assert.Equal(t, 2, b.widestLevel(), "the two leaves share the widest level")
 }
 
 func TestStateTranspiler_BlockHeaderNotAStateDeclaration_IsTransparent(t *testing.T) {
