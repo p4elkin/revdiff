@@ -2213,7 +2213,7 @@ func TestClassTranspiler_AsymmetricCardinality_OnlyOneOperandQuoted(t *testing.T
 
 // --- Review fixes: keyword matching must respect word boundaries ---
 
-func TestMermaidKeywordPrefix_Table(t *testing.T) {
+func TestMermaidKeywordRest_Table(t *testing.T) {
 	tests := []struct {
 		name, text, keyword string
 		want                bool
@@ -2241,7 +2241,8 @@ func TestMermaidKeywordPrefix_Table(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, mermaidKeywordPrefix(tc.text, tc.keyword))
+			_, ok := mermaidKeywordRest(tc.text, tc.keyword)
+			assert.Equal(t, tc.want, ok)
 		})
 	}
 }
@@ -2364,7 +2365,7 @@ func TestIgnoredStatements_RealDirectivesStillDropped(t *testing.T) {
 		"accTitle: A title", "accDescr: A description", "title My Diagram",
 	}
 	for _, text := range classDirectives {
-		assert.True(t, classIgnoredStatement(text), "classDiagram must still ignore %q", text)
+		assert.NotEmpty(t, classDirective(text), "classDiagram must still ignore %q", text)
 	}
 
 	stateDirectives := []string{
@@ -2372,7 +2373,7 @@ func TestIgnoredStatements_RealDirectivesStillDropped(t *testing.T) {
 		"accTitle: A title", "accDescr: A description", "title My Diagram",
 	}
 	for _, text := range stateDirectives {
-		assert.True(t, stateIgnoredStatement(text), "stateDiagram must still ignore %q", text)
+		assert.NotEmpty(t, stateDirective(text), "stateDiagram must still ignore %q", text)
 	}
 }
 
@@ -2575,6 +2576,311 @@ func TestClassTranspiler_ClassDeclarationStillWinsOverTheRelationParse(t *testin
 	assert.Contains(t, got, "[Repo~T~]", "the declaration supplied the title, generic parameter and all")
 	assert.Contains(t, got, "[GitRepo]")
 	assert.Equal(t, 1, strings.Count(got, "-->"))
+}
+
+// --- ONE discriminator: directive shape versus node-statement shape ---
+//
+// This pair of tables is the regression net for a bug class that was found
+// and "fixed" four separate times. Each earlier fix moved or guarded ONE
+// dispatch branch and left the next one open:
+//
+//	round 1  keywords matched as bare prefixes    -> "notes", "styleGuide" dropped
+//	round 2  word-boundary test added             -> nodes named EXACTLY "note" still dropped
+//	round 3  relation/transition parsed first     -> arrow forms saved, COLON forms still dropped
+//	round 4  mermaidDirectiveShape, this net      -> decided once, from the line's shape
+//
+// Both tables therefore carry the SAME two lists, verbatim: every directive
+// that must still be dropped, and every node/state/class named exactly a
+// directive keyword that must survive. A future change that re-opens any part
+// of the class fails a named row here rather than silently losing a node in
+// somebody's diagram.
+//
+// Each row is spliced between two anchor relations. Every row asserts the
+// anchors are intact and counts nodes and edges, so a directive that swallows
+// following lines — the worst version of this bug, where a multi-line note
+// nothing ever closes eats the rest of the diagram — shows up as a count
+// mismatch even when the row's own text checks pass.
+
+// directiveShapeCase is one row of the two directive-versus-node-statement
+// tables: fragment is spliced between the anchors, nodes/edges are the totals
+// expected afterwards (anchors included), and want/notWant are substrings of
+// the emitted flowchart source.
+type directiveShapeCase struct {
+	name     string
+	fragment string
+	nodes    int
+	edges    int
+	want     []string
+	notWant  []string
+}
+
+// flowchartNodeCount counts node-declaration lines ("n3[Label]") in emitted
+// flowchart source. Edge lines ("n0 --> n1", "n0 -->|word| n1") also begin
+// with "n" but never carry a "[", so the bracket is what separates them.
+func flowchartNodeCount(src string) int {
+	count := 0
+	for line := range strings.SplitSeq(src, "\n") {
+		if strings.HasPrefix(line, "n") && strings.Contains(line, "[") {
+			count++
+		}
+	}
+	return count
+}
+
+// runDirectiveShapeCases splices each row's fragment between the two anchor
+// statements of a header-kind diagram and checks the result. Shared by both
+// tables so the two really do test the same thing about the two transpilers.
+func runDirectiveShapeCases(t *testing.T, header, firstAnchor, secondAnchor string, tests []directiveShapeCase) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			src := header + "\n    " + firstAnchor + "\n    " + tc.fragment + "\n    " + secondAnchor + "\n"
+
+			got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+			require.True(t, ok, "the diagram must not come out empty")
+
+			assert.Contains(t, got, "[Alpha]", "anchor node")
+			assert.Contains(t, got, "[Beta]", "anchor node")
+			assert.Contains(t, got, "[Gamma]", "the statement after the fragment must still render")
+			assert.Equal(t, tc.nodes, flowchartNodeCount(got), "node count in:\n%s", got)
+			assert.Equal(t, tc.edges, strings.Count(got, "-->"), "edge count in:\n%s", got)
+
+			for _, want := range tc.want {
+				assert.Contains(t, got, want)
+			}
+			for _, notWant := range tc.notWant {
+				assert.NotContains(t, got, notWant, "the directive's own text must not reach the output")
+			}
+		})
+	}
+}
+
+func TestMermaidDirectiveShape_Table(t *testing.T) {
+	// the discriminator itself, on the text that FOLLOWS a matched keyword.
+	tests := []struct {
+		name, rest string
+		want       bool
+	}{
+		{"bare keyword, nothing after it", "", true},
+		{"tight colon, mermaid's own accTitle spelling", ": My accessible title", true},
+		{"ordinary argument word", " Foo fill:#f9f", true},
+		{"quoted argument", ` "A,B" someClass`, true},
+		{"trailing blanks only", "   ", true},
+		{"tab-separated argument", "\tFoo bold", true},
+
+		{"space then colon is a node statement", " : ready", false},
+		{"space then a bare colon", " :", false},
+		{"transition arrow", " --> Done", false},
+		{"inheritance arrow", " <|-- Done", false},
+		{"realization arrow", " <|.. Done", false},
+		{"composition arrow", " --* Done", false},
+		{"dependency arrow", " ..> Done", false},
+		{"undirected fallback arrow", " -- Done", false},
+		{"dotted fallback arrow", " .. Done", false},
+		{"no space before the arrow", "<|--Done", false},
+
+		// the aggregation arrow begins with a LETTER, which is why the test
+		// is "does an arrow token start here", not "does a word start here".
+		{"aggregation arrow starting with a letter", " o-- Done", false},
+
+		// only the FIRST token decides. A note directive may quote an arrow
+		// inside its own prose and is still a directive.
+		{"arrow later in the line", " right of X : uses A --> B", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, mermaidDirectiveShape(tc.rest))
+		})
+	}
+}
+
+func TestMermaidDeclarationShape_TightColonIsNotADeclaration(t *testing.T) {
+	// "class"/"state" go through the same shape rule as the dropped
+	// directives, minus the tight-colon form: that spelling belongs to
+	// accTitle/accDescr, and reading "class:Foo" as a class keyed ":Foo"
+	// helps nobody.
+	assert.False(t, mermaidDeclarationShape(":Foo"))
+	assert.True(t, mermaidDirectiveShape(":Foo"), "the directive rule alone would have claimed it")
+
+	assert.True(t, mermaidDeclarationShape(" Foo"), "an ordinary declaration is unaffected")
+	assert.False(t, mermaidDeclarationShape(" --> loaded"), "a relation is still a relation")
+
+	got, ok := transpileMermaid("classDiagram\n    Alpha <|-- Beta\n    class:Foo\n", mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.NotContains(t, got, "[:Foo]", "no class may be keyed on a bare colon")
+}
+
+func TestClassTranspiler_NoteProseContainingAnArrow_StillDropsAsADirective(t *testing.T) {
+	// only the first token after the keyword decides, so a note whose text
+	// quotes an arrow is still a note — not a relation between "note right
+	// of X" and something.
+	src := "classDiagram\n    Alpha <|-- Beta\n    note right of Alpha : uses Ghost --> Phantom\n    Beta <|-- Gamma\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.NotContains(t, got, "Ghost")
+	assert.NotContains(t, got, "Phantom")
+	assert.Equal(t, 3, flowchartNodeCount(got))
+	assert.Equal(t, 2, strings.Count(got, "-->"))
+}
+
+func TestClassTranspiler_DirectiveShapeVersusNodeStatementShape(t *testing.T) {
+	tests := []directiveShapeCase{
+		// --- must still be dropped: real directives ---
+		{name: "style", fragment: "style Foo fill:#f9f", nodes: 3, edges: 2, notWant: []string{"fill"}},
+		{name: "classDef", fragment: "classDef foo bold", nodes: 3, edges: 2, notWant: []string{"bold"}},
+		{name: "title", fragment: "title My Diagram", nodes: 3, edges: 2, notWant: []string{"Diagram"}},
+		{name: "direction", fragment: "direction LR", nodes: 3, edges: 2, notWant: []string{"LR"}},
+		{name: "accTitle", fragment: "accTitle: My accessible title", nodes: 3, edges: 2, notWant: []string{"accessible"}},
+		{name: "accDescr", fragment: "accDescr: My accessible description", nodes: 3, edges: 2, notWant: []string{"accessible"}},
+		{name: "note single-line", fragment: "note right of X : some text", nodes: 3, edges: 2, notWant: []string{"some text"}},
+		{name: "note floating", fragment: `note "a floating note"`, nodes: 3, edges: 2, notWant: []string{"floating"}},
+		{name: "note for", fragment: `note for Alpha "explains Alpha"`, nodes: 3, edges: 2, notWant: []string{"explains"}},
+		{name: "click", fragment: "click Foo callback", nodes: 3, edges: 2, notWant: []string{"callback"}},
+		{name: "link", fragment: `link Foo "https://example"`, nodes: 3, edges: 2, notWant: []string{"example"}},
+		{name: "href", fragment: `href Foo "https://example"`, nodes: 3, edges: 2, notWant: []string{"example"}},
+		{name: "cssClass", fragment: `cssClass "A,B" someClass`, nodes: 3, edges: 2, notWant: []string{"someClass"}},
+
+		// classDiagram grammar has no multi-line note (its notes are the
+		// quoted single-line `note "text"` and `note for X "text"` forms), so
+		// there is no body to suppress: the opener drops as a directive and
+		// the prose lines drop as unparseable statements. The stateDiagram
+		// table below is where real body suppression is pinned.
+		{
+			name:     "note block written anyway",
+			fragment: "note left of Alpha\n      the note body\n    end note",
+			nodes:    3, edges: 2,
+			notWant: []string{"body"},
+		},
+
+		// --- must survive: classes named exactly a directive keyword ---
+		{
+			name: "note, inheritance relation", fragment: "note <|-- Done", nodes: 5, edges: 3,
+			want: []string{"[note]", "[Done]"},
+		},
+		{
+			name: "note, association relation", fragment: "note --> Done", nodes: 5, edges: 3,
+			want: []string{"[note]", "[Done]"},
+		},
+		{
+			name: "style, relation", fragment: "style <|-- review", nodes: 5, edges: 3,
+			want: []string{"[style]", "[review]"},
+		},
+		{
+			name: "title, relation", fragment: "title <|-- approved", nodes: 5, edges: 3,
+			want: []string{"[title]", "[approved]"},
+		},
+		{
+			name: "direction, relation", fragment: "direction <|-- up", nodes: 5, edges: 3,
+			want: []string{"[direction]", "[up]"},
+		},
+		{
+			name: "class, relation", fragment: "class --> loaded", nodes: 5, edges: 3,
+			want: []string{"[class]", "[loaded]"},
+		},
+		{
+			name: "link, relation", fragment: "link <|-- target", nodes: 5, edges: 3,
+			want: []string{"[link]", "[target]"},
+		},
+
+		// --- must survive: the colon member form (the round-4 finding) ---
+		{name: "note, colon member", fragment: "note : ready", nodes: 4, edges: 2, want: []string{"[note<br/>ready]"}},
+		{name: "style, colon member", fragment: "style : +enabled()", nodes: 4, edges: 2, want: []string{"[style<br/>+enabled()]"}},
+		{name: "title, colon member", fragment: "title : +text", nodes: 4, edges: 2, want: []string{"[title<br/>+text]"}},
+		{name: "direction, colon member", fragment: "direction : +x", nodes: 4, edges: 2, want: []string{"[direction<br/>+x]"}},
+		{name: "accTitle, colon member", fragment: "accTitle : x", nodes: 4, edges: 2, want: []string{"[accTitle<br/>x]"}},
+
+		// --- must survive: "class Foo" is a DECLARATION in this grammar ---
+		//
+		// classDiagram is the one place "class" is not a directive: it
+		// declares a class. classDiagram spells styling as `cssClass "Foo" hi`
+		// or "Foo:::hi" instead, so a trailing word is part of the declared
+		// name here — unlike stateDiagram-v2, where "class Foo cssClassName"
+		// applies a CSS class and is dropped (see the state table).
+		{name: "class declaration", fragment: "class Foo", nodes: 4, edges: 2, want: []string{"[Foo]"}},
+		{
+			name: "class declaration with a trailing word", fragment: "class Foo cssClassName", nodes: 4, edges: 2,
+			want: []string{"[Foo cssClassName]"},
+		},
+
+		// --- must survive: names that merely START with a keyword (round 3) ---
+		{name: "plural", fragment: "notes --> done", nodes: 5, edges: 3, want: []string{"[notes]", "[done]"}},
+		{
+			name: "kebab-case both sides", fragment: "style-review --> title-approval", nodes: 5, edges: 3,
+			want: []string{"[style-review]", "[title-approval]"},
+		},
+		{name: "dotted", fragment: "link.check --> done", nodes: 5, edges: 3, want: []string{"[link.check]", "[done]"}},
+		{
+			name: "camelCase", fragment: "styleGuide --> titleFetch", nodes: 5, edges: 3,
+			want: []string{"[styleGuide]", "[titleFetch]"},
+		},
+		{name: "notified and hrefBox", fragment: "notified --> hrefBox", nodes: 5, edges: 3, want: []string{"[notified]", "[hrefBox]"}},
+		{name: "linker", fragment: "linker --> Done", nodes: 5, edges: 3, want: []string{"[linker]", "[Done]"}},
+	}
+	runDirectiveShapeCases(t, "classDiagram", "Alpha <|-- Beta", "Beta <|-- Gamma", tests)
+}
+
+func TestStateTranspiler_DirectiveShapeVersusNodeStatementShape(t *testing.T) {
+	tests := []directiveShapeCase{
+		// --- must still be dropped: real directives ---
+		{name: "style", fragment: "style Foo fill:#f9f", nodes: 3, edges: 2, notWant: []string{"fill"}},
+		{name: "classDef", fragment: "classDef foo bold", nodes: 3, edges: 2, notWant: []string{"bold"}},
+		{name: "class css", fragment: "class Foo cssClassName", nodes: 3, edges: 2, notWant: []string{"cssClassName"}},
+		{name: "title", fragment: "title My Diagram", nodes: 3, edges: 2, notWant: []string{"Diagram"}},
+		{name: "direction", fragment: "direction LR", nodes: 3, edges: 2, notWant: []string{"LR"}},
+		{name: "accTitle", fragment: "accTitle: My accessible title", nodes: 3, edges: 2, notWant: []string{"accessible"}},
+		{name: "accDescr", fragment: "accDescr: My accessible description", nodes: 3, edges: 2, notWant: []string{"accessible"}},
+		{name: "note single-line", fragment: "note right of X : some text", nodes: 3, edges: 2, notWant: []string{"some text"}},
+		{name: "click", fragment: "click Foo callback", nodes: 3, edges: 2, notWant: []string{"callback"}},
+		{name: "link", fragment: `link Foo "https://example"`, nodes: 3, edges: 2, notWant: []string{"example"}},
+		{name: "href", fragment: `href Foo "https://example"`, nodes: 3, edges: 2, notWant: []string{"example"}},
+		{name: "cssClass", fragment: `cssClass "A,B" someClass`, nodes: 3, edges: 2, notWant: []string{"someClass"}},
+
+		// the multi-line note really does suppress its body here, including a
+		// body line shaped like a transition — that text belongs to the note,
+		// not to the diagram.
+		{
+			name:     "note block, body suppressed",
+			fragment: "note left of Alpha\n      the note body\n      Ghost --> Phantom\n    end note",
+			nodes:    3, edges: 2,
+			notWant: []string{"body", "Ghost", "Phantom"},
+		},
+
+		// --- must survive: states named exactly a directive keyword ---
+		{name: "note, transition", fragment: "note --> Done", nodes: 5, edges: 3, want: []string{"[note]", "[Done]"}},
+		{name: "style, transition", fragment: "style --> review", nodes: 5, edges: 3, want: []string{"[style]", "[review]"}},
+		{name: "title, transition", fragment: "title --> approved", nodes: 5, edges: 3, want: []string{"[title]", "[approved]"}},
+		{name: "direction, transition", fragment: "direction --> up", nodes: 5, edges: 3, want: []string{"[direction]", "[up]"}},
+		{name: "class, transition", fragment: "class --> loaded", nodes: 5, edges: 3, want: []string{"[class]", "[loaded]"}},
+
+		// --- must survive: the colon description form (the round-4 finding) ---
+		{name: "note, colon description", fragment: "note : ready", nodes: 4, edges: 2, want: []string{"[note<br/>ready]"}},
+		{name: "style, colon description", fragment: "style : enabled", nodes: 4, edges: 2, want: []string{"[style<br/>enabled]"}},
+		{name: "title, colon description", fragment: "title : text", nodes: 4, edges: 2, want: []string{"[title<br/>text]"}},
+		{name: "direction, colon description", fragment: "direction : x", nodes: 4, edges: 2, want: []string{"[direction<br/>x]"}},
+		{name: "accTitle, colon description", fragment: "accTitle : x", nodes: 4, edges: 2, want: []string{"[accTitle<br/>x]"}},
+
+		// --- must survive: names that merely START with a keyword (round 3) ---
+		{name: "plural", fragment: "notes --> done", nodes: 5, edges: 3, want: []string{"[notes]", "[done]"}},
+		{
+			name: "kebab-case both sides", fragment: "style-review --> title-approval", nodes: 5, edges: 3,
+			want: []string{"[style-review]", "[title-approval]"},
+		},
+		{name: "dotted", fragment: "link.check --> done", nodes: 5, edges: 3, want: []string{"[link.check]", "[done]"}},
+		{
+			name: "camelCase", fragment: "styleGuide --> titleFetch", nodes: 5, edges: 3,
+			want: []string{"[styleGuide]", "[titleFetch]"},
+		},
+		{name: "notified and hrefBox", fragment: "notified --> hrefBox", nodes: 5, edges: 3, want: []string{"[notified]", "[hrefBox]"}},
+		{name: "linker", fragment: "linker --> Done", nodes: 5, edges: 3, want: []string{"[linker]", "[Done]"}},
+
+		// "class Foo" is the CSS-class form in this grammar (a state named
+		// Foo is not being declared), the mirror image of the classDiagram
+		// table's declaration row.
+		{name: "class Foo drops here", fragment: "class Foo", nodes: 3, edges: 2, notWant: []string{"[Foo]"}},
+	}
+	runDirectiveShapeCases(t, "stateDiagram-v2", "Alpha --> Beta", "Beta --> Gamma", tests)
 }
 
 // --- Review fixes: frontmatter, classDiagram-v2 ---

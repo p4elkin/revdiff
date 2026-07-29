@@ -901,7 +901,7 @@ func scanMermaidBlocks(source string, h mermaidBlockHandler) {
 
 // mermaidIdentRune reports whether r can CONTINUE a diagram identifier —
 // a state name, a class name — and therefore must never be read as the
-// boundary that ends a directive keyword (see mermaidKeywordPrefix).
+// boundary that ends a directive keyword (see mermaidKeywordRest).
 //
 // Letters, digits and "_" are the obvious members. The other three are the
 // ones a narrower rule gets wrong in practice: real diagrams name states and
@@ -919,9 +919,10 @@ func mermaidIdentRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-// mermaidKeywordPrefix reports whether text opens with keyword as a WHOLE
-// word: either text is exactly keyword, or the character right after it
-// cannot continue an identifier (see mermaidIdentRune).
+// mermaidKeywordRest cuts keyword off the front of text when text opens with
+// it as a WHOLE word: either text is exactly keyword, or the character right
+// after it cannot continue an identifier (see mermaidIdentRune). rest is
+// whatever followed the keyword, unchanged.
 //
 // A plain strings.HasPrefix is wrong here, and not harmlessly so. Diagram
 // authors name states and classes after ordinary words, and several of those
@@ -929,63 +930,172 @@ func mermaidIdentRune(r rune) bool {
 // "titleFetch", "directionUp", "linkTarget", and the kebab-case
 // "style-review" / "title-approval" shapes mermaidIdentRune covers. Matched
 // as bare prefixes, every statement mentioning such a name is silently
-// discarded, and for the "note" keyword in particular the damage is not one
-// line: startNoteIfAny would open a multi-line note and swallow the entire
-// rest of the diagram waiting for an "end note" that never comes.
-func mermaidKeywordPrefix(text, keyword string) bool {
-	rest, ok := strings.CutPrefix(text, keyword)
+// discarded, and for the "note" keyword in particular the damage was not one
+// line: the multi-line note opener would swallow the entire rest of the
+// diagram waiting for an "end note" that never comes.
+func mermaidKeywordRest(text, keyword string) (rest string, ok bool) {
+	rest, ok = strings.CutPrefix(text, keyword)
 	if !ok {
-		return false
+		return "", false
 	}
 	if rest == "" {
-		return true
+		return "", true
 	}
 	r, _ := utf8.DecodeRuneInString(rest)
-	return !mermaidIdentRune(r)
+	if mermaidIdentRune(r) {
+		return "", false
+	}
+	return rest, true
 }
 
-// mermaidHasAnyKeyword reports whether text opens with any of keywords, each
-// matched as a whole word (see mermaidKeywordPrefix). This is the shared
-// matching loop behind both classIgnoredStatement and stateIgnoredStatement:
-// the two diagram types drop a different set of statement keywords, but the
-// matching logic itself — try each keyword, report true on the first hit — is
-// identical, so it lives here once rather than as two near-duplicate loops
-// (see this file's package doc comment on why the two transpilers must not
-// duplicate their shared plumbing).
-func mermaidHasAnyKeyword(text string, keywords []string) bool {
+// mermaidLeadingArrow matches a relation or transition arrow token ANCHORED
+// at the very start of the string — the union of every arrow either
+// transpiler understands: classDiagram's fourteen relation arrows plus its
+// lollipop halves, and stateDiagram-v2's single "-->" (already a member of
+// that set). Alternatives are ordered longest-first for the same reason
+// classArrowPattern's are: Go's alternation is leftmost-FIRST, so a short
+// generic token listed ahead of a longer specific one would steal the match.
+//
+// One union rather than one pattern per diagram type is deliberate. This is
+// used by exactly one caller — mermaidDirectiveShape — whose whole job is to
+// answer a question that must have the SAME answer for both transpilers: a
+// line whose first token after a keyword is an arrow is a node statement, not
+// a directive. Splitting it in two would put the shared invariant back into
+// two places that can drift apart, which is precisely the failure this
+// discriminator exists to end.
+var mermaidLeadingArrow = regexp.MustCompile(
+	`^(?:<\|--|--\|>|<\|\.\.|\.\.\|>|--\*|\*--|--o|o--|-->|<--|\.\.>|<\.\.|\(\)--|--\(\)|--|\.\.)`,
+)
+
+// mermaidDirectiveShape reports whether rest — the text that FOLLOWS a
+// directive keyword matched as a whole word, see mermaidKeywordRest — has
+// directive shape rather than node-statement shape.
+//
+// # Why this function exists at all
+//
+// This bug class has been found and "fixed" four separate times, and the
+// first three fixes all failed the same way: each moved or guarded ONE
+// dispatch branch and left the next one open. Round one matched keywords as
+// bare prefixes, so a state named "notes" or "styleGuide" was dropped.
+// Round two added a word-boundary test, which still cannot separate a node
+// named EXACTLY "note" from the note directive. Round three moved the
+// relation and transition parse ahead of the keyword check, which saved the
+// arrow forms ("note --> Done") and left the COLON forms ("note : ready",
+// "style : +enabled()") still being dropped, because those sit further down
+// the dispatch. Round four is this function: the decision is made once, from
+// the line's SHAPE, so no dispatch position has to be got right for it to
+// hold.
+//
+// # The invariant
+//
+// A line is a DIRECTIVE only when it has directive shape, and a node
+// statement only when it has node-statement shape. Concretely, after a
+// keyword the two shapes are:
+//
+//	directive          keyword ARGUMENT...   ("style Foo fill:#f9f", "note left of X")
+//	directive          keyword: TEXT         ("accTitle: My accessible title")
+//	node statement     keyword ARROW ...     ("note --> Done", "note <|-- Done")
+//	node statement     keyword : DESCRIPTION ("note : ready", "style : +enabled()")
+//
+// The one genuinely ambiguous pair is "accTitle: text" (a directive) against
+// "accTitle : text" (a state or class named accTitle, with a description).
+// They are told apart by the space before the colon: mermaid's own grammar
+// spells the accessibility directives "accTitle:" with the colon written
+// tight against the keyword, so a colon that follows whitespace is a node
+// statement's separator. The alternative considered and rejected was to keep
+// "accTitle" out of the node-statement fallback entirely and always treat it
+// as a directive — rejected because it re-opens exactly the hole this
+// function closes, just for one keyword instead of all of them, and mermaid
+// itself accepts a state named "accTitle".
+//
+// # If you change this
+//
+// Keep the decision here. Do not re-add a keyword test to a dispatch branch,
+// and do not make a call site's POSITION load-bearing for it — that is the
+// shape all four regressions had in common.
+func mermaidDirectiveShape(rest string) bool {
+	if rest == "" {
+		return true // the bare keyword alone: no node-statement shape to compete with
+	}
+	if strings.HasPrefix(rest, ":") {
+		return true // "accTitle:" — colon tight against the keyword, mermaid's own spelling
+	}
+	arg := strings.TrimLeft(rest, " \t")
+	switch {
+	case arg == "":
+		return true // keyword plus trailing blanks only
+	case strings.HasPrefix(arg, ":"):
+		return false // "Name : description" — the colon form of a node statement
+	case mermaidLeadingArrow.MatchString(arg):
+		return false // "Name --> Other" — a relation or transition
+	}
+	return true
+}
+
+// mermaidDeclarationShape is mermaidDirectiveShape narrowed for the two
+// DECLARATION keywords, classDiagram's "class" and stateDiagram-v2's "state".
+// Those two behave exactly like a directive keyword when deciding whether the
+// line is theirs at all — the only difference is what happens on a match, a
+// declaration recorded instead of a line dropped — with one exception: the
+// tight-colon form belongs to the accessibility directives alone. Nobody
+// writes "class:Foo", so reading it as a declaration of a class keyed ":Foo"
+// helps no one, while reading it as a node statement at least keeps the text.
+func mermaidDeclarationShape(rest string) bool {
+	return !strings.HasPrefix(rest, ":") && mermaidDirectiveShape(rest)
+}
+
+// mermaidDirective returns the directive keyword that text is a directive
+// for, or "" when text is not a directive at all. This is the ONE place
+// either transpiler decides directive-versus-node-statement — see
+// mermaidDirectiveShape for the rule and for why it must stay in one place.
+//
+// Keyword order within keywords does not matter: the whole-word test in
+// mermaidKeywordRest already stops a short keyword from claiming a longer
+// one's line ("class" never matches "classDef hi fill:red").
+func mermaidDirective(text string, keywords []string) string {
 	for _, keyword := range keywords {
-		if mermaidKeywordPrefix(text, keyword) {
-			return true
+		rest, ok := mermaidKeywordRest(text, keyword)
+		if ok && mermaidDirectiveShape(rest) {
+			return keyword
 		}
 	}
-	return false
+	return ""
 }
 
 // --- classDiagram transpiler ---
 //
-// classIgnoredStatementKeywords lists classDiagram statement keywords that
-// carry no information the flowchart-source builder needs: styling/metadata
-// directives (style, cssClass, classDef), doc/interaction directives (note,
-// click, callback, link, href), and accessibility/title directives
-// (accTitle, accDescr, title). Checked BEFORE the colon-form member parser
-// runs, because several of these (classDef's "fill:#fff", accTitle's own
-// label text) would otherwise misparse as a `ClassName : member` statement
-// — see the plan's classDiagram grammar list of statements that are
-// "ignored silently, rest of the diagram still renders".
+// classDirectiveKeywords lists classDiagram statement keywords that carry no
+// information the flowchart-source builder needs: styling/metadata directives
+// (style, cssClass, classDef), doc/interaction directives (note, click,
+// callback, link, href), layout ("direction"), and accessibility/title
+// directives (accTitle, accDescr, title). A line opening with one of these in
+// DIRECTIVE shape is dropped — see mermaidDirectiveShape, which is where
+// directive shape is defined and is the only place that decision is made.
 //
-// Each entry matches as a whole word, never as a bare prefix — see
-// mermaidKeywordPrefix for why a class genuinely named "linkTarget" or
-// "titleCase" must not be mistaken for one of these directives. The whole
-// word test is still not enough on its own: a class named EXACTLY "link" or
-// "title" is indistinguishable from the directive by any prefix rule, since
-// both are followed by a space. classTranspiler.statement therefore parses
-// the line as a relation FIRST and only consults this list when no relation
-// parsed — see that method's doc comment.
-var classIgnoredStatementKeywords = []string{
-	"note", "click", "callback", "link", "href",
-	"style", "cssClass", "classDef",
+// A class can legitimately be named after any of these words. "note <|-- Done"
+// is an ordinary inheritance relation between a class called "note" and one
+// called "Done", and "style : +enabled()" is a member of a class called
+// "style". Both survive, because neither has directive shape. Longer names
+// that merely START with a keyword ("linkTarget", "titleCase", "style-review")
+// never match the keyword at all — see mermaidKeywordRest.
+//
+// "class" is deliberately absent. In classDiagram grammar it is the
+// DECLARATION keyword ("class Foo", `class Foo["Display"]`, "class Repo~T~"),
+// not a styling directive; classDiagram spells styling as `cssClass "Foo" hi`
+// or "Foo:::hi" instead. stateDiagram-v2 is the opposite way round, which is
+// why "class" appears in stateDirectiveKeywords and not here.
+var classDirectiveKeywords = []string{
+	mermaidNoteKeyword, "click", "callback", "link", "href",
+	"style", "cssClass", "classDef", "direction",
 	"accTitle", "accDescr", "title",
 }
+
+// mermaidNoteKeyword is the one directive keyword whose handling goes beyond
+// dropping its own line: in stateDiagram-v2 the multi-line opener suppresses
+// every following line until "end note" (see
+// stateTranspiler.openMultilineNote). Named rather than spelled inline so the
+// keyword list and the dispatch that special-cases it cannot drift apart.
+const mermaidNoteKeyword = "note"
 
 // classLollipopRelation matches mermaid's lollipop interface notation in
 // either direction — "Class1 ()-- Class2" and "Class1 --() Class2" — as a
@@ -1007,15 +1117,14 @@ var classIgnoredStatementKeywords = []string{
 // parse saw the line first.
 var classLollipopRelation = regexp.MustCompile(`(?:^|\s)(?:\(\)--|--\(\))`)
 
-// classIgnoredStatement reports whether text opens with one of the
-// classDiagram directive keywords this patch deliberately drops rather than
-// transpiles — see classIgnoredStatementKeywords. The lollipop check is
-// deliberately NOT folded in here: the two run at different points of
-// classTranspiler.statement's dispatch (lollipop before the relation parse,
-// this after it), so keeping them separate is what lets the caller order them
-// independently.
-func classIgnoredStatement(text string) bool {
-	return mermaidHasAnyKeyword(text, classIgnoredStatementKeywords)
+// classDirective returns the classDiagram directive keyword text is a
+// directive for, or "" when text is not a directive — the classDiagram
+// binding of the shared discriminator (see mermaidDirective). The lollipop
+// notation is deliberately NOT folded in here: it is not keyword-shaped at
+// all, it is an arrow shape, so it stays its own regexp test in
+// classTranspiler.statement.
+func classDirective(text string) string {
+	return mermaidDirective(text, classDirectiveKeywords)
 }
 
 // classMemberSpaceParen matches the FIRST whitespace character that is
@@ -1173,12 +1282,22 @@ func parseClassDecl(rest string) (key, title string) {
 // statement OR block-header form, since scanMermaidBlocks already strips a
 // block header's trailing "{" before either classTranspiler.statement or
 // classTranspiler.blockHeader ever sees the text, so both reach this same
-// helper with identical input. ok is false when text does not start with
-// "class " at all, or parseClassDecl could not extract a usable key (an
+// helper with identical input. ok is false when text does not open with the
+// "class" keyword, when what follows it is a node statement rather than a
+// declaration, or when parseClassDecl could not extract a usable key (an
 // empty declaration after the style-suffix strip).
+//
+// "class" is a keyword like any other here, so it goes through the same shape
+// test the dropped directives do (mermaidDeclarationShape) — the
+// only difference is what happens on a match: a directive is dropped, a
+// declaration is recorded. That keeps a class named "class" working the same
+// way a class named "note" or "style" does: "class --> loaded" is a relation
+// and "class : loaded" is a member, because neither has declaration shape.
+// Without the test both used to manufacture a class literally keyed
+// "--> loaded".
 func classDeclFromStatement(text string) (key, title string, ok bool) {
-	rest, isClass := strings.CutPrefix(text, "class ")
-	if !isClass {
+	rest, isClass := mermaidKeywordRest(text, "class")
+	if !isClass || !mermaidDeclarationShape(rest) {
 		return "", "", false
 	}
 	key, title = parseClassDecl(rest)
@@ -1516,26 +1635,25 @@ func (c *classTranspiler) line(text string, depth int) {
 // or — if none of those match — a line this patch cannot parse, silently
 // omitted per the plan's Failure modes table.
 //
-// The dispatch order is the load-bearing part, and the rule behind it is
-// this: a line that PARSES as a relation is a relation, whatever its first
-// token happens to be called. A class can legitimately be named "note",
-// "link", "style" or "title", and "note <|-- Done" is then an ordinary
-// inheritance relation, not a note directive. No keyword matcher can tell
-// the two apart — both are the bare word followed by a space — so the
-// relation parse runs first and the ignored-keyword list is consulted only
-// once no relation parsed. That is also what keeps a directive safe: a real
-// "style Foo fill:#f9f" or "title My Diagram" carries no relation arrow at
-// all, so the relation parse declines it and the keyword list still drops it.
+// Directive-versus-statement is NOT decided here. classDirective answers that
+// from the line's shape alone (see mermaidDirectiveShape), so a class named
+// exactly "note", "style" or "title" keeps its relations AND its members
+// regardless of where in this method the check sits. Do not re-introduce a
+// keyword test into any other branch below: making a branch's POSITION
+// load-bearing for that decision is what produced four rounds of the same
+// data-loss bug.
 //
-// Two checks sit outside that rule, one on each side:
+// The remaining order is about parse ambiguity, not keywords:
 //   - the lollipop notation is tested FIRST, because it does contain a "--"
 //     token the relation parser would otherwise claim (see
 //     classLollipopRelation).
-//   - the "ClassName : member" colon form is tested LAST, because directives
-//     carry colons of their own ("classDef hi fill:red") and would misparse
-//     as a member line.
+//   - the "ClassName : member" colon form is tested LAST, because a relation
+//     can carry its own trailing ": label" and would misparse as a member.
 func (c *classTranspiler) statement(text string) {
 	if classLollipopRelation.MatchString(text) {
+		return
+	}
+	if classDirective(text) != "" {
 		return
 	}
 	if key, title, ok := classDeclFromStatement(text); ok {
@@ -1543,9 +1661,6 @@ func (c *classTranspiler) statement(text string) {
 		return
 	}
 	if c.statementRelation(text) {
-		return
-	}
-	if mermaidKeywordPrefix(text, "direction") || classIgnoredStatement(text) {
 		return
 	}
 	if key, after, ok := splitOnFirstColon(text); ok && key != "" {
@@ -1719,34 +1834,32 @@ func (s *stateTranspiler) line(text string, _ int) {
 // "A : description" colon form, or — if none of those match — a line this
 // patch cannot parse, silently omitted per the plan's Failure modes table.
 //
-// The dispatch order follows the same rule as classTranspiler.statement, for
-// the same reason: a line that PARSES as a transition is a transition,
-// whatever its first token happens to be called. States really do get named
-// "note", "style", "title", "class" and "direction", and "note --> Done" is
-// then an ordinary transition. Since a directive and a state of the same
-// name are both just that word followed by a space, no keyword matcher can
-// separate them — so the transition parse runs first, and every keyword
-// check below it only ever sees lines with no "-->" in them. Running the
-// note check first was the version that silently dropped such lines, and for
-// "note" specifically it dropped far more than one: startNoteIfAny would
-// open a multi-line note nothing ever closed, swallowing the rest of the
-// diagram.
+// Directive-versus-statement is NOT decided by the order of these branches.
+// stateDirective answers that from the line's shape alone (see
+// mermaidDirectiveShape), so a state named exactly "note", "style", "title",
+// "class" or "direction" keeps both its transitions ("note --> Done") and its
+// colon description ("note : ready") no matter where the check sits. Do not
+// re-introduce a keyword test into any other branch below — that is the shape
+// all four rounds of this data-loss bug had in common.
 //
-// Real directives are unaffected by the reordering: "direction LR",
-// "style Foo fill:#f9f", "title My Diagram", "classDef hi bold",
-// "class Foo hi" and every "note ... of X" shape carry no transition arrow,
-// so the transition parse declines them and they reach their own checks
-// exactly as before. The colon-description fallback stays last, since
-// several of those directives carry a colon of their own.
+// The note keyword is the one directive with a side effect beyond dropping
+// its own line: the multi-line "note left of X" form suppresses every line
+// until "end note". That side effect hangs off the SAME decision rather than
+// off a second keyword test of its own, which is why openMultilineNote is
+// reached through the directive's identity instead of re-matching "note".
+//
+// The remaining order is about parse ambiguity, not keywords: the
+// "A : description" colon form is tested last, since a transition can carry
+// its own trailing ": label" and a "state ..." declaration its own alias.
 func (s *stateTranspiler) statement(text string) {
+	if keyword := stateDirective(text); keyword != "" {
+		if keyword == mermaidNoteKeyword {
+			s.openMultilineNote(text)
+		}
+		return
+	}
 	if fromRaw, toRaw, label, ok := parseStateTransition(text); ok {
 		s.statementTransition(fromRaw, toRaw, label)
-		return
-	}
-	if mermaidKeywordPrefix(text, "direction") || stateIgnoredStatement(text) {
-		return
-	}
-	if s.startNoteIfAny(text) {
 		return
 	}
 	if key, title, annotation, ok := stateDeclFromStatement(text); ok {
@@ -1852,37 +1965,28 @@ func (s *stateTranspiler) attributeToComposite(key string) {
 // the remainder of the diagram.
 var stateNoteOpenPattern = regexp.MustCompile(`^note\s+(?:left|right)\s+of\s+\S`)
 
-// startNoteIfAny recognizes a "note ..." statement — mermaid's
-// "note right of X : text" (single-line, dropped in place) and
-// "note left of X" (multi-line, opened here and closed later by a lone
-// "end note" line — see the line method). The two forms are distinguished
-// by whether the line carries a colon at all: the single-line form always
-// does (it is the note text's own separator), the multi-line opener never
-// does (its text follows on later lines instead). Reports false for any line
-// that is not a note statement at all, so callers can fall through to the
-// rest of the dispatch.
+// openMultilineNote opens a multi-line note block when text is mermaid's
+// "note left of X" / "note right of X" opener with no inline text, so every
+// following line is suppressed until "end note" closes it — see the line
+// method. The single-line form, "note right of X : text", carries its text
+// after a colon on the same line and opens nothing: it was already dropped by
+// the caller, which is the only thing that has to happen to it.
 //
-// "note" is matched as a whole word (mermaidKeywordPrefix), and opening a
-// multi-line note additionally requires the full "left of"/"right of" shape.
-// Both guards exist for the same reason: a state named "notes" in a plain
-// transition ("notes --> done") starts with the four letters "note", and a
-// bare-prefix match would open a note block that nothing ever closes,
-// discarding every remaining line of the diagram instead of drawing it.
-//
-// Neither guard can help with a state named EXACTLY "note", since "note"
-// and "note ..." are the same text either way. That case is handled by
-// dispatch order instead: statement parses the line as a transition first,
-// so a transition line never reaches this function at all — "note --> Done"
-// is recorded as an edge and returns long before any note handling. Keep
-// this function below the transition parse if statement is ever reordered.
-func (s *stateTranspiler) startNoteIfAny(text string) bool {
-	if !mermaidKeywordPrefix(text, "note") {
-		return false
+// The caller has ALREADY established that text is a note directive — that is
+// the whole of the directive-versus-statement decision and it is made in one
+// place (see mermaidDirectiveShape). This function must therefore not re-test
+// the "note" keyword: a state named exactly "note" never reaches here,
+// because "note --> Done" and "note : ready" are node statements by shape and
+// never classified as directives at all. Earlier rounds tested the keyword
+// HERE instead, which is how a state called "note" used to open a note block
+// nothing ever closed and swallow the entire rest of the diagram.
+func (s *stateTranspiler) openMultilineNote(text string) {
+	if _, _, hasInlineText := strings.Cut(text, ":"); hasInlineText {
+		return
 	}
-	if _, _, hasInlineText := strings.Cut(text, ":"); !hasInlineText && stateNoteOpenPattern.MatchString(text) {
+	if stateNoteOpenPattern.MatchString(text) {
 		s.inNote = true
 	}
-	return true
 }
 
 // stateStartKey and stateEndKey are the synthetic node-key PREFIXES every
@@ -1946,38 +2050,37 @@ func stateNodeKey(raw, scope string, isTarget bool) string {
 	return stateStartKey + scope
 }
 
-// stateIgnoredStatementKeywords lists stateDiagram-v2 statement keywords that
-// carry no information the flowchart-source builder needs: styling/metadata
-// directives ("classDef", "class" — applying a CSS class to a state, not a
-// classDiagram declaration — and "style"), and accessibility/title
-// directives ("accTitle", "accDescr", "title"). Checked BEFORE the generic
-// colon-description fallback (splitOnFirstColon) runs, because several of
-// these ("classDef highlight fill:red", "style Foo fill:#fff", "accTitle:
-// Lifecycle") carry a colon of their own and would otherwise misparse as an
-// "identifier : description" statement — the same hazard
-// classIgnoredStatementKeywords exists to prevent for classDiagram's own
-// version of the same directive names. A concurrency separator (a lone "--"
-// line inside a composite's parallel regions) needs no entry here at all: it
-// contains no "-->" and no ":", so it already falls through every check in
-// statement without matching any of them, and is silently dropped for free.
+// stateDirectiveKeywords lists stateDiagram-v2 statement keywords that carry
+// no information the flowchart-source builder needs. A line opening with one
+// of these in DIRECTIVE shape is dropped — see mermaidDirectiveShape, which
+// is where directive shape is defined and is the only place that decision is
+// made.
 //
-// Each entry matches as a whole word, never as a bare prefix — see
-// mermaidKeywordPrefix for why a state genuinely named "styleGuide" or
-// "titleFetch" must not be mistaken for one of these directives. "class"
-// therefore needs no trailing space to keep it apart from "classDef": the
-// word match already stops "class" from swallowing it. A state named EXACTLY
-// "class" or "style" needs more than a word match, though — that one is
-// handled by parsing transitions before this list is consulted, see
-// stateTranspiler.statement.
-var stateIgnoredStatementKeywords = []string{
-	"classDef", "class", "style", "accTitle", "accDescr", "title",
-}
+// It is classDirectiveKeywords plus "class", derived rather than written out
+// again so the two lists cannot drift apart. "class" is the one real
+// difference between the grammars: in stateDiagram-v2 it APPLIES a CSS class
+// to a state ("class Draft highlight"), while in classDiagram it DECLARES a
+// class, which is why classDirectiveKeywords leaves it out and
+// classDeclFromStatement claims it instead. Every other keyword is a
+// directive in both grammars, or is not valid syntax in one of them and is
+// dropped there harmlessly.
+//
+// A state can legitimately be named after any of these words: "note --> Done"
+// is a transition out of a state called "note", and "style : enabled" is that
+// state's description. Both survive, because neither has directive shape.
+// Longer names that merely START with a keyword ("styleGuide", "titleFetch",
+// "style-review") never match the keyword at all — see mermaidKeywordRest.
+//
+// A concurrency separator (a lone "--" line inside a composite's parallel
+// regions) needs no entry here: it contains no "-->" and no ":", so it falls
+// through every check in statement and is silently dropped for free.
+var stateDirectiveKeywords = append([]string{"class"}, classDirectiveKeywords...)
 
-// stateIgnoredStatement reports whether text is one of the stateDiagram-v2
-// statement kinds this patch deliberately drops rather than transpiles — see
-// stateIgnoredStatementKeywords.
-func stateIgnoredStatement(text string) bool {
-	return mermaidHasAnyKeyword(text, stateIgnoredStatementKeywords)
+// stateDirective returns the stateDiagram-v2 directive keyword text is a
+// directive for, or "" when text is not a directive — the stateDiagram
+// binding of the shared discriminator (see mermaidDirective).
+func stateDirective(text string) string {
+	return mermaidDirective(text, stateDirectiveKeywords)
 }
 
 // stateTransitionPattern matches a stateDiagram-v2 transition: group 1 the
@@ -2057,12 +2160,17 @@ func parseStateDecl(rest string) (key, title, annotation string) {
 // statement OR block-header form, since scanMermaidBlocks already strips a
 // block header's trailing "{" before either stateTranspiler.statement or
 // stateTranspiler.blockHeader ever sees the text, so both reach this same
-// helper with identical input (mirrors classDeclFromStatement, which does
-// the same for "class ..."). ok is false when text does not start with
-// "state " at all, or parseStateDecl could not extract a usable key.
+// helper with identical input. ok is false when text does not open with the
+// "state" keyword, when what follows it is a node statement rather than a
+// declaration, or when parseStateDecl could not extract a usable key.
+//
+// The shape test is the same one classDeclFromStatement applies to "class"
+// (mermaidDeclarationShape), for the same reason: a state named "state"
+// writes "state : ready", and without the test that produced a state keyed
+// ": ready" instead.
 func stateDeclFromStatement(text string) (key, title, annotation string, ok bool) {
-	rest, isState := strings.CutPrefix(text, "state ")
-	if !isState {
+	rest, isState := mermaidKeywordRest(text, "state")
+	if !isState || !mermaidDeclarationShape(rest) {
 		return "", "", "", false
 	}
 	key, title, annotation = parseStateDecl(rest)
