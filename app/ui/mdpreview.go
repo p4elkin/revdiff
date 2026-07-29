@@ -55,14 +55,19 @@ func mdFencePrefix(s string) (rune, int) {
 // fence text verbatim — see renderMermaidBlock. This function never returns
 // an error and never panics.
 //
-// renderMermaidBlock now takes a pane-width parameter (see its doc comment
-// and mdpreview_transpile.go's adaptive label cap), but this function's own
-// signature is deliberately left unchanged: it is called from eleven places
-// in mdpreview_test.go, none of which care about width, and every one of
-// this function's own callers only has a mermaid fence's rendered art to
-// verify, not a real viewport to size it against. mermaidUnconstrainedWidth
-// tells the adaptive cap to skip sizing entirely and behave like every other
-// (non-transpiled) diagram type: unconstrained.
+// NOTE: this is the unconstrained-width entry point, and it has no
+// production caller. Production always renders through
+// renderMarkdownDocument -> mermaidPlaceholderDocument, which knows the real
+// pane width. This function is retained purely for the eleven pre-existing
+// tests in mdpreview_test.go that predate the transpiler and only ever check
+// a mermaid fence's rendered art, never its sizing: keeping the original
+// one-argument signature is what let renderMermaidBlock gain its paneWidth
+// parameter (see its doc comment, and mdpreview_transpile.go's adaptive
+// label cap) without touching any of them. mermaidUnconstrainedWidth tells
+// the adaptive cap to skip sizing entirely and behave like every other
+// (non-transpiled) diagram type: unconstrained. Anything that needs to
+// verify width-dependent behavior must go through renderMarkdownDocument
+// instead.
 func renderMermaidFences(lines []diff.DiffLine) string {
 	return joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
 		return renderMermaidBlock(body, openLine, closeLine, mermaidUnconstrainedWidth)

@@ -2,8 +2,11 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
 )
@@ -34,7 +37,17 @@ import (
 // mermaidLabelCap to skip the adaptive shrink entirely and always allow the
 // ceiling (mermaidLabelMaxRunes), matching how every other diagram type
 // already behaves: unconstrained, full-width rendering.
-const mermaidUnconstrainedWidth = 0
+//
+// The value is deliberately far out of band rather than 0. A real viewport
+// CAN report width 0, or even a negative width, during a degenerate layout
+// state — the viewport width is computed as `m.layout.width - treeWidth - 4`
+// (see handleFileLoaded), which goes negative on a very narrow terminal. That
+// means "no room at all", the opposite of "no limit". Picking a sentinel no
+// layout arithmetic can ever land on keeps the two apart: any real width,
+// including 0 and negatives, falls through to the adaptive formula, which
+// clamps it up to mermaidLabelMinRunes. A small negative like -1 would not be
+// safe here, since the layout can produce exactly that.
+const mermaidUnconstrainedWidth = math.MinInt
 
 const (
 	// mermaidLabelMaxRunes is the ceiling on the adaptive per-line rune cap
@@ -88,6 +101,45 @@ func mermaidDiagramKind(source string) string {
 		return fields[0]
 	}
 	return ""
+}
+
+// mermaidStripFrontmatter removes a leading YAML frontmatter block — the
+// `---` / keys / `---` header mermaid allows above a diagram's own type
+// keyword — and returns the diagram source that follows it. A source with no
+// frontmatter, or one whose opening `---` is never closed, is returned
+// completely unchanged.
+//
+// Two separate things break without this. mermaidDiagramKind would report
+// "---" as the diagram kind, so transpileMermaid's switch would never reach
+// the classDiagram/stateDiagram case at all and the whole fence would fall
+// back verbatim. And even if the kind were detected some other way, the
+// frontmatter's own "key: value" lines would reach the transpilers' generic
+// colon-form fallback and manufacture bogus nodes named after YAML keys.
+// Stripping once, at the top of transpileMermaid, closes both.
+func mermaidStripFrontmatter(source string) string {
+	lines := strings.Split(source, "\n")
+
+	open := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "%%") {
+			continue
+		}
+		if trimmed == "---" {
+			open = i
+		}
+		break // the first substantive line decides; nothing below it can open frontmatter
+	}
+	if open == -1 {
+		return source
+	}
+
+	for i := open + 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			return strings.Join(lines[i+1:], "\n")
+		}
+	}
+	return source // unterminated: not really frontmatter, leave the source alone
 }
 
 // mermaidStripComment removes a %% comment from a single source line: a line
@@ -236,14 +288,7 @@ func mermaidEdgeLabel(raw string, capRunes int) string {
 
 	s = mermaidSafeText(s)
 
-	// Cut at the first '(' or '{': the real corpus puts the trigger word
-	// first and the explanation in a parenthetical. A label that STARTS
-	// with one (idx == 0) falls back to plain truncation instead of being
-	// cut to nothing — cutting at index 0 would discard real content for
-	// no gain.
-	if idx := strings.IndexAny(s, "({"); idx > 0 {
-		s = strings.TrimSpace(s[:idx])
-	}
+	s = mermaidCutParenthetical(s)
 
 	// Every remaining space becomes a middle dot: the arrow is drawn
 	// through the label's own row, so it bleeds through any space at its
@@ -256,6 +301,24 @@ func mermaidEdgeLabel(raw string, capRunes int) string {
 	s = mermaidDotRun.ReplaceAllString(s, "·")
 
 	return mermaidTruncateRunesAndBytes(s, capRunes)
+}
+
+// mermaidCutParenthetical cuts s at the first '(' or '{': the real corpus
+// puts the trigger word first and the explanation in a parenthetical. A
+// string that STARTS with one (idx == 0) is returned unchanged instead of
+// being cut to nothing — cutting at index 0 would discard real content for
+// no gain, and the caller's own truncation still bounds the width.
+//
+// Two callers share this rule. mermaidEdgeLabel applies it to a whole edge
+// label. classJoinLabelParts applies it to a relation's WORD alone, before
+// the cardinality suffix is appended — otherwise a parenthetical inside an
+// explicit "  : label" override would cut the suffix away with it, losing
+// the cardinality the plan says an explicit label never replaces.
+func mermaidCutParenthetical(s string) string {
+	if idx := strings.IndexAny(s, "({"); idx > 0 {
+		return strings.TrimSpace(s[:idx])
+	}
+	return s
 }
 
 // mermaidTruncateRunesAndBytes truncates s so the result satisfies BOTH a
@@ -272,11 +335,16 @@ func mermaidTruncateRunesAndBytes(s string, capRunes int) string {
 	// The rune-capped result is still over the byte budget: shrink the
 	// ORIGINAL string rune-by-rune from the end, re-deriving the ellipsis
 	// each time via mermaidTruncate, until a candidate clears the same
-	// numeric cap in bytes too. Bounded by capRunes (at most
-	// mermaidLabelMaxRunes = 32) iterations, so the O(n) rescan per
-	// candidate is negligible.
+	// numeric cap in bytes too.
+	//
+	// The walk starts at capRunes, not at len(runes): for every n above
+	// capRunes, mermaidTruncate(runes[:n], capRunes) returns the byte-
+	// identical ellipsis form already computed as out above — which just
+	// failed the byte check — so those iterations can only repeat the same
+	// failure. Starting lower skips them and bounds the loop at capRunes (at
+	// most mermaidLabelMaxRunes = 32) iterations instead of len(runes).
 	runes := []rune(s)
-	for n := len(runes); n > 0; n-- {
+	for n := min(len(runes), capRunes); n > 0; n-- {
 		candidate := mermaidTruncate(string(runes[:n]), capRunes)
 		if len(candidate) <= capRunes {
 			return candidate
@@ -305,7 +373,10 @@ func mermaidTruncateRunesAndBytes(s string, capRunes int) string {
 //
 // paneWidth == mermaidUnconstrainedWidth skips all of the above and always
 // returns the ceiling, matching how every other (non-transpiled) diagram
-// type already renders: unconstrained.
+// type already renders: unconstrained. Only that exact sentinel is special —
+// a degenerate real width (0, or negative from a very narrow terminal) goes
+// through the formula and clamps up to mermaidLabelMinRunes, which is the
+// right answer for "no room", the opposite of "no limit".
 func mermaidLabelCap(paneWidth, k int, hasLabel bool) int {
 	if paneWidth == mermaidUnconstrainedWidth {
 		return mermaidLabelMaxRunes
@@ -502,12 +573,8 @@ func (b *flowchartBuilder) empty() bool {
 func (b *flowchartBuilder) declarationOrder() []string {
 	out := make([]string, 0, len(b.order))
 	out = append(out, b.edgeSrcOrder...)
-	inSrc := make(map[string]bool, len(b.edgeSrcOrder))
-	for _, k := range b.edgeSrcOrder {
-		inSrc[k] = true
-	}
 	for _, k := range b.order {
-		if !inSrc[k] {
+		if !b.seenAsSrc[k] {
 			out = append(out, k)
 		}
 	}
@@ -694,23 +761,48 @@ func scanMermaidBlocks(source string, h mermaidBlockHandler) {
 	}
 }
 
-// mermaidHasAnyPrefix reports whether text starts with any of prefixes. This
-// is the shared prefix-matching loop behind both classIgnoredStatement and
-// stateIgnoredStatement: the two diagram types drop a different set of
-// statement keywords, but the matching logic itself — try each prefix,
-// report true on the first hit — is identical, so it lives here once rather
-// than as two near-duplicate loops (see this file's package doc comment on
-// why the two transpilers must not duplicate their shared plumbing).
-func mermaidHasAnyPrefix(text string, prefixes []string) bool {
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(text, prefix) {
+// mermaidKeywordPrefix reports whether text opens with keyword as a WHOLE
+// word: either text is exactly keyword, or the character right after it is
+// not a letter, digit or underscore.
+//
+// A plain strings.HasPrefix is wrong here, and not harmlessly so. Diagram
+// authors name states and classes after ordinary words, and several of those
+// names begin with a keyword this patch drops — "notes", "styleGuide",
+// "titleFetch", "directionUp", "linkTarget". Matched as bare prefixes, every
+// statement mentioning such a name is silently discarded, and for the "note"
+// keyword in particular the damage is not one line: startNoteIfAny would open
+// a multi-line note and swallow the entire rest of the diagram waiting for an
+// "end note" that never comes.
+func mermaidKeywordPrefix(text, keyword string) bool {
+	rest, ok := strings.CutPrefix(text, keyword)
+	if !ok {
+		return false
+	}
+	if rest == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(rest)
+	return r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+}
+
+// mermaidHasAnyKeyword reports whether text opens with any of keywords, each
+// matched as a whole word (see mermaidKeywordPrefix). This is the shared
+// matching loop behind both classIgnoredStatement and stateIgnoredStatement:
+// the two diagram types drop a different set of statement keywords, but the
+// matching logic itself — try each keyword, report true on the first hit — is
+// identical, so it lives here once rather than as two near-duplicate loops
+// (see this file's package doc comment on why the two transpilers must not
+// duplicate their shared plumbing).
+func mermaidHasAnyKeyword(text string, keywords []string) bool {
+	for _, keyword := range keywords {
+		if mermaidKeywordPrefix(text, keyword) {
 			return true
 		}
 	}
 	return false
 }
 
-// classIgnoredStatementPrefixes lists classDiagram statement keywords that
+// classIgnoredStatementKeywords lists classDiagram statement keywords that
 // carry no information the flowchart-source builder needs: styling/metadata
 // directives (style, cssClass, classDef), doc/interaction directives (note,
 // click, callback, link, href), and accessibility/title directives
@@ -719,7 +811,11 @@ func mermaidHasAnyPrefix(text string, prefixes []string) bool {
 // label text) would otherwise misparse as a `ClassName : member` statement
 // — see the plan's classDiagram grammar list of statements that are
 // "ignored silently, rest of the diagram still renders".
-var classIgnoredStatementPrefixes = []string{
+//
+// Each entry matches as a whole word, never as a bare prefix — see
+// mermaidKeywordPrefix for why a class genuinely named "linkTarget" or
+// "titleCase" must not be mistaken for one of these directives.
+var classIgnoredStatementKeywords = []string{
 	"note", "click", "callback", "link", "href",
 	"style", "cssClass", "classDef",
 	"accTitle", "accDescr", "title",
@@ -735,7 +831,7 @@ func classIgnoredStatement(text string) bool {
 	if strings.Contains(text, "()--") {
 		return true
 	}
-	return mermaidHasAnyPrefix(text, classIgnoredStatementPrefixes)
+	return mermaidHasAnyKeyword(text, classIgnoredStatementKeywords)
 }
 
 // classMemberSpaceParen matches the FIRST whitespace character that is
@@ -898,14 +994,37 @@ func classOperand(raw string) (key, cardinality string) {
 // one alternative could match (e.g. "<|--" and a bare "--" share a "--"
 // tail), the FIRST listed alternative that matches wins, so a shorter
 // generic pattern listed before a longer specific one would silently steal
-// the match. Because the search finds the leftmost occurrence in the whole
-// line, a cardinality like "0..1" sitting to the RIGHT of the real arrow
-// (e.g. `Task "1" --> "0..1" WorkflowRef`) is never mistaken for the
-// undirected-dashed ".." token — the real arrow occurs earlier in the
-// string and wins.
+// the match.
+//
+// The search itself finds the LEFTMOST occurrence, which is only correct
+// once quoted cardinalities are out of the way: the ".." inside a left-hand
+// range like `Customer "0..1" --> "1..*" Order` sits earlier in the line
+// than the real "-->" and would otherwise win, splitting the line into two
+// garbage operands. parseClassRelation therefore searches a masked copy of
+// the line (classMaskQuotedSegments) rather than the line itself.
 var classArrowPattern = regexp.MustCompile(
 	`<\|--|--\|>|<\|\.\.|\.\.\|>|--\*|\*--|--o|o--|-->|<--|\.\.>|<\.\.|--|\.\.`,
 )
+
+// classMaskQuotedSegments returns a copy of s with the contents of every
+// double-quoted segment (and the quotes themselves) overwritten by spaces,
+// byte for byte, so every index into the mask still addresses the same byte
+// of s. A space can never form part of a relation arrow token, so searching
+// the mask finds only arrows written outside a quoted cardinality — while
+// the caller keeps slicing the ORIGINAL string, cardinalities intact.
+func classMaskQuotedSegments(s string) string {
+	locs := classQuotedSegment.FindAllStringIndex(s, -1)
+	if len(locs) == 0 {
+		return s
+	}
+	masked := []byte(s)
+	for _, loc := range locs {
+		for i := loc[0]; i < loc[1]; i++ {
+			masked[i] = ' '
+		}
+	}
+	return string(masked)
+}
 
 // classArrowInfo is one row of classArrowTable: the word label a relation
 // arrow maps to (empty for the four association/undirected kinds, which
@@ -1003,7 +1122,14 @@ func classComposeCardinality(fromCard, toCard string) string {
 // mermaidEdgeLabel at emission time (see addEdge's doc comment), which is
 // what turns any remaining space into "·"; this function must never
 // hand-roll that substitution itself.
+//
+// The word is cut at its own parenthetical FIRST (mermaidCutParenthetical),
+// before the suffix is appended. mermaidEdgeLabel applies the very same cut
+// later, but by then the suffix is already glued to the end of the string,
+// so an explicit label like "resolve {outcome} (act without claiming)" would
+// take the cardinality down with it and emit a bare "resolve".
 func classJoinLabelParts(word, cardinalitySuffix string) string {
+	word = mermaidCutParenthetical(word)
 	switch {
 	case word == "":
 		return cardinalitySuffix
@@ -1055,7 +1181,10 @@ func classSplitTrailingLabel(text string) (body, label string, ok bool) {
 // target end" whenever a flipping relation (<|--, --*, --o, <--, <.., <|..)
 // is used — see the plan's cardinality section.
 func parseClassRelation(body string) (fromKey, toKey, word, cardinalitySuffix string, ok bool) {
-	loc := classArrowPattern.FindStringIndex(body)
+	// the arrow is located in a quote-masked copy (see classMaskQuotedSegments)
+	// so a dotted cardinality range cannot be mistaken for the ".." arrow, then
+	// every slice below is taken from the ORIGINAL body at the same indices.
+	loc := classArrowPattern.FindStringIndex(classMaskQuotedSegments(body))
 	if loc == nil {
 		return "", "", "", "", false
 	}
@@ -1149,15 +1278,14 @@ func (c *classTranspiler) line(text string, depth int) {
 // or — if none of those match — a line this patch cannot parse, silently
 // omitted per the plan's Failure modes table.
 func (c *classTranspiler) statement(text string) {
-	if strings.HasPrefix(text, "direction") || classIgnoredStatement(text) {
+	if mermaidKeywordPrefix(text, "direction") || classIgnoredStatement(text) {
 		return
 	}
 	if key, title, ok := classDeclFromStatement(text); ok {
 		c.b.setTitle(key, title)
 		return
 	}
-	if classArrowPattern.MatchString(text) {
-		c.statementRelation(text)
+	if c.statementRelation(text) {
 		return
 	}
 	if key, after, ok := splitOnFirstColon(text); ok && key != "" {
@@ -1165,15 +1293,23 @@ func (c *classTranspiler) statement(text string) {
 	}
 }
 
-// statementRelation parses and records one relation statement. An explicit
-// trailing "  : label" overrides the arrow table's default word — the
-// cardinality suffix is still appended either way, per the plan's rule that
-// an explicit label only replaces the word, never the cardinality.
-func (c *classTranspiler) statementRelation(text string) {
+// statementRelation parses and records one relation statement, reporting
+// whether text really was a relation. An explicit trailing "  : label"
+// overrides the arrow table's default word — the cardinality suffix is still
+// appended either way, per the plan's rule that an explicit label only
+// replaces the word, never the cardinality.
+//
+// The false return is what lets statement fall through to the colon-member
+// form. Deciding "is this a relation?" by testing classArrowPattern against
+// the whole raw line instead would misroute an ordinary member line whose
+// text happens to contain ".." or "--" ("Config : +retries 0..3") into this
+// parser, which then finds no arrow in the body ("Config") and drops the
+// member entirely.
+func (c *classTranspiler) statementRelation(text string) bool {
 	body, explicit, hasExplicit := classSplitTrailingLabel(text)
 	fromKey, toKey, word, cardinalitySuffix, ok := parseClassRelation(body)
 	if !ok {
-		return
+		return false
 	}
 	c.ensureTitle(fromKey)
 	c.ensureTitle(toKey)
@@ -1181,6 +1317,7 @@ func (c *classTranspiler) statementRelation(text string) {
 		word = explicit
 	}
 	c.b.addEdge(fromKey, toKey, classJoinLabelParts(word, cardinalitySuffix))
+	return true
 }
 
 // statementColonMember handles the "ClassName : member" top-level form —
@@ -1325,7 +1462,7 @@ func (s *stateTranspiler) line(text string, _ int) {
 // or "Draft --> InReview : submit" would be misread as an "identifier :
 // description" statement keyed on the whole "Draft --> InReview" text.
 func (s *stateTranspiler) statement(text string) {
-	if strings.HasPrefix(text, "direction") || stateIgnoredStatement(text) {
+	if mermaidKeywordPrefix(text, "direction") || stateIgnoredStatement(text) {
 		return
 	}
 	if s.startNoteIfAny(text) {
@@ -1427,6 +1564,14 @@ func (s *stateTranspiler) attributeToComposite(key string) {
 	s.b.addEdge(s.currentComposite, key, "contains")
 }
 
+// stateNoteOpenPattern matches the multi-line note opener exactly —
+// "note left of X" / "note right of X" with no inline text. Only a line of
+// this precise shape is allowed to set inNote, because that flag suppresses
+// every following line until an "end note" arrives. A "note" line of any
+// other shape is still recognized and dropped, but it drops one line, not
+// the remainder of the diagram.
+var stateNoteOpenPattern = regexp.MustCompile(`^note\s+(?:left|right)\s+of\s+\S`)
+
 // startNoteIfAny recognizes a "note ..." statement — mermaid's
 // "note right of X : text" (single-line, dropped in place) and
 // "note left of X" (multi-line, opened here and closed later by a lone
@@ -1436,11 +1581,18 @@ func (s *stateTranspiler) attributeToComposite(key string) {
 // does (its text follows on later lines instead). Reports false for any line
 // that is not a note statement at all, so callers can fall through to the
 // rest of the dispatch.
+//
+// "note" is matched as a whole word (mermaidKeywordPrefix), and opening a
+// multi-line note additionally requires the full "left of"/"right of" shape.
+// Both guards exist for the same reason: a state named "notes" in a plain
+// transition ("notes --> done") starts with the four letters "note", and a
+// bare-prefix match would open a note block that nothing ever closes,
+// discarding every remaining line of the diagram instead of drawing it.
 func (s *stateTranspiler) startNoteIfAny(text string) bool {
-	if !strings.HasPrefix(text, "note") {
+	if !mermaidKeywordPrefix(text, "note") {
 		return false
 	}
-	if _, _, hasInlineText := strings.Cut(text, ":"); !hasInlineText {
+	if _, _, hasInlineText := strings.Cut(text, ":"); !hasInlineText && stateNoteOpenPattern.MatchString(text) {
 		s.inNote = true
 	}
 	return true
@@ -1490,29 +1642,35 @@ func stateNodeKey(raw string, isTarget bool) string {
 	return stateStartKey
 }
 
-// stateIgnoredStatementPrefixes lists stateDiagram-v2 statement keywords that
+// stateIgnoredStatementKeywords lists stateDiagram-v2 statement keywords that
 // carry no information the flowchart-source builder needs: styling/metadata
-// directives ("classDef", "class " — applying a CSS class to a state, not a
+// directives ("classDef", "class" — applying a CSS class to a state, not a
 // classDiagram declaration — and "style"), and accessibility/title
 // directives ("accTitle", "accDescr", "title"). Checked BEFORE the generic
 // colon-description fallback (splitOnFirstColon) runs, because several of
 // these ("classDef highlight fill:red", "style Foo fill:#fff", "accTitle:
 // Lifecycle") carry a colon of their own and would otherwise misparse as an
 // "identifier : description" statement — the same hazard
-// classIgnoredStatementPrefixes exists to prevent for classDiagram's own
+// classIgnoredStatementKeywords exists to prevent for classDiagram's own
 // version of the same directive names. A concurrency separator (a lone "--"
 // line inside a composite's parallel regions) needs no entry here at all: it
 // contains no "-->" and no ":", so it already falls through every check in
 // statement without matching any of them, and is silently dropped for free.
-var stateIgnoredStatementPrefixes = []string{
-	"classDef", "class ", "style", "accTitle", "accDescr", "title",
+//
+// Each entry matches as a whole word, never as a bare prefix — see
+// mermaidKeywordPrefix for why a state genuinely named "styleGuide" or
+// "titleFetch" must not be mistaken for one of these directives. "class"
+// therefore needs no trailing space to keep it apart from "classDef": the
+// word match already stops "class" from swallowing it.
+var stateIgnoredStatementKeywords = []string{
+	"classDef", "class", "style", "accTitle", "accDescr", "title",
 }
 
 // stateIgnoredStatement reports whether text is one of the stateDiagram-v2
 // statement kinds this patch deliberately drops rather than transpiles — see
-// stateIgnoredStatementPrefixes.
+// stateIgnoredStatementKeywords.
 func stateIgnoredStatement(text string) bool {
-	return mermaidHasAnyPrefix(text, stateIgnoredStatementPrefixes)
+	return mermaidHasAnyKeyword(text, stateIgnoredStatementKeywords)
 }
 
 // stateTransitionPattern matches a stateDiagram-v2 transition: group 1 the
@@ -1613,9 +1771,17 @@ func stateDeclFromStatement(text string) (key, title, annotation string, ok bool
 // way, a builder that ends up empty (every statement was a comment or
 // something this patch ignores) falls back to "not handled" exactly like an
 // unrecognized kind — see flowchartBuilder's empty doc comment.
+//
+// A leading YAML frontmatter block is stripped first (see
+// mermaidStripFrontmatter): it would otherwise both hide the real diagram
+// kind and leak its own "key: value" lines into the transpilers as bogus
+// nodes. Stripping here, rather than in renderMermaidSource, keeps the
+// not-handled fallback path handing the completely untouched original
+// source to the vendored renderer.
 func transpileMermaid(source string, paneWidth int) (string, bool) {
+	source = mermaidStripFrontmatter(source)
 	switch mermaidDiagramKind(source) {
-	case "classDiagram":
+	case "classDiagram", "classDiagram-v2":
 		b := newFlowchartBuilder(paneWidth)
 		scanMermaidBlocks(source, newClassTranspiler(b))
 		if b.empty() {

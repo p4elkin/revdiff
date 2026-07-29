@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -1353,6 +1355,12 @@ func TestRenderMermaidSource_SequenceDiagram_ByteIdenticalToDirectRenderDiagram(
 func TestRenderMermaidSource_MalformedDiagram_WrapsUnderlyingError(t *testing.T) {
 	_, err := renderMermaidSource("this is not a valid mermaid diagram at all", 80)
 	require.Error(t, err)
+
+	// the wrapping itself is the contract, not just "an error came back":
+	// the caller (renderMermaidBlock) logs nothing and silently falls back,
+	// so the renderer's own message is the only diagnostic that survives.
+	require.ErrorContains(t, err, "render mermaid diagram:", "the error must carry this function's own context")
+	require.Error(t, errors.Unwrap(err), "the underlying renderer error must stay unwrappable, not be flattened into a string")
 }
 
 // --- Task 5: integration against the real renderer ---
@@ -1491,71 +1499,98 @@ func TestRenderMermaidSource_AdversarialSources_NeverPanic(t *testing.T) {
 	}
 }
 
-func TestRenderMermaidFences_ClassDiagram_NoLongerFallsBackVerbatim(t *testing.T) {
+// The six tests below drive the two REAL production entry points, at a real
+// pane width, rather than renderMermaidFences — which production never calls
+// and which always passes mermaidUnconstrainedWidth, so the adaptive label
+// cap that production always runs would never be exercised (see
+// renderMermaidFences's own doc comment).
+//
+// Two entry points, because the assertions want different things.
+// renderMarkdownDocument is the whole path a P keypress takes, so the two
+// "now renders" tests use it to see the art in place, surrounded by real
+// prose. The four "still falls back" tests want byte-exact fence text, which
+// glamour's own indentation would destroy, so they use
+// mermaidPlaceholderDocument and read the collected art slice directly — the
+// same values renderMarkdownDocument splices back in verbatim.
+
+// mdPreviewPaneWidth is a realistic diff-pane width for the tests below: a
+// real number, never the mermaidUnconstrainedWidth sentinel, so the adaptive
+// cap runs the way it does in production.
+const mdPreviewPaneWidth = 80
+
+func TestRenderMarkdownDocument_ClassDiagram_NoLongerFallsBackVerbatim(t *testing.T) {
 	src := "classDiagram\n    class Foo\n    class Bar\n    Foo --> Bar\n"
 	doc := "before\n```mermaid\n" + src + "```\nafter"
 
-	got := renderMermaidFences(mdLines(doc))
+	got := renderMarkdownDocument(mdLines(doc), mdPreviewPaneWidth, true)
 
 	assert.NotContains(t, got, "classDiagram", "the raw fence body must not survive once the diagram transpiles and renders")
 	assert.NotContains(t, got, "```mermaid", "the fence marker itself should be gone once rendered")
 	assert.Contains(t, got, "│", "box art must appear in place of the fence")
+	assert.Contains(t, got, "Foo")
+	assert.Contains(t, got, "Bar")
 	assert.Contains(t, got, "before")
 	assert.Contains(t, got, "after")
 }
 
-func TestRenderMermaidFences_StateDiagram_NoLongerFallsBackVerbatim(t *testing.T) {
+func TestRenderMarkdownDocument_StateDiagram_NoLongerFallsBackVerbatim(t *testing.T) {
 	src := "stateDiagram-v2\n    [*] --> Draft\n    Draft --> Done : submit\n    Done --> [*]\n"
 	doc := "before\n```mermaid\n" + src + "```\nafter"
 
-	got := renderMermaidFences(mdLines(doc))
+	got := renderMarkdownDocument(mdLines(doc), mdPreviewPaneWidth, true)
 
 	assert.NotContains(t, got, "stateDiagram", "the raw fence body must not survive once the diagram transpiles and renders")
 	assert.NotContains(t, got, "```mermaid", "the fence marker itself should be gone once rendered")
 	assert.Contains(t, got, "│", "box art must appear in place of the fence")
+	assert.Contains(t, got, "(start)")
+	assert.Contains(t, got, "(end)")
 	assert.Contains(t, got, "before")
 	assert.Contains(t, got, "after")
 }
 
-func TestRenderMermaidFences_ErDiagram_StillFallsBackVerbatim(t *testing.T) {
+// mdPreviewFenceArt renders doc through the production placeholder path at a
+// real pane width and returns the single collected diagram art — the exact
+// bytes renderMarkdownDocument splices back into the rendered page.
+func mdPreviewFenceArt(t *testing.T, doc string) string {
+	t.Helper()
+	_, arts := mermaidPlaceholderDocument(mdLines(doc), "testnonce", mdPreviewPaneWidth)
+	require.Len(t, arts, 1, "the document must contain exactly one mermaid fence")
+	return arts[0]
+}
+
+func TestMermaidPlaceholderDocument_ErDiagram_StillFallsBackVerbatim(t *testing.T) {
 	// pins the deliberate scope decision: this patch covers classDiagram and
 	// stateDiagram-v2 only (see the plan's Overview) — erDiagram is
 	// unaffected and must still take the pre-existing fallback path.
 	src := "erDiagram\n    CUSTOMER ||--o{ ORDER : places\n"
 	doc := "```mermaid\n" + src + "```"
 
-	got := renderMermaidFences(mdLines(doc))
-
-	assert.Equal(t, doc+"\n", got, "erDiagram is out of this patch's scope and must still fall back verbatim")
+	assert.Equal(t, doc+"\n", mdPreviewFenceArt(t, doc), "erDiagram is out of this patch's scope and must still fall back verbatim")
 }
 
-func TestRenderMermaidFences_Gantt_StillFallsBackVerbatim(t *testing.T) {
+func TestMermaidPlaceholderDocument_Gantt_StillFallsBackVerbatim(t *testing.T) {
 	// pins the deliberate scope decision: gantt is unaffected by this patch
 	// and must still take the pre-existing fallback path.
 	src := "gantt\n    title A Gantt Diagram\n    section Section\n    A task :a1, 2024-01-01, 30d\n"
 	doc := "```mermaid\n" + src + "```"
 
-	got := renderMermaidFences(mdLines(doc))
-
-	assert.Equal(t, doc+"\n", got, "gantt is out of this patch's scope and must still fall back verbatim")
+	assert.Equal(t, doc+"\n", mdPreviewFenceArt(t, doc), "gantt is out of this patch's scope and must still fall back verbatim")
 }
 
-func TestRenderMermaidFences_QuadrantChart_StillFallsBackVerbatim(t *testing.T) {
+func TestMermaidPlaceholderDocument_QuadrantChart_StillFallsBackVerbatim(t *testing.T) {
 	// pins the deliberate scope decision: quadrantChart is the third kind the
 	// plan's Overview names as out of scope (alongside erDiagram and gantt
 	// above) and must still take the pre-existing fallback path. Before this
 	// test, quadrantChart was only ever exercised at the mermaidDiagramKind
 	// extraction level (TestMermaidDiagramKind_Table) — never through the
-	// full renderMermaidFences pipeline.
+	// full render pipeline.
 	src := "quadrantChart\n    title Reach and engagement\n"
 	doc := "```mermaid\n" + src + "```"
 
-	got := renderMermaidFences(mdLines(doc))
-
-	assert.Equal(t, doc+"\n", got, "quadrantChart is out of this patch's scope and must still fall back verbatim")
+	assert.Equal(t, doc+"\n", mdPreviewFenceArt(t, doc), "quadrantChart is out of this patch's scope and must still fall back verbatim")
 }
 
-func TestRenderMermaidFences_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim(t *testing.T) {
+func TestMermaidPlaceholderDocument_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim(t *testing.T) {
 	// Full pipeline for the Failure modes table's "recognized kind, builder
 	// empty" row (see TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled
 	// for the transpileMermaid-level pin): a classDiagram fence with nothing
@@ -1565,9 +1600,8 @@ func TestRenderMermaidFences_ClassDiagram_AllStatementsIgnored_FallsBackVerbatim
 	src := "classDiagram\n    %% just a comment\n"
 	doc := "```mermaid\n" + src + "```"
 
-	got := renderMermaidFences(mdLines(doc))
-
-	assert.Equal(t, doc+"\n", got, "a classDiagram fence the builder never populates must fall back verbatim, not error or panic")
+	assert.Equal(t, doc+"\n", mdPreviewFenceArt(t, doc),
+		"a classDiagram fence the builder never populates must fall back verbatim, not error or panic")
 }
 
 func TestRenderMermaidSource_ManyMemberClass_RendersWithinFortyCells(t *testing.T) {
@@ -1653,4 +1687,386 @@ func TestRenderMarkdownDocument_ClassDiagramArtSurvivesGlamourWithoutReflow(t *t
 		"the diagram must reach the output byte-exact: unwrapped, unreflowed, untruncated")
 	assert.Contains(t, stripped, "before")
 	assert.Contains(t, stripped, "after")
+}
+
+// --- Review fixes: parsing hazards found after Task 6 ---
+
+func TestParseClassRelation_QuotedCardinalityRangeOnLeftOperand_ArrowStillWins(t *testing.T) {
+	// A dotted range on the LEFT operand puts a literal ".." earlier in the
+	// line than the real arrow. Searched unmasked, the leftmost-match rule
+	// picks that ".." as the relation token and splits the line into two
+	// garbage operands ("Customer \"0" and "11..*\" Order"), losing the real
+	// relation entirely. classMaskQuotedSegments is what keeps the arrow the
+	// only thing findable.
+	tests := []struct {
+		name                       string
+		body                       string
+		wantFrom, wantTo, wantWord string
+		wantCardinality            string
+	}{
+		{"dotted range left of a directed arrow", `Customer "0..1" --> "1..*" Order`, "Customer", "Order", "", "0/1 1+"},
+		{"dotted range both sides of an undirected arrow", `Student "1..*" -- "1..*" Course`, "Student", "Course", "", "1+ 1+"},
+		{"dotted range left of a flipping arrow", `Order "1..*" <|-- "1" Invoice`, "Invoice", "Order", classInheritanceLabel, "1 1+"},
+		{"dotted range only on the right", `Task "1" --> "0..1" WorkflowRef`, "Task", "WorkflowRef", "", "1 0/1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			from, to, word, cardinality, ok := parseClassRelation(tc.body)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantFrom, from)
+			assert.Equal(t, tc.wantTo, to)
+			assert.Equal(t, tc.wantWord, word)
+			assert.Equal(t, tc.wantCardinality, cardinality)
+		})
+	}
+}
+
+func TestTranspileClassDiagram_QuotedCardinalityRangeOnLeftOperand_NoGarbageNodes(t *testing.T) {
+	src := "classDiagram\n" + `    Customer "0..1" --> "1..*" Order` + "\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.Equal(t, "flowchart TD\nn0[Customer]\nn1[Order]\nn0 -->|0/1·1+| n1\n", got,
+		"exactly two real nodes, not four boxes split out of the cardinality text")
+}
+
+func TestParseClassRelation_NoArrow_NotOK(t *testing.T) {
+	// the "line carries no relation arrow at all" return path — reached in
+	// production every time classTranspiler.statement offers it an ordinary
+	// colon-member line before falling through to statementColonMember.
+	from, to, word, cardinality, ok := parseClassRelation("JustAClassName")
+	assert.False(t, ok)
+	assert.Empty(t, from)
+	assert.Empty(t, to)
+	assert.Empty(t, word)
+	assert.Empty(t, cardinality)
+}
+
+func TestClassTranspiler_ColonMemberWithDotsOrDashes_NotMisroutedToRelationParser(t *testing.T) {
+	// Member text routinely contains ".." (a range) or "--" (a dash run).
+	// Testing the arrow pattern against the WHOLE line, label included, sends
+	// these to the relation parser, which finds no arrow in the body and
+	// drops the member without a trace.
+	tests := []struct {
+		name, statement, wantKey, wantMember string
+	}{
+		{"ellipsis in member text", "Foo : +args ...", "Foo", "+args ..."},
+		{"numeric range in member text", "Config : +retries 0..3", "Config", "+retries 0..3"},
+		{"dash run in member text", "Foo : +note -- deprecated", "Foo", "+note -- deprecated"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+			newClassTranspiler(b).statement(tc.statement)
+
+			require.Equal(t, []string{tc.wantKey}, b.order)
+			assert.Equal(t, tc.wantKey, b.nodes[tc.wantKey].title)
+			assert.Equal(t, []string{tc.wantMember}, b.nodes[tc.wantKey].labelLines)
+		})
+	}
+}
+
+func TestClassTranspiler_ExplicitLabelWithParenthetical_KeepsCardinalitySuffix(t *testing.T) {
+	// the plan's rule is that an explicit "  : label" replaces the arrow
+	// table's word and nothing else — the cardinality is still appended. The
+	// parenthetical cut has to run on the word alone, before the suffix is
+	// glued on, or it takes the cardinality down with it.
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	newClassTranspiler(b).statement(`A "1" --> "n" B : resolve {outcome} (act without claiming)`)
+
+	require.Len(t, b.edges, 1)
+	assert.Equal(t, "resolve 1 n", b.edges[0].label)
+	assert.Contains(t, b.source(), "n0 -->|resolve·1·n| n1")
+}
+
+func TestClassComposeCardinality_AsymmetricSides(t *testing.T) {
+	// the plan allows a cardinality on "either end" independently, so all
+	// four combinations have to compose without a stray leading or trailing
+	// space that would later become a middle dot.
+	tests := []struct {
+		name, fromCard, toCard, want string
+	}{
+		{"both sides", "1", "0..1", "1 0/1"},
+		{"source side only", "1", "", "1"},
+		{"target side only", "", "1..*", "1+"},
+		{"neither side", "", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, classComposeCardinality(tc.fromCard, tc.toCard))
+		})
+	}
+}
+
+func TestClassTranspiler_AsymmetricCardinality_OnlyOneOperandQuoted(t *testing.T) {
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	newClassTranspiler(b).statement(`Task "1" --> WorkflowRef`)
+
+	require.Len(t, b.edges, 1)
+	assert.Equal(t, "1", b.edges[0].label, "the one quoted side survives alone, with no empty second part")
+}
+
+// --- Review fixes: keyword matching must respect word boundaries ---
+
+func TestMermaidKeywordPrefix_Table(t *testing.T) {
+	tests := []struct {
+		name, text, keyword string
+		want                bool
+	}{
+		{"exact match", "note", "note", true},
+		{"followed by space", "note left of A", "note", true},
+		{"followed by colon", "accTitle: Lifecycle", "accTitle", true},
+		{"followed by a letter", "notes --> done", "note", false},
+		{"followed by a digit", "style2 --> done", "style", false},
+		{"followed by an underscore", "note_box --> done", "note", false},
+		{"not a prefix at all", "Draft --> Done", "note", false},
+		{"longer keyword still matches its own word", "classDef hi fill:red", "classDef", true},
+		{"shorter keyword stops at the longer word", "classDef hi fill:red", "class", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, mermaidKeywordPrefix(tc.text, tc.keyword))
+		})
+	}
+}
+
+func TestStateTranspiler_StateNameStartingWithNote_DoesNotSwallowTheDiagram(t *testing.T) {
+	// the worst bare-prefix failure: "notes" starts with "note", so a
+	// prefix match opens a multi-line note block that no "end note" ever
+	// closes — and every remaining line of the diagram is discarded.
+	src := "stateDiagram-v2\n    notes --> done\n    done --> archived\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.Contains(t, got, "n0[notes]")
+	assert.Contains(t, got, "n1[done]")
+	assert.Contains(t, got, "n2[archived]", "the lines after the state named like a keyword must still render")
+}
+
+func TestStateTranspiler_NoteWithoutLeftOrRightOf_DropsOnlyThatLine(t *testing.T) {
+	// a "note" statement in a shape this patch does not recognize is still
+	// dropped, but it must not open a note block: only the exact
+	// "note left/right of X" opener may suppress following lines.
+	src := "stateDiagram-v2\n    note something odd\n    Draft --> Done\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.NotContains(t, got, "something odd")
+	assert.Contains(t, got, "n0[Draft]")
+	assert.Contains(t, got, "n1[Done]", "the line after an unrecognized note statement must still render")
+}
+
+func TestStateTranspiler_StateNamesStartingWithIgnoredKeywords_NotDropped(t *testing.T) {
+	tests := []struct{ name, src, wantNode string }{
+		{"style prefix", "stateDiagram-v2\n    styleGuide --> Done\n", "styleGuide"},
+		{"title prefix", "stateDiagram-v2\n    titleFetch --> Done\n", "titleFetch"},
+		{"direction prefix", "stateDiagram-v2\n    directionUp --> Done\n", "directionUp"},
+		{"class prefix", "stateDiagram-v2\n    classroom --> Done\n", "classroom"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := transpileMermaid(tc.src, mermaidUnconstrainedWidth)
+			require.True(t, ok)
+			assert.Contains(t, got, "n0["+tc.wantNode+"]")
+			assert.Contains(t, got, "n1[Done]")
+		})
+	}
+}
+
+func TestClassTranspiler_ClassNamesStartingWithIgnoredKeywords_NotDropped(t *testing.T) {
+	tests := []struct{ name, src, wantNode string }{
+		{"note prefix", "classDiagram\n    notes --> Done\n", "notes"},
+		{"link prefix", "classDiagram\n    linker --> Done\n", "linker"},
+		{"style prefix", "classDiagram\n    styleGuide --> Done\n", "styleGuide"},
+		{"title prefix", "classDiagram\n    titleCase --> Done\n", "titleCase"},
+		{"href prefix", "classDiagram\n    hrefBox --> Done\n", "hrefBox"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := transpileMermaid(tc.src, mermaidUnconstrainedWidth)
+			require.True(t, ok)
+			assert.Contains(t, got, "n0["+tc.wantNode+"]")
+			assert.Contains(t, got, "n1[Done]")
+		})
+	}
+}
+
+func TestIgnoredStatements_RealDirectivesStillDropped(t *testing.T) {
+	// the word-boundary change must not weaken the directives the two
+	// ignore lists exist for in the first place.
+	classDirectives := []string{
+		"note for Foo \"text\"", "click Foo call cb()", "callback Foo cb", "link Foo \"url\"",
+		"href Foo \"url\"", "style Foo fill:#f9f", "cssClass \"Foo\" hi", "classDef hi fill:red",
+		"accTitle: A title", "accDescr: A description", "title My Diagram",
+	}
+	for _, text := range classDirectives {
+		assert.True(t, classIgnoredStatement(text), "classDiagram must still ignore %q", text)
+	}
+
+	stateDirectives := []string{
+		"classDef hi fill:red", "class Draft hi", "style Draft fill:#fff",
+		"accTitle: A title", "accDescr: A description", "title My Diagram",
+	}
+	for _, text := range stateDirectives {
+		assert.True(t, stateIgnoredStatement(text), "stateDiagram must still ignore %q", text)
+	}
+}
+
+// --- Review fixes: frontmatter, classDiagram-v2 ---
+
+func TestMermaidStripFrontmatter_Table(t *testing.T) {
+	tests := []struct{ name, source, want string }{
+		{"no frontmatter", "classDiagram\n  A --> B", "classDiagram\n  A --> B"},
+		{"frontmatter stripped", "---\ntitle: X\n---\nclassDiagram\n  A --> B", "classDiagram\n  A --> B"},
+		{"leading blank line before frontmatter", "\n---\ntitle: X\n---\nclassDiagram", "classDiagram"},
+		{"unterminated frontmatter left alone", "---\ntitle: X\nclassDiagram", "---\ntitle: X\nclassDiagram"},
+		{"a later --- is not frontmatter", "classDiagram\n---\n", "classDiagram\n---\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, mermaidStripFrontmatter(tc.source))
+		})
+	}
+}
+
+func TestTranspileMermaid_Frontmatter_StillTranspiles(t *testing.T) {
+	// without the strip, mermaidDiagramKind reports "---" and the whole
+	// diagram falls back verbatim; worse, the frontmatter's own "key: value"
+	// lines reach the colon-form fallback and become bogus nodes.
+	src := "---\ntitle: Lifecycle\nconfig:\n  theme: dark\n---\nclassDiagram\n    Foo --> Bar\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+
+	assert.Equal(t, "flowchart TD\nn0[Foo]\nn1[Bar]\nn0 --> n1\n", got,
+		"no node may be manufactured out of a frontmatter key")
+}
+
+func TestTranspileMermaid_StateDiagramWithFrontmatter_StillTranspiles(t *testing.T) {
+	src := "---\ntitle: Lifecycle\n---\nstateDiagram-v2\n    [*] --> Draft\n"
+
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.Contains(t, got, "(start)")
+	assert.Contains(t, got, "n1[Draft]")
+}
+
+func TestTranspileMermaid_ClassDiagramV2_AlsoRecognized(t *testing.T) {
+	// mermaid accepts the explicit "-v2" suffix on classDiagram exactly as it
+	// does on stateDiagram, and the switch already handles the stateDiagram
+	// pair.
+	got, ok := transpileMermaid("classDiagram-v2\n    Foo --> Bar\n", mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.Equal(t, "flowchart TD\nn0[Foo]\nn1[Bar]\nn0 --> n1\n", got)
+}
+
+// --- Review fixes: uncovered branches ---
+
+func TestMermaidLabelCap_ZeroPaneWidth_IsNotTreatedAsUnconstrained(t *testing.T) {
+	// a real viewport can report width 0 — or a negative width, since it is
+	// computed as `layout.width - treeWidth - 4` — in a degenerate layout
+	// state. That means "no room", the opposite of "no limit", so it must
+	// fall through to the adaptive formula and clamp to the floor rather than
+	// return the ceiling.
+	assert.Equal(t, mermaidLabelMinRunes, mermaidLabelCap(0, 1, false))
+	assert.Equal(t, mermaidLabelMinRunes, mermaidLabelCap(-1, 1, false))
+	assert.Equal(t, mermaidLabelMinRunes, mermaidLabelCap(-40, 3, true))
+	assert.Equal(t, mermaidLabelMaxRunes, mermaidLabelCap(mermaidUnconstrainedWidth, 1, false))
+	assert.Equal(t, math.MinInt, mermaidUnconstrainedWidth, "the sentinel must be out of every layout's reach")
+}
+
+func TestMermaidTruncate_CapAtOrBelowEllipsisLength_NoEllipsis(t *testing.T) {
+	// with no room for "..." the ellipsis itself would be the entire result,
+	// so the truncation degrades to a plain rune slice.
+	assert.Equal(t, "abc", mermaidTruncate("abcdefgh", 3))
+	assert.Equal(t, "a", mermaidTruncate("abcdefgh", 1))
+	assert.Empty(t, mermaidTruncate("abcdefgh", 0))
+	assert.Empty(t, mermaidTruncate("abcdefgh", -1), "a negative cap must not panic on the slice")
+}
+
+func TestFlowchartNode_RenderLabelLines_NoStereotypeTitleOrMembers_FallsBackToSyntheticID(t *testing.T) {
+	// a node introduced with nothing on it at all would otherwise emit
+	// "n0[]", which the vendored parser accepts and draws as an empty box.
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	b.node("Ghost")
+
+	assert.Equal(t, []string{"n0"}, b.nodes["Ghost"].renderLabelLines(mermaidLabelMaxRunes))
+	assert.Equal(t, "flowchart TD\nn0[n0]\n", b.source(), "never an empty label between the brackets")
+}
+
+func TestFlowchartBuilder_WidestLevel_CycleFallsBackToOneFlatLevel(t *testing.T) {
+	// levels() documents its cycle handling as approximate. This pins what
+	// that approximation actually is, since it feeds the width cap directly:
+	// with every node in the cycle also an edge target, there is no root to
+	// relax from, so the level map stays empty and every node reads as
+	// level 0 — k ends up equal to the node count. That is the conservative
+	// direction (a tighter cap, never a wider diagram), and it terminates.
+	twoNodeCycle := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	twoNodeCycle.addEdge("A", "B", "")
+	twoNodeCycle.addEdge("B", "A", "")
+	assert.Empty(t, twoNodeCycle.levels(), "a pure cycle has no root to assign a level from")
+	assert.Equal(t, 2, twoNodeCycle.widestLevel())
+
+	threeNodeCycle := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	threeNodeCycle.addEdge("A", "B", "")
+	threeNodeCycle.addEdge("B", "C", "")
+	threeNodeCycle.addEdge("C", "A", "")
+	assert.Equal(t, 3, threeNodeCycle.widestLevel())
+
+	// a back-transition hanging off a real root still relaxes normally: the
+	// root keeps level 0 and the cycle below it is laid out in real levels.
+	withRoot := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	withRoot.addEdge("Start", "A", "")
+	withRoot.addEdge("A", "B", "")
+	withRoot.addEdge("B", "A", "")
+	assert.Equal(t, 1, withRoot.widestLevel(), "one node per level when the cycle hangs off a single root")
+}
+
+func TestStateTranspiler_BlockHeaderNotAStateDeclaration_IsTransparent(t *testing.T) {
+	// scanMermaidBlocks is shared plumbing, so blockHeader must tolerate a
+	// "{" header that is not a "state ..." declaration: it reports false, the
+	// block adds no nesting, and nothing inside it is attributed to a
+	// composite that was never opened.
+	b := newFlowchartBuilder(mermaidUnconstrainedWidth)
+	s := newStateTranspiler(b)
+
+	assert.False(t, s.blockHeader("Foo", 0), "an unrecognized header must be transparent")
+	assert.Empty(t, s.currentComposite, "no composite may be opened by an unrecognized header")
+
+	scanMermaidBlocks("stateDiagram-v2\n    Foo {\n        A --> B\n    }\n", newStateTranspiler(b))
+	for _, e := range b.edges {
+		assert.NotEqual(t, "contains", e.label, "a transparent block must not produce containment edges")
+	}
+}
+
+func TestRenderMermaidSource_ThreeParallelEdges_RendererKeepsOneLabelPerColumn(t *testing.T) {
+	// the plan's Failure-modes table says three edges between the same pair
+	// render with one of the labels dropped — the vendored renderer has only
+	// so many label columns between two boxes. Pinning it here so a renderer
+	// upgrade that changes the behavior is noticed rather than silently
+	// altering how real diagrams read.
+	src := "classDiagram\n    class Foo\n    class Bar\n" +
+		"    Foo --> Bar : one\n    Foo --> Bar : two\n    Foo --> Bar : three\n"
+
+	transpiled, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	for _, label := range []string{"one", "two", "three"} {
+		assert.Contains(t, transpiled, "|"+label+"|", "all three edges must reach the renderer")
+	}
+
+	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+	assert.Contains(t, got, "Foo")
+	assert.Contains(t, got, "Bar")
+
+	kept := 0
+	for _, label := range []string{"one", "two", "three"} {
+		if strings.Contains(got, label) {
+			kept++
+		}
+	}
+	assert.Equal(t, 2, kept, "the renderer draws two of the three parallel edge labels and drops the third")
 }

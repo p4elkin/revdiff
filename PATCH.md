@@ -1,8 +1,19 @@
 # PATCH.md — Markdown Preview Mode (local patch)
 
 This is a personal patch on a local clone of `umputun/revdiff`, not an upstream contribution
-(see `docs/plans/20260722-markdown-preview-mode.md` for why). This file is the rebase playbook:
-what the patch touches, and how to carry it onto a new upstream release.
+(see `docs/plans/completed/20260722-markdown-preview-mode.md` for why). This file is the rebase
+playbook: what the patch touches, and how to carry it onto a new upstream release.
+
+Because the patch never goes upstream, it deliberately leaves every upstream-facing document
+alone: `README.md`, `site/index.html`, `site/docs.html`, and the plugin reference docs under
+`.claude-plugin/` and `plugins/` are all untouched. So the `P` key (`toggle_preview`) and the `▤`
+status-bar icon appear in neither the README keybindings table, nor the status-icon table, nor
+`site/docs.html`, nor any plugin `config.md`/`usage.md`. That is on purpose, not an oversight —
+those files describe the released `revdiff` binary that users install from brew, which has no
+preview mode. Editing them would put the fork's own features into documents shipped to people
+running a build without them, and would add a conflict site to every future rebase. The `P`
+binding is discoverable at runtime through the in-app help overlay (`?`) and `--dump-keys`,
+both of which read the real keymap and so list it automatically in this build.
 
 ## Base
 
@@ -123,7 +134,11 @@ previewing — same root cause as Task 5, caught at three more sites):**
     straight through to `renderMermaidBlock` at line 270
   - `renderMermaidFences` (line 66) deliberately keeps its original one-argument signature: it
     passes the `mermaidUnconstrainedWidth` sentinel internally, so its eleven existing callers in
-    `mdpreview_test.go` needed no change
+    `mdpreview_test.go` needed no change. It has **no production caller** — production always
+    reaches the renderer through `renderMarkdownDocument` → `mermaidPlaceholderDocument`, which
+    knows the real pane width. Treat it as a test-only entry point: anything that verifies
+    width-dependent behavior must go through `renderMarkdownDocument` instead, or it will run at
+    the unconstrained sentinel and never exercise the adaptive cap production always uses
 
   Both edited lines live inside `app/ui/mdpreview.go`, which is itself one of the patch's own new
   files (listed above) rather than an upstream one, so none of this carries rebase conflict risk
@@ -198,8 +213,41 @@ Together these two grew the vendor tree from 31 modules / ~19M (baseline, before
 71 modules / ~51M (after Task 3). Most of that growth is `mermaid-ascii`'s `cmd` package, which
 pulls in gin, cobra, and logrus as transitive dependencies of a library this patch only calls for
 one function (`cmd.RenderDiagram`) — see the plan's Technical Details section for why that
-tradeoff was accepted. Confirm the actual counts after any rebase with `du -sh vendor/`; they will
-drift as upstream's own dependencies change.
+tradeoff was accepted, and "Dependency cost" below for what it actually measures. Confirm the
+actual counts after any rebase with `du -sh vendor/`; they will drift as upstream's own
+dependencies change.
+
+### Dependency cost (measured, accepted for now)
+
+The patch imports `github.com/AlexanderGrooff/mermaid-ascii/cmd` for exactly one symbol,
+`RenderDiagram` (one call site, `renderMermaidSource` in `app/ui/mdpreview_transpile.go`). That
+package also contains `web.go`, which implements an HTTP server for the upstream tool's own web
+mode. Go links a package as a whole, so importing `cmd` at all drags in everything `web.go` needs,
+even though nothing in revdiff can ever reach it.
+
+Measured on the `md-preview` branch (2026-07-29, `go build ./app`, no `-s -w`):
+
+| | before the patch (`master`) | after |
+| --- | --- | --- |
+| binary | 12 MB | 28 MB |
+| vendor tree | 19 MB | 51 MB |
+| vendored files added | — | 1609 files, ~693k lines |
+
+`vendor/github.com/AlexanderGrooff/mermaid-ascii/cmd/web.go` is the **sole** importer of the whole
+web stack: gin-gonic/gin, bytedance/sonic (a JIT with hand-written assembly), cloudwego/iasm and
+base64x, google.golang.org/protobuf, go-playground/validator, bluemonday, gorilla/css,
+golang.org/x/net and golang.org/x/crypto. Those directories alone account for ~21 MB of the 32 MB
+vendor growth, and `go tool nm` finds 632 gin/sonic symbols linked into the built binary. `web.go`
+also calls `os/exec` to run `git describe`, so a terminal diff viewer now compiles in an HTTP
+server and a subprocess call it never invokes.
+
+Nothing here is a correctness or security problem in normal use — the code is unreachable, no
+listener is ever started. It is a size and supply-surface cost. It is recorded rather than fixed
+because the fix is a change to the vendored dependency itself (a build tag on `web.go`, a trimmed
+vendor copy, or a patched fork exposing the renderer without the `cmd` package), which needs its
+own plan: it changes what `go mod vendor` regenerates, so it has to survive every future
+`go mod tidy && go mod vendor` in the rebase procedure below. Until then, treat the 28 MB binary
+as expected.
 
 **After every rebase, re-run `go mod tidy && go mod vendor`.** `go mod tidy` prunes an unused
 module requirement, so if the rebase's conflict resolution temporarily drops the only import of

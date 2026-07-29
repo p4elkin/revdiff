@@ -556,6 +556,14 @@ func (m Model) handleFileLoaded(msg fileLoadedMsg) (tea.Model, tea.Cmd) {
 	// narrower thing — it is nil when that markdown file has no headings — so it
 	// cannot double as the preview gate (see toggleMarkdownPreview).
 	m.file.markdownPreviewable = m.file.singleFile && m.isMarkdownFile(msg.file) && m.file.singleColLineNum
+	if !m.file.markdownPreviewable {
+		// preview mode cannot survive into a file it is not allowed to render:
+		// renderDiff would fall back to the ordinary diff while dispatchAction
+		// still blocked almost every key. Enforced here, where the flag is
+		// computed, rather than relying on every reload path being unreachable
+		// from preview mode.
+		m.modes.mdPreview = false
+	}
 	m.file.mdTOC = nil
 	if m.file.markdownPreviewable {
 		m.file.mdTOC = m.parseTOC(msg.lines, msg.file)
