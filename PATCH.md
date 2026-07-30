@@ -87,9 +87,13 @@ edits beyond Task 4's file list, see the plan's Task 5 section for why):**
 - `app/ui/model.go`
   - line 1038: `if m.modes.vimMotion && !m.modes.mdPreview {` — one-token change to the guard
     that decides whether to run `interceptVimMotion`
-  - line 1072: `dispatchAction` guard (`if m.modes.mdPreview && !mdPreviewActionAllowed(action)
-    { return m, nil }`) — `dispatchAction` was split into a thin wrapper plus
-    `dispatchResolvedAction` here to keep `gocyclo` under the lint ceiling; a rebase that
+  - line 1072: `dispatchAction` guard — now `if m.modes.mdPreview { if model, handled :=
+    m.handleMdPreviewAction(action); handled { return model, nil } }`. It was originally the
+    flatter `if m.modes.mdPreview && !mdPreviewActionAllowed(action) { return m, nil }`; the
+    horizontal-panning work (below) needed preview to *serve* two actions rather than only
+    block them, and the whole decision moved into `handleMdPreviewAction` in `mdpreview.go` so
+    this file keeps a single three-line hunk. `dispatchAction` was split into a thin wrapper
+    plus `dispatchResolvedAction` here to keep `gocyclo` under the lint ceiling; a rebase that
     touches the old single `dispatchAction` body must land inside `dispatchResolvedAction`
     instead
 - `app/ui/mouse.go`
@@ -151,6 +155,40 @@ previewing — same root cause as Task 5, caught at three more sites):**
   files (listed above) rather than an upstream one, so none of this carries rebase conflict risk
   against upstream. It is recorded here anyway so the call flow between `mdpreview.go` and
   `mdpreview_transpile.go` stays documented in one place, alongside every other hunk map entry.
+
+**Horizontal panning wiring (reading mermaid art that is wider than the pane — replaces the old
+"wide diagrams are clipped" limitation):**
+
+- `app/ui/mdpreview.go` — all of the new logic, in the patch's own file:
+  - `mdPreviewCutWidth` — how many columns of a preview row are visible. It is the viewport
+    width, NOT `applyHorizontalScroll`'s `diffContentWidth() - gutterExtra()`: a preview row has
+    no cursor bar, no gutters and no right padding column, so the diff basis would cut two
+    columns short on every row.
+  - `mdPreviewMaxLineWidth` / `mdPreviewMaxOffset` — the pan clamp, measured on the *rendered*
+    document. A clamp derived from `m.file.lines` would stop at the width of the mermaid fence's
+    source line (a few dozen cells) instead of the art it renders to (200+).
+  - `applyMdPreviewScroll` / `cutMdPreviewLine` — the ANSI-aware cut, reusing `ansi.Cut` and the
+    `leftScrollIndicator` / `rightScrollIndicator` glyph helpers so the visual language matches
+    the diff pane. Both indicators are drawn inside the cut width, because the viewport
+    truncates at exactly that width (the diff path can spill `»` into its own right padding).
+  - `mdPreviewLeftIndicator` / `mdPreviewRightIndicator` — plain glyphs under `--no-colors`,
+    because the shared helpers fall back to reverse video there and the preview promises a
+    zero-ANSI render.
+  - `panMarkdownPreview` — the pan itself; renders the document once and reuses that render for
+    both the clamp and the cut, so a keypress costs one glamour pass, not two.
+  - `handleMdPreviewAction` — the new preview gate called from `dispatchAction`. It wraps
+    `mdPreviewActionAllowed` and routes `scroll_left`/`scroll_right` to the pan. **The routing
+    is required, not stylistic:** `scroll_right` doubles as the focus-diff action in
+    `handleTreeAction` and `handleTOCNav` (`case keymap.ActionFocusDiff,
+    keymap.ActionScrollRight:` in `app/ui/diffnav.go`), so letting it fall through would switch
+    panes instead of panning.
+  - `mdPreviewAllowedActions` gained `ActionScrollLeft` / `ActionScrollRight`; the allowlist
+    stays the single source of truth (removing them there disables the pan).
+  - `toggleMarkdownPreview` resets `m.layout.scrollX` on both transitions — the offset is shared
+    with the diff render but means different things in the two modes. `handleFileLoaded`
+    (`loaders.go`) already reset it on file load, so no edit was needed there.
+- `app/ui/model.go` — no new hunk: the existing `dispatchAction` guard changed shape (see the
+  Task 5 entry above).
 
 **Test-only, mechanical, not part of the feature itself:**
 
@@ -257,19 +295,17 @@ theme block is read as an ordinary `%%` comment and simply ignored.
 
 These are accepted, documented gaps in the preview mode — not bugs to fix under patch discipline.
 
-- **Wide mermaid diagrams are clipped in preview; widen the terminal to see them.** A diagram
-  wider than the diff pane is cut off at the right edge and cannot be scrolled into view.
-  The preview render (`renderMarkdownDocument` / `renderMarkdownPreview` in `app/ui/mdpreview.go`)
-  produces one whole-document glamour render and hands it straight to the viewport. It does not
-  flow through `applyHorizontalScroll`, which is a per-diff-line transform used by the normal and
-  collapsed diff render paths (`renderDiffLine`, `renderCollapsedDiff`). So `scroll_left` /
-  `scroll_right` have nothing to act on here, and they are deliberately left OUT of
-  `mdPreviewAllowedActions`. Wiring real horizontal scroll in would mean applying ANSI-aware
-  per-line slicing to the entire render (including the spliced-in box-drawing art) and reworking
-  how the wide art interacts with the lipgloss pane width — a render-path change out of scope for
-  this fork. The art is intentionally never re-wrapped or truncated to fit (see the anti-reflow
-  design in `renderMarkdownDocument`'s doc comment), so the only current remedy for a clipped
-  diagram is a wider terminal.
+- ~~**Wide mermaid diagrams are clipped in preview; widen the terminal to see them.**~~ **FIXED —
+  the left/right arrows now pan the preview** (`scroll_left` / `scroll_right`, see the
+  "Horizontal panning wiring" hunk map above). The art is still never re-wrapped or truncated to
+  fit — that anti-reflow design in `renderMarkdownDocument` is unchanged — but the render is now
+  cut to a visible column window at `m.layout.scrollX`, with the same `«` / `»` overflow
+  indicators the diff pane uses, so every column of a wide diagram is reachable. Measured on a
+  real 206-cell `flowchart TD` at a 120-column pane: the third subgraph starts past column 120
+  and is unreadable at offset 0, and the pan clamps at offset 86, which puts the diagram's last
+  column at the right edge. What remains true: only whole columns move, so a box straddling the
+  edge is still cut mid-glyph until you pan past it, and prose (already wrapped to the pane by
+  glamour) goes blank once you pan past its end.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
 - **Most transpiled classDiagram/stateDiagram-v2 fences are wider than an 80-column pane, and the
@@ -296,9 +332,10 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   version of this note and of the plan both claimed a `k >= 4` boundary, which the corpus
   measurement disproves.
 
-  This is the same "no horizontal panning" limitation as the item above — the preview cannot scroll
-  sideways to reveal the clipped part — so the only current remedy is a wider terminal. Horizontal
-  panning in preview mode is the real fix and needs its own plan. Two tests pin the honest
+  The overflow itself is no longer a dead end: horizontal panning (the item above) reaches the
+  clipped part, so a too-wide transpiled diagram is now readable on a narrow pane, just not in one
+  screenful. The cap is still worth keeping — fewer pan presses — but it cannot promise a fit. Two
+  tests pin the honest
   behaviour on verbatim corpus fences so the claim cannot quietly drift back:
   `TestRenderMermaidSource_RealCorpusStateDiagram_TopologicalOrderBringsArtInsidePane` (the fence
   the topological order rescued, 88 cells before and 73 now) and
@@ -338,10 +375,13 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   against an 80-column pane), so the readability is spent for nothing. There is no cheap fix. The
   only lever is the floor, and raising it is not free: at a floor of 24 runes the collisions drop
   from 7 fences to 3, but the corpus median width goes from 102 to 124 cells, the widest from 210
-  to 257, and one fence that currently fits stops fitting. A real fix means either horizontal
-  panning (so labels need not be short) or a disambiguating suffix, both of which need their own
-  plan. The truncation does at least always keep its `...` ellipsis, so a truncated label is never
-  mistaken for a complete one.
+  to 257, and one fence that currently fits stops fitting. Horizontal panning has since landed,
+  which changes the trade-off — a wider diagram is now readable, it just takes pan presses — so
+  raising the floor is a live option rather than a blocked one. It is not done here: it is a
+  separate change with its own re-measurement over the corpus. The other candidate fix, a
+  disambiguating suffix on colliding labels, still needs its own plan. The truncation does at
+  least always keep its `...` ellipsis, so a truncated label is never mistaken for a complete
+  one.
 
   A related, separate case: some collisions do not come from the width cap at all. `resolve
   {outcome}` and `resolve {outcome} (act without claiming)` both render as `resolve` because

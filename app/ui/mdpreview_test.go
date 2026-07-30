@@ -463,6 +463,8 @@ var namedKeys = map[string]tea.KeyMsg{
 	"pgup":   {Type: tea.KeyPgUp},
 	"ctrl+d": {Type: tea.KeyCtrlD},
 	"ctrl+u": {Type: tea.KeyCtrlU},
+	"left":   {Type: tea.KeyLeft},
+	"right":  {Type: tea.KeyRight},
 }
 
 // pressKey drives a single key through the full Update path, mirroring
@@ -1040,4 +1042,311 @@ func TestStatusBar_MdPreviewOn_SuppressesHunkAndLineSegments(t *testing.T) {
 	assert.Contains(t, status, "plan.md", "the filename must still show while previewing")
 	assert.Contains(t, status, "▤", "the preview mode icon must still show while previewing")
 	assert.Contains(t, status, "? help", "the help hint must still show while previewing")
+}
+
+// --- Horizontal panning in preview (scroll_left / scroll_right) ---
+//
+// Preview renders the whole document at the pane width, but mermaid art is
+// never re-wrapped to fit (see renderMarkdownDocument), so wide diagrams run
+// past the right edge. Panning is the only way to read them. These tests pin
+// the cut itself (offset, indicators, ANSI safety), the clamp (which comes
+// from the widest *rendered* row, not from diff lines), the offset resets, and
+// the two dispatch traps: scroll_right must not switch panes while previewing,
+// and the normal diff path must keep its own unclamped behavior.
+
+// mdPreviewWideDoc renders to art 99 cells wide — wider than the 80-column
+// viewport mdPreviewTestModel sets up. "alpha start node" sits at the left
+// edge and "omega far right node" at columns 76..97, so it is cut mid-word at
+// offset 0 and only fully readable once panned.
+const mdPreviewWideDoc = "# Title\n\n" +
+	"```mermaid\n" +
+	"graph LR\n" +
+	"    A[\"alpha start node\"] --> B[\"beta middle node\"]\n" +
+	"    B --> C[\"gamma later node\"]\n" +
+	"    C --> D[\"omega far right node\"]\n" +
+	"```\n\nclosing prose\n"
+
+func TestApplyMdPreviewScroll_OffsetZero_ContentThatFits_ByteIdentical(t *testing.T) {
+	// the "renders as today" guarantee: with no pan and nothing wider than the
+	// pane, the cut must be a pass-through, not a re-encoded copy.
+	m := mdPreviewTestModel(mdLines("# Title\n\nsome short prose\n"))
+	rendered := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
+	require.LessOrEqual(t, mdPreviewMaxLineWidth(rendered), m.mdPreviewCutWidth(),
+		"fixture sanity: this document must fit the pane, otherwise the test proves nothing")
+
+	assert.Equal(t, rendered, m.applyMdPreviewScroll(rendered),
+		"offset 0 on a document that fits must return the render untouched")
+}
+
+func TestApplyMdPreviewScroll_OffsetZero_RightIndicatorOnlyOnOverflowingLines(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# Title"))
+	rendered := "short line\n" + strings.Repeat("x", 200)
+
+	got := strings.Split(m.applyMdPreviewScroll(rendered), "\n")
+
+	require.Len(t, got, 2)
+	assert.Equal(t, "short line", got[0], "a row that fits must not gain an indicator")
+	assert.Equal(t, strings.Repeat("x", 78)+" »", got[1],
+		"an overflowing row must be cut to the pane width with the right indicator in the last two columns")
+	assert.Equal(t, m.mdPreviewCutWidth(), xansi.StringWidth(got[1]),
+		"the indicator must fit inside the pane, not extend past it")
+}
+
+func TestApplyMdPreviewScroll_PositiveOffset_CutsAndShowsLeftIndicator(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# Title"))
+	m.layout.scrollX = 40
+	// exactly 120 cells: at offset 40 the visible window [40,120) reaches the end
+	// of the line, so only the left indicator is due.
+	rendered := strings.Repeat("a", 40) + strings.Repeat("b", 40) + strings.Repeat("c", 40)
+
+	got := m.applyMdPreviewScroll(rendered)
+
+	assert.Equal(t, "«"+strings.Repeat("b", 39)+strings.Repeat("c", 40), got,
+		"the left indicator replaces the first visible column, the rest is the cut at the offset")
+	assert.Equal(t, m.mdPreviewCutWidth(), xansi.StringWidth(got))
+}
+
+func TestApplyMdPreviewScroll_PositiveOffset_BothIndicatorsWhenOverflowingBothWays(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# Title"))
+	m.layout.scrollX = 40
+	rendered := strings.Repeat("z", 200)
+
+	got := m.applyMdPreviewScroll(rendered)
+
+	assert.Equal(t, "«"+strings.Repeat("z", 77)+" »", got,
+		"content hidden on both sides must show both indicators inside the pane width")
+	assert.Equal(t, m.mdPreviewCutWidth(), xansi.StringWidth(got))
+}
+
+func TestApplyMdPreviewScroll_LineNarrowerThanOffset_RendersBlank(t *testing.T) {
+	// prose is already wrapped to the pane by glamour, so panning past its end
+	// is the common case, not an edge case: every prose row must go blank rather
+	// than leak a stray SGR remnant (ansi.Cut alone returns the escape sequences
+	// it walked past, e.g. "\x1b[32m\x1b[0m").
+	m := mdPreviewTestModel(mdLines("# Title"))
+	m.layout.scrollX = 40
+	rendered := "\x1b[32mtiny\x1b[0m\n" + strings.Repeat("w", 200)
+
+	got := strings.Split(m.applyMdPreviewScroll(rendered), "\n")
+
+	require.Len(t, got, 2)
+	assert.Empty(t, got[0], "a row that ends before the offset must render as an empty string")
+	assert.Equal(t, m.mdPreviewCutWidth(), xansi.StringWidth(got[1]), "fixture sanity: the wide row still renders")
+}
+
+func TestApplyMdPreviewScroll_OffsetPastWidestLine_ClampsToLastColumn(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# Title"))
+	m.layout.scrollX = 5000 // far past anything in the render
+	rendered := "head\n" + strings.Repeat("y", 100) + "TAIL"
+
+	got := strings.Split(m.applyMdPreviewScroll(rendered), "\n")
+
+	require.Len(t, got, 2)
+	assert.True(t, strings.HasSuffix(got[1], "TAIL"),
+		"an offset past the widest row must clamp so the row's last column stays visible, got %q", got[1])
+	assert.Equal(t, m.mdPreviewCutWidth(), xansi.StringWidth(got[1]))
+}
+
+func TestApplyMdPreviewScroll_StyledLine_KeepsSGRAcrossTheCut(t *testing.T) {
+	// glamour output is styled, so the cut must be ANSI-aware: a byte or rune
+	// slice would drop the opening SGR and paint the rest of the row unstyled.
+	m := mdPreviewTestModel(mdLines("# Title"))
+	m.layout.scrollX = 40
+	rendered := "\x1b[31m" + strings.Repeat("r", 200) + "\x1b[0m"
+
+	got := m.applyMdPreviewScroll(rendered)
+
+	assert.Contains(t, got, "\x1b[31m", "the active foreground must be carried across the left cut")
+	assert.Equal(t, m.mdPreviewCutWidth(), xansi.StringWidth(got),
+		"the escape sequences must not count towards the visible width")
+}
+
+func TestApplyMdPreviewScroll_NoColors_PannedRenderStaysANSIFree(t *testing.T) {
+	// --no-colors promises the preview emits zero ANSI (mdPreviewStyleNoColor +
+	// the Ascii profile). The shared indicator helpers fall back to reverse video
+	// ("\x1b[7m") in no-colors mode, which would break that promise, so the
+	// preview draws plain glyphs instead.
+	m := mdPreviewTestModel(mdLines(mdPreviewWideDoc))
+	m.cfg.noColors = true
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	m.layout.scrollX = 12
+
+	got := m.renderMarkdownPreview()
+
+	assert.NotContains(t, got, "\x1b[", "a panned no-colors preview must still emit no ANSI escape sequences")
+	assert.Contains(t, got, "«", "the left indicator must still be drawn, as a plain glyph")
+}
+
+func TestPanMarkdownPreview_ClampsAtWidestRenderedLine(t *testing.T) {
+	// the clamp must come from the rendered document, not from m.file.lines:
+	// the source line "    C --> D[...]" is ~40 cells, the art it renders to is
+	// 99. A diff-line-derived bound would stop the pan less than half way.
+	m := mdPreviewTestModel(mdLines(mdPreviewWideDoc))
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	rendered := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
+	maxOffset := mdPreviewMaxLineWidth(rendered) - m.mdPreviewCutWidth()
+	require.Positive(t, maxOffset, "fixture sanity: the art must be wider than the pane")
+
+	for range 50 { // far more steps than the clamp allows
+		m.panMarkdownPreview(1)
+	}
+
+	assert.Equal(t, maxOffset, m.layout.scrollX,
+		"panning right must stop when the widest rendered row's last column is visible")
+}
+
+func TestPanMarkdownPreview_LeftClampsAtZero(t *testing.T) {
+	m := mdPreviewTestModel(mdLines(mdPreviewWideDoc))
+	m.toggleMarkdownPreview()
+
+	m.panMarkdownPreview(1)
+	require.Equal(t, scrollStep, m.layout.scrollX, "one step right must move by exactly one scroll step")
+
+	for range 10 {
+		m.panMarkdownPreview(-1)
+	}
+
+	assert.Equal(t, 0, m.layout.scrollX, "panning left must stop at the document's left edge")
+}
+
+func TestPanMarkdownPreview_RevealsArtPastThePaneEdge(t *testing.T) {
+	// end-to-end: the point of the whole feature. The right-hand box is
+	// unreachable at offset 0 and readable once panned.
+	m := mdPreviewTestModel(mdLines(mdPreviewWideDoc))
+	m.cfg.noColors = true
+	m.toggleMarkdownPreview()
+
+	atZero := m.renderMarkdownPreview()
+	require.Contains(t, atZero, "alpha start node", "fixture sanity: the left-hand box is visible at offset 0")
+	require.NotContains(t, atZero, "omega far right node", "fixture sanity: the right-hand box must start off-pane")
+
+	for range 50 {
+		m.panMarkdownPreview(1)
+	}
+	panned := m.renderMarkdownPreview()
+
+	assert.Contains(t, panned, "omega far right node", "panning right must bring the far box into view")
+	assert.NotContains(t, panned, "alpha start node", "the left-hand box must have scrolled off the left edge")
+}
+
+func TestDispatchAction_MdPreviewOn_ArrowKeysPanWithoutTouchingCursorOrStore(t *testing.T) {
+	// scroll_left / scroll_right are allowed in preview because they move
+	// m.layout.scrollX only. This pins that claim: neither the diff cursor nor
+	// the annotation store may change.
+	m := mdPreviewTestModel(mdLines(mdPreviewWideDoc))
+	m.nav.diffCursor = 3
+	seeded := annotation.Annotation{File: "plan.md", Line: 4, Type: string(diff.ChangeContext), Comment: "existing"}
+	m.store.Add(seeded)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	right := pressKey(t, m, "right")
+	assert.Equal(t, scrollStep, right.layout.scrollX, "right must pan the preview by one scroll step")
+	assert.Equal(t, 3, right.nav.diffCursor, "panning must not move the source-line cursor")
+	require.Equal(t, 1, right.store.Count(), "panning must not touch the annotation store")
+	assert.Equal(t, seeded, right.store.Get("plan.md")[0])
+
+	left := pressKey(t, right, "left")
+	assert.Equal(t, 0, left.layout.scrollX, "left must pan back")
+	assert.Equal(t, 3, left.nav.diffCursor)
+}
+
+func TestDispatchAction_MdPreviewOn_ScrollRightDoesNotSwitchPanes(t *testing.T) {
+	// THE TRAP: scroll_right doubles as the focus-diff action in both pane
+	// handlers ("case keymap.ActionFocusDiff, keymap.ActionScrollRight:" in
+	// diffnav.go). Allowlisting it without routing it to the preview pan first
+	// would move focus (and, on the file-tree branch, kick off a file load)
+	// instead of panning.
+	m := mdPreviewTestModel(mdLines(mdPreviewWideDoc))
+	m.layout.focus = paneTree // user focused the TOC before pressing P
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	require.NotNil(t, m.file.mdTOC, "fixture sanity: the TOC pane must exist for the focus branch to be reachable")
+
+	model := pressKey(t, m, "right")
+
+	assert.Equal(t, paneTree, model.layout.focus, "scroll_right must pan the preview, never switch panes")
+	assert.Equal(t, scrollStep, model.layout.scrollX, "scroll_right must still pan while the TOC pane has focus")
+}
+
+func TestToggleMarkdownPreview_ResetsHorizontalOffset(t *testing.T) {
+	// a pan is preview-local: entering must start at the document's left edge
+	// even if the diff was scrolled right, and leaving must not carry a
+	// preview offset (clamped against rendered rows) into the diff render.
+	m := mdPreviewTestModel(mdLines(mdPreviewWideDoc))
+	m.layout.scrollX = 24 // the diff pane was panned right before P
+
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	assert.Equal(t, 0, m.layout.scrollX, "entering preview must reset the horizontal offset")
+
+	m.panMarkdownPreview(1)
+	require.Positive(t, m.layout.scrollX, "fixture sanity: pan before leaving preview")
+
+	m.toggleMarkdownPreview()
+	require.False(t, m.modes.mdPreview)
+	assert.Equal(t, 0, m.layout.scrollX, "leaving preview must reset the horizontal offset")
+}
+
+func TestHandleFileLoaded_ResetsHorizontalOffsetForPreview(t *testing.T) {
+	// handleFileLoaded already resets scrollX for the diff path; this pins that
+	// the preview inherits it, so a pan cannot survive into another file.
+	lines := mdLines(mdPreviewWideDoc)
+	m := testModel([]string{"notes.md"}, map[string][]diff.DiffLine{"notes.md": lines})
+	m.file.singleFile = true
+	m.layout.scrollX = 32
+
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "notes.md", lines: lines, seq: m.file.loadSeq})
+	model := result.(Model)
+
+	assert.Equal(t, 0, model.layout.scrollX, "loading a file must reset the horizontal offset")
+}
+
+func TestHandleHorizontalScroll_PreviewOff_StaysUnclamped(t *testing.T) {
+	// the normal diff path must behave exactly as before: its offset is not
+	// bounded by any content width (applyHorizontalScroll just cuts past the
+	// end), so the preview clamp must not leak into it.
+	lines := []diff.DiffLine{{NewNum: 1, Content: "short", ChangeType: diff.ChangeContext}}
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	m.file.name = "a.go"
+	m.file.lines = lines
+	m.layout.focus = paneDiff
+	m.layout.viewport.Width = 80
+	require.False(t, m.modes.mdPreview)
+
+	for range 10 {
+		m.handleHorizontalScroll(1)
+	}
+
+	assert.Equal(t, 10*scrollStep, m.layout.scrollX,
+		"the diff path keeps growing its offset past the content width, as it always has")
+}
+
+func TestView_MdPreviewPanned_PaneGeometryIntact(t *testing.T) {
+	// the geometry risk the cut has to respect: the » glyph must stay inside the
+	// viewport width. If a panned row were one column too wide, lipgloss would
+	// soft-wrap it inside the pane, adding rows and pushing every diff row past
+	// applyScrollbar's hardcoded first-viewport-row offset (see view.go). Assert
+	// the full frame: no line wider than the terminal, and the same number of
+	// rows as the un-panned frame.
+	m := mdPreviewTestModel(mdLines(mdPreviewWideDoc))
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	before := strings.Split(m.View(), "\n")
+
+	for range 3 {
+		m.panMarkdownPreview(1)
+	}
+	require.Positive(t, m.layout.scrollX, "fixture sanity: the art must be pannable")
+	after := strings.Split(m.View(), "\n")
+
+	assert.Len(t, after, len(before), "panning must not change the frame's row count (no soft-wrapped row)")
+	for i, line := range after {
+		assert.LessOrEqual(t, xansi.StringWidth(line), m.layout.width,
+			"row %d of the panned frame must fit the terminal width", i)
+	}
 }

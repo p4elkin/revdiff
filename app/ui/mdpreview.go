@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	glamourStyles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/x/ansi"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/umputun/revdiff/app/diff"
 	"github.com/umputun/revdiff/app/keymap"
+	"github.com/umputun/revdiff/app/ui/style"
 )
 
 // mdFencePrefix returns the fence character ('`' or '~') and the count of leading
@@ -345,12 +347,14 @@ func spliceMermaidArt(rendered, nonce string, arts []string) string {
 // or the ASCII/notty style plus the Ascii color profile when --no-colors is in
 // effect (so the preview emits no ANSI, matching the rest of the UI). The
 // mermaid art is already plain box-drawing text spliced in after glamour, so
-// it is unaffected by either path. Also NOTE (wide mermaid art): the art is
-// deliberately never re-wrapped or truncated to fit the width, and the preview
-// render path does not apply horizontal scroll (applyHorizontalScroll is a
-// per-diff-line transform that this whole-document render bypasses), so a
-// diagram wider than the pane is clipped — widen the terminal to see it. See
-// PATCH.md "Known limitations".
+// it is unaffected by either path.
+//
+// The returned render is full width — rows wider than the pane are NOT cut
+// here, deliberately: this function's whole job is to produce the document
+// once, at its natural width, so the caller can decide which columns of it to
+// show. Cutting to the visible window is applyMdPreviewScroll's job, and it
+// needs the uncut render both to compute the pan clamp (the widest row) and to
+// know which rows actually overflow.
 func renderMarkdownDocument(lines []diff.DiffLine, width int, noColors bool) string {
 	nonce := mermaidNonce()
 	doc, arts := mermaidPlaceholderDocument(lines, nonce, width)
@@ -397,11 +401,20 @@ func renderMarkdownDocument(lines []diff.DiffLine, width int, noColors bool) str
 // diff-line coordinates) is meaningless here. On the OFF transition content
 // and cursor are both back in diff-line space, so the normal
 // keep-cursor-visible scroll is correct again.
+//
+// Both transitions also reset the horizontal offset. m.layout.scrollX is
+// shared with the diff render, but the two mean different things: in the diff
+// it is an unbounded per-line cut offset, in preview it is clamped against the
+// widest rendered row (see panMarkdownPreview). Carrying one into the other
+// would either drop the reader into the middle of a document they never
+// panned, or leave the diff pane scrolled to a column that only made sense for
+// a diagram. A file load resets it too, in handleFileLoaded (loaders.go).
 func (m *Model) toggleMarkdownPreview() {
 	if !m.modes.mdPreview && !m.file.markdownPreviewable {
 		return
 	}
 	m.modes.mdPreview = !m.modes.mdPreview
+	m.layout.scrollX = 0
 	if m.modes.mdPreview {
 		m.layout.viewport.SetContent(m.renderDiff())
 		m.layout.viewport.GotoTop()
@@ -411,17 +424,247 @@ func (m *Model) toggleMarkdownPreview() {
 }
 
 // renderMarkdownPreview renders the currently loaded file as a markdown
-// preview at the current viewport width. It re-renders on every call, with no
-// cache: the render only fires on a P toggle or a viewport content refresh,
-// never per frame, so the one saved glamour+mermaid pass is not worth the
-// staleness risk of a file+width-keyed cache surviving an R reload of the same
-// file at the same width.
+// preview at the current viewport width, cut to the visible column window at
+// the current horizontal offset (see applyMdPreviewScroll). It re-renders on
+// every call, with no cache: the render only fires on a P toggle, a pan, or a
+// viewport content refresh, never per frame, so the one saved glamour+mermaid
+// pass is not worth the staleness risk of a file+width-keyed cache surviving
+// an R reload of the same file at the same width.
+//
+// A pan keypress does NOT go through here — panMarkdownPreview renders the
+// document itself, because it needs the uncut render to compute the clamp and
+// would otherwise pay for a second glamour pass to draw the same thing.
 func (m Model) renderMarkdownPreview() string {
-	// KNOWN LIMITATION: wide mermaid diagrams may be clipped in preview; widen
-	// the terminal. This whole-document render bypasses applyHorizontalScroll
-	// (a per-diff-line transform), so scroll_left/right cannot pan the art —
-	// see PATCH.md "Known limitations".
-	return renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
+	return m.applyMdPreviewScroll(renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors))
+}
+
+// mdPreviewCutWidth returns how many columns of a rendered preview row are
+// actually visible. The preview render goes straight into the diff viewport,
+// which hard-truncates every row at its own Width (the lipgloss MaxWidth in
+// viewport.View), and the diff pane style adds a border but no padding — so
+// the viewport width IS the visible column count.
+//
+// This deliberately does NOT reuse applyHorizontalScroll's basis
+// (m.diffContentWidth() - m.gutterExtra()). That width is what is left over
+// after the per-diff-line render has spent columns on the cursor bar, the
+// line-number/blame gutters and the right padding column it draws itself. A
+// preview row has none of those — it is one whole-document glamour render
+// handed to the viewport verbatim — so borrowing the diff basis would cut two
+// columns short of the pane on every single row.
+func (m Model) mdPreviewCutWidth() int {
+	return m.layout.viewport.Width
+}
+
+// mdPreviewMaxLineWidth returns the display width of the widest row in a
+// rendered preview. This is the pan clamp's basis, and it must be measured on
+// the rendered document, not on m.file.lines: the source line of a mermaid
+// fence is a few dozen characters while the art it renders to can be 200+
+// cells, so a diff-line-derived bound would stop the pan long before the
+// diagram's right edge.
+//
+// Trailing pad counts as width. glamour pads prose rows with spaces (it fills
+// the line to the wrap width, two columns short of it in practice), so a
+// document with no wide art clamps to zero and the pan keys simply do nothing
+// — which is the wanted behavior: there is nothing to pan to.
+func mdPreviewMaxLineWidth(rendered string) int {
+	widest := 0
+	for line := range strings.SplitSeq(rendered, "\n") {
+		if w := ansi.StringWidth(line); w > widest {
+			widest = w
+		}
+	}
+	return widest
+}
+
+// mdPreviewMaxOffset returns the largest horizontal offset worth showing: the
+// one that puts the widest row's last column at the right edge of the pane.
+// Zero when everything already fits.
+func mdPreviewMaxOffset(rendered string, cutWidth int) int {
+	return max(0, mdPreviewMaxLineWidth(rendered)-cutWidth)
+}
+
+// applyMdPreviewScroll cuts every row of a rendered preview to the visible
+// column window at the current horizontal offset, with «/» indicators on the
+// rows that really do continue in that direction.
+//
+// The offset is clamped here as well as in panMarkdownPreview, against the
+// render being cut. The pan handler clamps the stored offset, but the stored
+// offset can go stale without any pan: a terminal resize re-wraps the document
+// at a new width, which can make the widest row narrower. Clamping at render
+// time means a resize can never strand the reader on a blank screen.
+//
+// Rejected: reusing applyHorizontalScroll. It is built for diff rows — it
+// derives its width from the gutters (see mdPreviewCutWidth) and lets the
+// right indicator spill one column past the cut into the diff pane's right
+// padding, which a preview row does not have. It shares the indicator glyphs
+// and ansi.Cut with this function, which is what keeps the two visually
+// identical, but not the geometry.
+func (m Model) applyMdPreviewScroll(rendered string) string {
+	cutWidth := m.mdPreviewCutWidth()
+	if cutWidth <= 0 {
+		return rendered // pathologically narrow layout state: leave the render alone
+	}
+	widest := mdPreviewMaxLineWidth(rendered)
+	offset := min(max(0, m.layout.scrollX), max(0, widest-cutWidth))
+	if offset == 0 && widest <= cutWidth {
+		return rendered // nothing hidden in either direction: pass the render through untouched
+	}
+
+	lines := strings.Split(rendered, "\n")
+	for i, line := range lines {
+		lines[i] = m.cutMdPreviewLine(line, offset, cutWidth)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// cutMdPreviewLine cuts one rendered preview row to cutWidth columns starting
+// at offset, adding the overflow indicators the row has earned. Both
+// indicators are drawn INSIDE cutWidth (« replaces the first visible column,
+// " »" takes the last two), because the viewport truncates at exactly that
+// width — unlike the diff path, there is no spare padding column to spill the
+// right glyph into.
+//
+// A row that ends at or before the offset returns the empty string. Prose is
+// already wrapped to the pane by glamour, so this is the common case once the
+// reader pans right to read a diagram, not an edge case. Returning "" rather
+// than the ansi.Cut result is deliberate: cutting past the end of a styled row
+// leaves the escape sequences it walked over (e.g. "\x1b[32m\x1b[0m"), a
+// zero-width remnant whose trailing state can bleed into the padding the pane
+// adds after it.
+func (m Model) cutMdPreviewLine(line string, offset, cutWidth int) string {
+	width := ansi.StringWidth(line)
+	if width <= offset {
+		return ""
+	}
+
+	start, end := offset, offset+cutWidth
+	hasLeftOverflow := offset > 0 // guaranteed non-empty to the left, since width > offset here
+	hasRightOverflow := width > end
+	if !hasLeftOverflow && !hasRightOverflow {
+		return ansi.Cut(line, start, end)
+	}
+
+	innerStart, innerEnd := start, end
+	if hasLeftOverflow {
+		innerStart++
+	}
+	if hasRightOverflow {
+		innerEnd -= 2 // the separator space and the » glyph
+	}
+	if innerEnd <= innerStart {
+		// pane too narrow to hold the indicators plus any content: plain cut,
+		// matching applyHorizontalScroll's fallback rather than rendering a row
+		// made only of chrome.
+		return ansi.Cut(line, start, end)
+	}
+
+	var b strings.Builder
+	if hasLeftOverflow {
+		b.WriteString(m.mdPreviewLeftIndicator())
+	}
+	b.WriteString(ansi.Cut(line, innerStart, innerEnd))
+	if hasRightOverflow {
+		b.WriteString(m.mdPreviewRightIndicator())
+	}
+	return b.String()
+}
+
+// mdPreviewLeftIndicator returns the « glyph for a preview row, on the diff
+// pane background so it reads as pane chrome — a preview row has no per-line
+// diff background for it to sit on, the way an added/removed diff line does.
+//
+// In no-colors mode it is a bare glyph. The shared leftScrollIndicator falls
+// back to reverse video ("\x1b[7m") there, which is right on a colored diff
+// line but would break the promise --no-colors makes for the preview
+// specifically: zero ANSI in the output (see mdPreviewStyleNoColor). Rejected:
+// dropping the indicators entirely in no-colors mode — the reader would then
+// have no sign that the diagram continues past the edge.
+func (m Model) mdPreviewLeftIndicator() string {
+	if m.cfg.noColors {
+		return "«"
+	}
+	return m.leftScrollIndicator(m.resolver.Color(style.ColorKeyDiffPaneBg))
+}
+
+// mdPreviewRightIndicator returns the " »" separator-plus-glyph for a preview
+// row. Same background and same no-colors reasoning as mdPreviewLeftIndicator.
+func (m Model) mdPreviewRightIndicator() string {
+	if m.cfg.noColors {
+		return " »"
+	}
+	return m.rightScrollIndicator(m.resolver.Color(style.ColorKeyDiffPaneBg))
+}
+
+// panMarkdownPreview moves the preview's horizontal offset one scroll step,
+// left when direction < 0 and right otherwise, and pushes the re-cut render
+// into the viewport. Mirrors handleHorizontalScroll's shape for the diff pane.
+//
+// It renders the document itself instead of going through renderDiff so a
+// keypress costs one glamour+mermaid pass, not two: the clamp needs the
+// widest rendered row, and the same render then supplies the rows to cut.
+//
+// The stored offset is folded through the current clamp before the step is
+// applied, so an offset left over from a wider layout converges back into
+// range on the first pan instead of needing several presses to become
+// visible again.
+//
+// Refused when the file is not previewable, matching renderDiff's own double
+// gate (m.modes.mdPreview && m.file.markdownPreviewable): with preview stuck
+// on for a file the render path will not preview, panning would push a
+// preview render into a viewport that renderDiff is about to fill with a
+// normal diff.
+func (m *Model) panMarkdownPreview(direction int) {
+	if !m.file.markdownPreviewable {
+		return
+	}
+	rendered := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
+	maxOffset := mdPreviewMaxOffset(rendered, m.mdPreviewCutWidth())
+
+	offset := min(m.layout.scrollX, maxOffset)
+	if direction < 0 {
+		offset -= scrollStep
+	} else {
+		offset += scrollStep
+	}
+	m.layout.scrollX = min(max(0, offset), maxOffset)
+
+	m.layout.viewport.SetContent(m.applyMdPreviewScroll(rendered))
+}
+
+// handleMdPreviewAction is the preview-mode gate every keymap-resolved action
+// passes through, called from dispatchAction (app/ui/model.go) while
+// m.modes.mdPreview is on. The bool reports whether preview handled the
+// action: true means dispatchAction returns immediately (either the action
+// was blocked, or preview ran it here), false means the action is allowed and
+// falls through to the ordinary dispatch. There is no tea.Cmd in the return:
+// nothing preview serves itself is asynchronous — a pan is a pure state
+// change plus a viewport content swap, both done in place.
+//
+// The two pan actions are routed here rather than left to fall through, and
+// that detour is required, not stylistic: scroll_right doubles as the
+// focus-diff action in both pane handlers ("case keymap.ActionFocusDiff,
+// keymap.ActionScrollRight:" in handleTreeAction and handleTOCNav,
+// app/ui/diffnav.go). Falling through with the TOC pane focused would move
+// focus instead of panning, and on the file-tree branch would additionally
+// clear the pending jumps and call loadSelectedIfChanged — exactly the class
+// of side effect the allowlist exists to prevent. scroll_left has no such
+// double meaning; it is routed the same way for symmetry, and because the
+// diff-pane handler's handleHorizontalScroll would cut diff rows that the
+// preview render does not have.
+func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, bool) {
+	if !mdPreviewActionAllowed(action) {
+		return m, true
+	}
+	switch action {
+	case keymap.ActionScrollLeft:
+		m.panMarkdownPreview(-1)
+		return m, true
+	case keymap.ActionScrollRight:
+		m.panMarkdownPreview(1)
+		return m, true
+	default: // every other allowed action runs through the ordinary dispatch
+	}
+	return m, false
 }
 
 // mdPreviewAllowedActions is the fixed allowlist of keymap actions that stay
@@ -445,6 +688,17 @@ func (m Model) renderMarkdownPreview() string {
 //     than following the cursor — see pinDiffCursorTo's mdPreview guard in
 //     mouse.go for why that stays safe even though the same function also
 //     tries to "pin" the cursor back into view on a normal (mode-off) scroll.
+//   - scroll_left/scroll_right (left/right arrows) pan the render sideways so
+//     mermaid art wider than the pane can be read at all — the art is never
+//     re-wrapped to fit (see renderMarkdownDocument), so panning is the only
+//     way to reach it. They are safe for the same reason J/K are: the whole
+//     path is panMarkdownPreview -> renderMarkdownDocument ->
+//     applyMdPreviewScroll -> viewport.SetContent, which writes
+//     m.layout.scrollX and the viewport's content buffer and nothing else —
+//     it never reads or assigns m.nav.diffCursor and never touches m.store.
+//     Both are dispatched by handleMdPreviewAction before the ordinary pane
+//     routing can see them; see there for why scroll_right in particular must
+//     not be allowed to fall through.
 //
 // Deliberately NOT included, despite being layout/session actions with no
 // obvious annotation/cursor risk on their own: toggle_pane / focus_tree /
@@ -475,11 +729,14 @@ var mdPreviewAllowedActions = map[keymap.Action]bool{
 	keymap.ActionToggleTree:     true,
 	keymap.ActionScrollDiffDown: true,
 	keymap.ActionScrollDiffUp:   true,
+	keymap.ActionScrollLeft:     true,
+	keymap.ActionScrollRight:    true,
 	keymap.ActionDismiss:        true,
 }
 
 // mdPreviewActionAllowed reports whether action may run while markdown
-// preview is on. Called once, at the top of dispatchAction (app/ui/model.go)
+// preview is on. Called once, from handleMdPreviewAction, which is itself
+// called at the top of dispatchAction (app/ui/model.go)
 // — the single choke point every keymap-resolved action passes through,
 // whether it arrived via handleKey's direct path or handleChordSecond's
 // chord path, both of which call dispatchAction. That single call site is

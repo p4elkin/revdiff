@@ -1070,13 +1070,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // glamour, which reflows text, so a rendered row no longer maps to a source
 // line — every action that would create/edit/delete/navigate to an
 // annotation or move m.nav.diffCursor must be a no-op while previewing. See
-// mdPreviewActionAllowed (mdpreview.go) for the fixed allowlist of what stays
-// live. The guard is kept in this thin wrapper, rather than inline in
+// handleMdPreviewAction and mdPreviewActionAllowed (mdpreview.go) for the
+// fixed allowlist of what stays live and for the two pan actions preview
+// serves itself. The guard is kept in this thin wrapper, rather than inline in
 // dispatchResolvedAction's own switch, purely to keep that already-large
 // function's cyclomatic complexity (gocyclo) unchanged.
 func (m Model) dispatchAction(action keymap.Action) (tea.Model, tea.Cmd) {
-	if m.modes.mdPreview && !mdPreviewActionAllowed(action) {
-		return m, nil
+	if m.modes.mdPreview {
+		if model, handled := m.handleMdPreviewAction(action); handled {
+			return model, nil
+		}
 	}
 	return m.dispatchResolvedAction(action)
 }
