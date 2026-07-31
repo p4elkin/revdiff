@@ -1,8 +1,11 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
+	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
+	"github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -205,6 +208,148 @@ func TestSplitFlowchartSubgraphs_KeywordLookalikes(t *testing.T) {
 	require.True(t, ok, "subgraphOne and ending are node ids, not structure")
 	require.Len(t, blocks, 2)
 	assert.Equal(t, []string{"        subgraphOne --> ending"}, blocks[0].body)
+}
+
+// --- stacking ---
+
+// stackableFence is splittableFence with every label spelled differently, so a
+// test can tell one block's art from the other's. splittableFence deliberately
+// repeats the same two labels in both blocks, which is what makes it useless
+// for checking WHERE a label was drawn.
+const stackableFence = `flowchart TD
+    subgraph before["Before"]
+        B1[old read] --> B2[old write]
+    end
+    subgraph after["After"]
+        A1[new read] --> A2[new write]
+    end`
+
+func TestStackFlowchartSubgraphs_TitleRuleAndOrder(t *testing.T) {
+	header, blocks, ok := splitFlowchartSubgraphs(stackableFence)
+	require.True(t, ok)
+
+	art, ok := stackFlowchartSubgraphs(header, blocks)
+	require.True(t, ok)
+
+	// no block's own art contains a blank line, so one blank line is exactly
+	// the separator between two blocks.
+	chunks := strings.Split(strings.TrimRight(art, "\n"), "\n\n")
+	require.Len(t, chunks, 2, "the two blocks must be separated by one blank line")
+
+	want := []struct{ title, drawn, notDrawn string }{
+		{"Before", "old read", "new read"},
+		{"After", "new read", "old read"},
+	}
+	for i, tt := range want {
+		lines := strings.Split(chunks[i], "\n")
+		require.Greater(t, len(lines), 2)
+
+		assert.Equal(t, tt.title, lines[0], "blocks are stacked in source order, each under its own title")
+		assert.Equal(t, strings.Repeat(mermaidSubgraphRule, runewidth.StringWidth(tt.title)), lines[1],
+			"the rule under a title matches the title's display width")
+
+		body := strings.Join(lines[2:], "\n")
+		assert.Contains(t, body, tt.drawn, "the block's own art sits under its own title")
+		assert.NotContains(t, body, tt.notDrawn, "the other block's art must not appear here")
+	}
+}
+
+func TestStackFlowchartSubgraphs_UntitledBlockGetsNoHeading(t *testing.T) {
+	art, ok := stackFlowchartSubgraphs("flowchart TD", []mermaidSubgraph{
+		{body: []string{"B1 --> B2"}},
+		{title: "After", body: []string{"A1 --> A2"}},
+	})
+
+	require.True(t, ok, "a missing title costs a heading, not the whole split")
+	assert.True(t, strings.HasPrefix(art, "┌"), "an untitled block starts straight into its art, with no empty heading")
+	assert.Contains(t, art, "After\n"+mermaidSubgraphRule)
+}
+
+func TestStackFlowchartSubgraphs_BlankBlockRefuses(t *testing.T) {
+	// an empty subgraph body renders as whitespace rather than erroring, which
+	// is why the blank check is not redundant with the error check.
+	header, blocks, ok := splitFlowchartSubgraphs(`flowchart TD
+    subgraph before["Before"]
+        B1 --> B2
+    end
+    subgraph after["After"]
+    end`)
+	require.True(t, ok)
+
+	art, ok := stackFlowchartSubgraphs(header, blocks)
+
+	assert.False(t, ok, "one blank block sends the whole fence back to the single-render path")
+	assert.Empty(t, art, "nothing partial comes back")
+}
+
+func TestStackFlowchartSubgraphs_PanickingBlockRefuses(t *testing.T) {
+	// a column-0 classDef with no ':' panics the vendored parser (pinned by
+	// TestNormalizeFlowchartSource_ClassDefWithoutAColon_NoLongerKillsTheFence).
+	// The normalizer drops that line long before the split runs, so this shape
+	// can only be built by hand — which is exactly what the recover in
+	// stackFlowchartSubgraphs is there for.
+	art, ok := stackFlowchartSubgraphs("flowchart TD", []mermaidSubgraph{
+		{title: "Before", body: []string{"B1 --> B2"}},
+		{title: "After", body: []string{"classDef dashed stroke-dasharray: 5 5", "A1 --> A2"}},
+	})
+
+	assert.False(t, ok, "a panic in one block must not escape past the fallback")
+	assert.Empty(t, art)
+}
+
+// --- renderMermaidSource wiring ---
+
+func TestRenderMermaidSource_SplitsIndependentSubgraphs(t *testing.T) {
+	combined, err := mermaidcmd.RenderDiagram(normalizeFlowchartSource(stackableFence), nil)
+	require.NoError(t, err)
+
+	art, err := renderMermaidSource(stackableFence, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, combined, art, "a splittable fence must not take the single-render path")
+	assert.Less(t, strings.Index(art, "Before"), strings.Index(art, "After"),
+		"both titles are present, in source order")
+	for _, label := range []string{"old read", "old write", "new read", "new write"} {
+		assert.Equal(t, 1, strings.Count(art, label), "each label must be drawn exactly once")
+	}
+}
+
+func TestRenderMermaidSource_NestedSubgraphs_KeepTodaysSingleRender(t *testing.T) {
+	src := `flowchart TD
+    subgraph outer["Outer"]
+        subgraph inner["Inner"]
+            B1 --> B2
+        end
+    end
+    subgraph after["After"]
+        A1 --> A2
+    end`
+
+	want, err := mermaidcmd.RenderDiagram(normalizeFlowchartSource(src), nil)
+	require.NoError(t, err)
+
+	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+
+	assert.Equal(t, want, got, "a fence that may not be split must render exactly as it does today")
+}
+
+func TestRenderMermaidSource_BlankBlock_FallsBackToSingleRender(t *testing.T) {
+	src := `flowchart TD
+    subgraph before["Before"]
+        B1 --> B2
+    end
+    subgraph after["After"]
+    end`
+
+	want, err := mermaidcmd.RenderDiagram(normalizeFlowchartSource(src), nil)
+	require.NoError(t, err)
+
+	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+
+	assert.Equal(t, want, got, "a part that cannot render sends the whole fence back to the single render")
+	assert.NotContains(t, got, "Before\n"+mermaidSubgraphRule, "no stacked heading may survive the fallback")
 }
 
 func TestFlowchartSubgraphNodeIDs(t *testing.T) {

@@ -2348,10 +2348,24 @@ func transpileMermaid(source string, paneWidth int) (string, bool) {
 // which the vendored parser's "unsupported graph type" check always
 // rejects, so a retry could only ever fail the exact same way — see the
 // plan's Solution Overview.
+//
+// A `graph`/`flowchart` fence built from separate subgraphs that do not
+// reference each other is rendered one diagram per subgraph and stacked
+// instead — see mdpreview_subgraph.go for why, and for the five conditions
+// that must hold. The split runs on the TRANSPILED source, never on the raw
+// fence, so it always sees normalized statements. Both halves decline by
+// returning ok == false rather than an error, and either declining lands on
+// the single whole-source render below, unchanged.
 func renderMermaidSource(source string, paneWidth int) (string, error) {
 	toRender := source
 	if transpiled, ok := transpileMermaid(source, paneWidth); ok {
 		toRender = transpiled
+	}
+
+	if header, blocks, ok := splitFlowchartSubgraphs(toRender); ok {
+		if stacked, ok := stackFlowchartSubgraphs(header, blocks); ok {
+			return stacked, nil
+		}
 	}
 
 	rendered, err := mermaidcmd.RenderDiagram(toRender, nil)

@@ -216,17 +216,17 @@ code. Record it in `PATCH.md` under known limitations instead.
   call and the `mermaidcmd.RenderDiagram` call)
 - Modify: `app/ui/mdpreview_subgraph_test.go`
 
-- [ ] add a function that renders each subgraph at the given pane width and stacks the results,
+- [x] add a function that renders each subgraph at the given pane width and stacks the results,
       each under its title and a rule of the same width
-- [ ] make it all-or-nothing: if any part errors or renders blank, report failure so the caller
+- [x] make it all-or-nothing: if any part errors or renders blank, report failure so the caller
       falls back to the single whole-source render
-- [ ] wire it into `renderMermaidSource` after transpiling, keeping the existing single-render
+- [x] wire it into `renderMermaidSource` after transpiling, keeping the existing single-render
       path as the fallback and leaving the return signature unchanged
-- [ ] write tests for the stacked output: titles present, in source order, each above its own
+- [x] write tests for the stacked output: titles present, in source order, each above its own
       art, and each rule matching its title width
-- [ ] write tests for the fallback: a part that cannot render sends the whole fence back to the
+- [x] write tests for the fallback: a part that cannot render sends the whole fence back to the
       single-render path
-- [ ] run `go test ./app/ui/ -run 'Subgraph|Mermaid' -count=1` - must pass before task 4
+- [x] run `go test ./app/ui/ -run 'Subgraph|Mermaid' -count=1` - must pass before task 4
 
 ### Task 4: Pin the real diagram end to end
 

@@ -1,6 +1,11 @@
 package ui
 
-import "strings"
+import (
+	"strings"
+
+	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
+	"github.com/mattn/go-runewidth"
+)
 
 // This file holds the SUBGRAPH SPLIT pass. Like mdpreview.go,
 // mdpreview_transpile.go and mdpreview_flowchart.go it is patch-owned and does
@@ -19,9 +24,11 @@ import "strings"
 // group, which is the only reason the author wrote a subgraph at all.
 //
 // The fix is to render each subgraph as its own diagram and stack them, each
-// under its own title. This file answers the first half of that: may this
-// fence be split, and if so what are its blocks. Rendering and stacking is the
-// caller's job.
+// under its own title. Both halves live here: splitFlowchartSubgraphs decides
+// whether a fence may be split and into which blocks, and
+// stackFlowchartSubgraphs renders those blocks and joins the art. The single
+// caller is renderMermaidSource, which falls back to its existing whole-source
+// render whenever either half declines.
 //
 // # Why the refusals are not errors
 //
@@ -128,6 +135,66 @@ func splitFlowchartSubgraphs(source string) (header string, blocks []mermaidSubg
 		return "", nil, false // rule 5
 	}
 	return header, blocks, true
+}
+
+// mermaidSubgraphRule is the character the title underline is drawn with. A
+// box-drawing horizontal, matching the art the renderer itself emits, so the
+// heading does not read as a different kind of output from the diagram below
+// it.
+const mermaidSubgraphRule = "─"
+
+// source renders this block as standalone diagram source: the fence's own
+// header line, then the block's body lines exactly as they were written. The
+// body is already normalized (see this file's doc comment) and, by rule 5 of
+// splitFlowchartSubgraphs, mentions no node any other block mentions, so
+// nothing outside the block is needed to draw it.
+func (s mermaidSubgraph) source(header string) string {
+	return header + "\n" + strings.Join(s.body, "\n") + "\n"
+}
+
+// stackFlowchartSubgraphs renders each block as its own diagram and returns
+// them stacked, each under its own title and a rule of the same display width,
+// with a blank line between blocks. A block whose title is empty (a bare
+// `subgraph` header — see flowchartSubgraphTitle) gets no heading at all
+// rather than an empty one.
+//
+// It is all-or-nothing: if any single block errors, renders blank, or panics
+// the vendored renderer, ok is false and nothing partial comes back, so the
+// caller falls back to one render of the whole source — today's behavior. A
+// reader never sees a half-stacked result with one block missing.
+//
+// The recover matters even though renderMermaidBlock already has one. That
+// outer recover falls back to the fence's VERBATIM text, which is strictly
+// worse than the single whole-source render this returns to. Catching a panic
+// here keeps the guarantee that splitting can never make a fence render worse
+// than it does today.
+func stackFlowchartSubgraphs(header string, blocks []mermaidSubgraph) (art string, ok bool) {
+	defer func() {
+		if recover() != nil {
+			art, ok = "", false
+		}
+	}()
+
+	var out strings.Builder
+	for _, block := range blocks {
+		rendered, err := mermaidcmd.RenderDiagram(block.source(header), nil)
+		if err != nil || strings.TrimSpace(rendered) == "" {
+			return "", false
+		}
+
+		if out.Len() > 0 {
+			out.WriteString("\n")
+		}
+		if block.title != "" {
+			out.WriteString(block.title)
+			out.WriteString("\n")
+			out.WriteString(strings.Repeat(mermaidSubgraphRule, runewidth.StringWidth(block.title)))
+			out.WriteString("\n")
+		}
+		out.WriteString(strings.TrimRight(rendered, "\n"))
+		out.WriteString("\n")
+	}
+	return out.String(), true
 }
 
 // flowchartFirstWord returns the first whitespace-delimited token of an
