@@ -654,6 +654,15 @@ func (m *Model) panMarkdownPreview(direction int) {
 // double meaning; it is routed the same way for symmetry, and because the
 // diff-pane handler's handleHorizontalScroll would cut diff rows that the
 // preview render does not have.
+//
+// The vertical reading keys (down/up, page, half-page, home/end) are routed
+// here for the same reason and must never fall through: their ordinary
+// handlers are the moveDiffCursor* family (handleDiffMovement, diffnav.go),
+// which reposition m.nav.diffCursor in diff-line coordinates the preview
+// render does not have. Preview has no cursor, so here they mean exactly what
+// they look like — move the viewport — and are served by shifting YOffset
+// directly. Without this, the only way to read past the first screen was
+// J/K, and every key a reader reaches for first was silently dead.
 func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, bool) {
 	if !mdPreviewActionAllowed(action) {
 		return m, true
@@ -665,9 +674,50 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, bool) {
 	case keymap.ActionScrollRight:
 		m.panMarkdownPreview(1)
 		return m, true
+	case keymap.ActionDown:
+		m.scrollMarkdownPreview(1)
+		return m, true
+	case keymap.ActionUp:
+		m.scrollMarkdownPreview(-1)
+		return m, true
+	case keymap.ActionPageDown:
+		m.scrollMarkdownPreview(m.mdPreviewPageStep())
+		return m, true
+	case keymap.ActionPageUp:
+		m.scrollMarkdownPreview(-m.mdPreviewPageStep())
+		return m, true
+	case keymap.ActionHalfPageDown:
+		m.scrollMarkdownPreview(max(1, m.mdPreviewPageStep()/2))
+		return m, true
+	case keymap.ActionHalfPageUp:
+		m.scrollMarkdownPreview(-max(1, m.mdPreviewPageStep()/2))
+		return m, true
+	case keymap.ActionHome:
+		m.layout.viewport.GotoTop()
+		return m, true
+	case keymap.ActionEnd:
+		m.layout.viewport.GotoBottom()
+		return m, true
 	default: // every other allowed action runs through the ordinary dispatch
 	}
 	return m, false
+}
+
+// mdPreviewPageStep is the row count one page key moves the preview viewport.
+// One screen less a row of overlap, so the line you were reading when you hit
+// the key is still on screen after it — the same convention as a pager.
+func (m Model) mdPreviewPageStep() int {
+	return max(1, m.layout.viewport.Height-1)
+}
+
+// scrollMarkdownPreview shifts the preview viewport by delta rows, clamped to
+// the content. It deliberately does NOT go through scrollDiffViewportLine (the
+// J/K path): that helper follows the shift with pinDiffCursorTo, which is a
+// no-op under preview only because of an explicit mdPreview guard in mouse.go.
+// Preview has no cursor to pin, so it calls the pure shifter directly and the
+// guard stays a backstop for the wheel rather than load-bearing here.
+func (m *Model) scrollMarkdownPreview(delta int) {
+	m.scrollDiffViewportBy(delta)
 }
 
 // mdPreviewAllowedActions is the fixed allowlist of keymap actions that stay
@@ -702,6 +752,15 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, bool) {
 //     Both are dispatched by handleMdPreviewAction before the ordinary pane
 //     routing can see them; see there for why scroll_right in particular must
 //     not be allowed to fall through.
+//   - down/up (j/k and the arrows), page_down/page_up, half_page_down/
+//     half_page_up and home/end are the ordinary reading keys. Their normal
+//     handlers move m.nav.diffCursor, which is why they were originally
+//     blocked — but blocking them left J/K as the only way to reach past the
+//     first screen, which is not what anyone reaches for. They are allowed
+//     here and re-routed in handleMdPreviewAction onto the viewport itself,
+//     so they move the render and never the cursor. They must never fall
+//     through: the fall-through target is handleDiffMovement (diffnav.go),
+//     i.e. the exact cursor motion this mode exists to avoid.
 //
 // Deliberately NOT included, despite being layout/session actions with no
 // obvious annotation/cursor risk on their own: toggle_pane / focus_tree /
@@ -751,6 +810,14 @@ var mdPreviewAllowedActions = map[keymap.Action]bool{
 	keymap.ActionScrollDiffUp:   true,
 	keymap.ActionScrollLeft:     true,
 	keymap.ActionScrollRight:    true,
+	keymap.ActionDown:           true,
+	keymap.ActionUp:             true,
+	keymap.ActionPageDown:       true,
+	keymap.ActionPageUp:         true,
+	keymap.ActionHalfPageDown:   true,
+	keymap.ActionHalfPageUp:     true,
+	keymap.ActionHome:           true,
+	keymap.ActionEnd:            true,
 	keymap.ActionDismiss:        true,
 }
 

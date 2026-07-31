@@ -663,6 +663,8 @@ var namedKeys = map[string]tea.KeyMsg{
 	"ctrl+u": {Type: tea.KeyCtrlU},
 	"left":   {Type: tea.KeyLeft},
 	"right":  {Type: tea.KeyRight},
+	"down":   {Type: tea.KeyDown},
+	"up":     {Type: tea.KeyUp},
 }
 
 // pressKey drives a single key through the full Update path, mirroring
@@ -788,6 +790,63 @@ func TestDispatchAction_MdPreviewOn_JK_CursorUnchanged(t *testing.T) {
 
 	afterUp := pressKey(t, afterDown, "k")
 	assert.Equal(t, 1, afterUp.nav.diffCursor, "k must not move the cursor while previewing")
+}
+
+func TestDispatchAction_MdPreviewOn_ReadingKeysScrollViewportNotCursor(t *testing.T) {
+	// the reading keys move the render and never the source-line cursor. The
+	// cursor half is already pinned by the tests above; this pins the half
+	// that was missing, i.e. that they actually scroll. Without it the keys
+	// stay in the allowlist and silently do nothing, which is the bug this
+	// replaced: J/K were the only way to reach past the first screen.
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{"down (j)", "j"},
+		{"down (arrow)", "down"},
+		{"page_down", "pgdown"},
+		{"half_page_down", "ctrl+d"},
+		{"end", "end"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := make([]diff.DiffLine, 300)
+			for i := range lines {
+				lines[i] = diff.DiffLine{NewNum: i + 1, Content: fmt.Sprintf("- item %d", i), ChangeType: diff.ChangeContext}
+			}
+			m := mdPreviewTestModel(lines)
+			m.nav.diffCursor = 20
+			m.toggleMarkdownPreview()
+			require.True(t, m.modes.mdPreview)
+			require.Equal(t, 0, m.layout.viewport.YOffset)
+
+			model := pressKey(t, m, tc.key)
+
+			assert.Positive(t, model.layout.viewport.YOffset, "%s must scroll the preview viewport", tc.name)
+			assert.Equal(t, 20, model.nav.diffCursor, "%s must not move the source-line cursor while previewing", tc.name)
+		})
+	}
+}
+
+func TestDispatchAction_MdPreviewOn_ReadingKeysReverseAndClamp(t *testing.T) {
+	// the up direction, and the clamp at both ends: k at the top must not
+	// produce a negative offset, and end/home are absolute.
+	lines := make([]diff.DiffLine, 300)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: fmt.Sprintf("- item %d", i), ChangeType: diff.ChangeContext}
+	}
+	m := mdPreviewTestModel(lines)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	assert.Equal(t, 0, pressKey(t, m, "k").layout.viewport.YOffset, "k at the top must clamp, not go negative")
+
+	atEnd := pressKey(t, m, "end")
+	require.Positive(t, atEnd.layout.viewport.YOffset, "end must move to the bottom")
+
+	backUp := pressKey(t, atEnd, "pgup")
+	assert.Less(t, backUp.layout.viewport.YOffset, atEnd.layout.viewport.YOffset, "pgup must scroll back up")
+	assert.Equal(t, 0, pressKey(t, atEnd, "home").layout.viewport.YOffset, "home must return to the top")
 }
 
 func TestInterceptVimMotion_MdPreviewOn_BypassKeysAreInert(t *testing.T) {
