@@ -349,10 +349,10 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   reading two markdown files in one review is `P`, read, `P`, `n`, `P`. The mode itself survives a
   file switch correctly (it stays on for another full-context markdown, and `handleFileLoaded`
   switches it off for anything else) — there is simply no key that performs the switch from inside
-  preview. Allowing `n`/`p` was considered and rejected: with a search still live they navigate
-  search matches instead of files, which writes `m.nav.diffCursor` and jumps the viewport in
-  diff-line coordinates the preview render does not have. See the comment above
-  `mdPreviewAllowedActions`.
+  preview. Allowing `n`/`p` was considered and rejected: with a search still live (matches survive
+  into preview until esc or the next file load) they navigate search matches instead of files,
+  which writes `m.nav.diffCursor` and jumps the viewport in diff-line coordinates the preview
+  render does not have. See the comment above `mdPreviewAllowedActions`.
 - **Most transpiled classDiagram/stateDiagram-v2 fences are wider than an 80-column pane, and the
   adaptive label cap only reduces that — it does not prevent it.** Re-measured 2026-07-29 over
   every class/state mermaid fence in the author's document corpus (18 fences), rendered at a pane

@@ -721,8 +721,10 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, bool) {
 // two different reasons — one per branch of handleFileOrSearchNav:
 //
 //   - with a search still live (a search run before P was pressed leaves
-//     m.search.matches populated; only a file load clears it), the FIRST
-//     branch wins in any review, single- or multi-file. It calls
+//     m.search.matches populated until the user presses esc or another file
+//     loads), the FIRST branch wins in any review, single- or multi-file. Note
+//     esc is itself an allowed preview action, so this is a state the reader
+//     can be in, and can leave, without ever exiting preview. It calls
 //     nextSearchMatch/prevSearchMatch, which reassign m.nav.diffCursor and
 //     then centerViewportOnCursor — a viewport jump computed in diff-line
 //     coordinates that the preview render does not have. That is exactly the
