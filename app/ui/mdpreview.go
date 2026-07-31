@@ -314,12 +314,36 @@ func spliceMermaidArt(rendered, nonce string, arts []string) string {
 			if strings.TrimSpace(ansi.Strip(line)) != placeholder {
 				continue
 			}
-			lines[i] = strings.TrimSuffix(art, "\n")
+			lines[i] = mermaidArtWithoutControls(strings.TrimSuffix(art, "\n"))
 			consumed[i] = true
 			break
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// mermaidArtWithoutControls drops C0 control bytes and DEL from one diagram's
+// art, keeping newline and tab. The art is the one thing on this path that
+// never goes through glamour (see spliceMermaidArt), so a raw ESC written into
+// a node label — or sitting in the fence text renderMermaidBlock falls back to
+// verbatim — would otherwise reach the terminal as a live escape sequence and
+// repaint the screen. flowchartSubgraphHeading already drops the same bytes
+// from a stacked block's heading; this covers the rest of the art with it.
+//
+// The diagram's own box-drawing glyphs are multi-byte UTF-8, never C0, so
+// nothing here can change the shape of a diagram. Tab is kept because the
+// verbatim fallback is source text, whose indentation is part of what a reader
+// is meant to see.
+func mermaidArtWithoutControls(art string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < ' ' || r == 0x7f {
+			return -1
+		}
+		return r
+	}, art)
 }
 
 // renderMarkdownDocument turns lines (the full, ordered source of a single

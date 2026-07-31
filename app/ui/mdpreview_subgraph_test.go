@@ -290,6 +290,79 @@ func TestSplitFlowchartSubgraphs_SharedStyleClassStillSplits(t *testing.T) {
 	require.Len(t, blocks, 2)
 }
 
+// TestSplitFlowchartSubgraphs_TightStyleClassSuffixStillSeesTheSharedNode is
+// the other side of the style-class pin, and the shape that broke: the suffix
+// runs straight into the arrow with no space after the class name. Skipping to
+// the next space would swallow `-->B[shared store]` whole, hide the shared node
+// from rule 5 and split a fence that must not split — the art would then draw
+// `B` twice, once labeled and once bare, with nothing correlating them.
+func TestSplitFlowchartSubgraphs_TightStyleClassSuffixStillSeesTheSharedNode(t *testing.T) {
+	source := `flowchart TD
+    subgraph before["Before"]
+        A[old read]:::hot-->B[shared store]
+    end
+    subgraph after["After"]
+        B-->C[new write]
+    end`
+
+	_, _, ok := splitFlowchartSubgraphs(normalizeFlowchartSource(source))
+
+	assert.False(t, ok, "a node shared across two blocks must refuse, however tight the class suffix is written")
+}
+
+// TestSplitFlowchartSubgraphs_PunctuatedIDReferencedAcrossBlocks pins that a
+// subgraph id carrying a '-' or a '.' is read the same way on both sides of
+// rule 5. An edge may point at a whole subgraph, and both characters are legal
+// in a mermaid id; if the body walk broke `after-state` into two ids it could
+// never match the block's own claim, the fence would split, and the referenced
+// block would appear a second time as a stray box under the other heading.
+func TestSplitFlowchartSubgraphs_PunctuatedIDReferencedAcrossBlocks(t *testing.T) {
+	tests := []struct {
+		name, source string
+	}{
+		{"a hyphenated subgraph id", `flowchart TD
+    subgraph before-state["Before"]
+        B1[read] --> after-state
+    end
+    subgraph after-state["After"]
+        A1[new] --> A2[write]
+    end`},
+		{"a dotted subgraph id", `flowchart TD
+    subgraph svc.a["A"]
+        B1[read] --> svc.b
+    end
+    subgraph svc.b["B"]
+        A1[new] --> A2[write]
+    end`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, ok := splitFlowchartSubgraphs(normalizeFlowchartSource(tt.source))
+
+			assert.False(t, ok, "an edge pointing at another block must refuse the split")
+		})
+	}
+}
+
+// TestSplitFlowchartSubgraphs_PunctuatedIDsStillSplit is the other half of that
+// pin: reading a hyphenated or dotted id whole must not make ordinary fences
+// refuse. `before-state` and `after-state` share the word `state` and nothing
+// else, so they are two different nodes and the fence splits.
+func TestSplitFlowchartSubgraphs_PunctuatedIDsStillSplit(t *testing.T) {
+	source := `flowchart TD
+    subgraph before-state["Before"]
+        B1[read] --> B2[write]
+    end
+    subgraph after-state["After"]
+        A1[new read] --> A2[new write]
+    end`
+
+	_, blocks, ok := splitFlowchartSubgraphs(normalizeFlowchartSource(source))
+
+	require.True(t, ok, "two blocks whose ids merely share a word share no node")
+	require.Len(t, blocks, 2)
+}
+
 // TestSplitFlowchartSubgraphs_NonLatinIDsStillSplit is the other half of the
 // non-ASCII pin: widening what counts as an id must not make every non-Latin
 // fence refuse. These two blocks share nothing, so they split.
@@ -810,6 +883,17 @@ func TestFlowchartSubgraphNodeIDs(t *testing.T) {
 		{"an inline comment is not a node", "A --> B %% see C", []string{"A", "B"}},
 		{"a style-class suffix is not a node", "A:::hot --> B", []string{"A", "B"}},
 		{"a style-class suffix after a label", "A[old]:::hot --> B", []string{"A", "B"}},
+		// the same suffix written with nothing after the class name: the skip
+		// must end at the class name, not at the next space, or every id on the
+		// rest of the line disappears.
+		{"a style-class suffix run into an arrow", "A:::hot-->B", []string{"A", "B"}},
+		{"a style-class suffix run into a comma", "A:::hot,B --> C", []string{"A", "B", "C"}},
+		{"a style-class suffix run into a semicolon", "A:::hot;B", []string{"A", "B"}},
+		{"a labeled node, tight suffix, tight arrow", "B1[x]:::hot-->Shared[y]", []string{"B1", "Shared"}},
+		{"a tight suffix before a bidirectional arrow", "B1:::hot<-->Shared", []string{"B1", "Shared"}},
+		{"a hyphenated id stays whole", "after-state --> B", []string{"after-state", "B"}},
+		{"a dotted id stays whole", "svc.a --> svc.b", []string{"svc.a", "svc.b"}},
+		{"a hyphenated id written against the arrow", "after-state-->B", []string{"after-state", "B"}},
 		{"a non-Latin id", "Начало --> Конец", []string{"Начало", "Конец"}},
 		{"a non-Latin id with a label", "Начало[читать] --> B", []string{"Начало", "B"}},
 		// Both of the next two are guards for a DIRECT call: normalization has

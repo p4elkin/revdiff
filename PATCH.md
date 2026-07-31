@@ -378,9 +378,21 @@ renders exactly as it does today:**
    block (`A --> groupB` is valid mermaid) — without that, the pair looks disjoint and the split
    draws a stray box literally named after the other subgraph.
 
+Rule 5 only works if both sides read an id the same way. A block's own id is claimed as one
+whole string, so the walk over the bodies keeps a `-` or a `.` inside an id (`after-state`,
+`svc.a` are one id each) while still ending the id at the `-` of `A-->B`. A `:::className`
+suffix is skipped up to the end of the class name, not up to the next space, so a statement
+written tight against it (`A:::hot-->B`) still shows every id after the suffix.
+
 Two malformed shapes refuse as well, and neither follows from the five conditions: an
 unterminated `subgraph` (no closing `end`) and a stray `end` with nothing open. Neither can be
 split into blocks that mean what the author wrote.
+
+Rendered art is spliced into the document after glamour has run, so it is the one part of the
+preview nothing else escapes. C0 control bytes and DEL are dropped from it (newline and tab
+kept) before it is spliced, so an ESC written into a node label — or sitting in the fence text
+used as the verbatim fallback — cannot reach the terminal as a live escape sequence. Box-drawing
+glyphs are multi-byte UTF-8 and are never touched by that filter.
 
 When any condition fails, the fence falls back to a single render of the whole source — today's
 behavior. The fallback is all-or-nothing: a part that cannot render, renders blank, or panics

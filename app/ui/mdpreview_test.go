@@ -208,6 +208,34 @@ func TestRenderMarkdownDocument_MermaidArtSurvivesGlamourWithoutReflow(t *testin
 	assert.Contains(t, stripped, "after")
 }
 
+// TestRenderMarkdownDocument_MermaidArtCarriesNoControlBytes pins that a
+// control byte written into a diagram cannot reach the terminal. The art is the
+// one part of the document that never passes through glamour (see
+// spliceMermaidArt), so an ESC in an author's node label would otherwise arrive
+// live and repaint the screen. Rendered with --no-colors on purpose: glamour
+// then emits no escape of its own, so any escape left in the output can only
+// have come out of the art.
+func TestRenderMarkdownDocument_MermaidArtCarriesNoControlBytes(t *testing.T) {
+	tests := []struct {
+		name, fence string
+	}{
+		{"a single-rendered diagram", "flowchart TD\n    A[\"x\x1b[31mRED\"] --> B"},
+		{"a split diagram", "flowchart TD\n" +
+			"    subgraph before[\"Before\"]\n        B1[\"b\x1b[31mRED\"] --> B2[old write]\n    end\n" +
+			"    subgraph after[\"After\"]\n        A1[new read] --> A2[new write]\n    end"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := "prose\n\n```mermaid\n" + tt.fence + "\n```\n"
+
+			got := renderMarkdownDocument(mdLines(doc), 80, true)
+
+			assert.NotContains(t, got, "\x1b", "a control byte in a label must never reach the terminal")
+			assert.Contains(t, got, "RED", "only the escape is dropped, the label text stays")
+		})
+	}
+}
+
 func TestRenderMarkdownDocument_NarrowWidth_ProseRespectsWidthArtOverflows(t *testing.T) {
 	want, err := mermaidcmd.RenderDiagram(wideMermaidSrc, nil)
 	require.NoError(t, err)

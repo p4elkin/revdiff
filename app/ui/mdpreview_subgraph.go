@@ -304,6 +304,10 @@ func flowchartSubgraphHeader(trimmed string) (id, title string) {
 // then shows a stray box literally named `groupA` in one block while the other
 // block's rectangle has become a plain heading, with nothing in the output
 // correlating the two.
+//
+// A block id is claimed as ONE whole string, and that only works because
+// flowchartSubgraphIDEnd reads a body reference the same way — an id carrying a
+// '-' or a '.' comes back whole from both sides, so the two can meet.
 func flowchartSubgraphsDisjoint(blocks []mermaidSubgraph) bool {
 	owner := make(map[string]int, len(blocks))
 	claim := func(id string, i int) bool {
@@ -345,6 +349,37 @@ func flowchartSubgraphIdentByte(b byte) bool {
 	return b >= 0x80 || flowchartIdentByte(b)
 }
 
+// flowchartSubgraphIDEnd returns the index just past the id that starts at
+// start. A '-' or a '.' stays INSIDE the id when another id byte follows it, so
+// `after-state` and `svc.a` each come back as one id, while the '-' of `A-->B`
+// still ends the id at `A` — the byte after it is another '-', not an id byte.
+//
+// Both characters are legal in a mermaid id, and both sides of rule 5 have to
+// read them the same way. flowchartSubgraphsDisjoint claims a block's own id as
+// one whole string, so a body reference to `after-state` split into `after` and
+// `state` could never match that claim: the fence would split, and the block
+// the edge points at would be drawn a second time as a stray box named
+// `after-state` — exactly the case the up-front claim exists to catch.
+//
+// It also ends the `:::className` skip below. Stopping there at the first byte
+// that cannot be part of a class name is what leaves `-->B` for the walk to
+// read; stopping at the next space instead swallowed the whole rest of a
+// statement written tight against the suffix (`A:::hot-->B`), and every id
+// after it with the rest.
+func flowchartSubgraphIDEnd(line string, start int) int {
+	for i := start; i < len(line); {
+		switch {
+		case flowchartSubgraphIdentByte(line[i]):
+			i++
+		case (line[i] == '-' || line[i] == '.') && i+1 < len(line) && flowchartSubgraphIdentByte(line[i+1]):
+			i += 2
+		default:
+			return i
+		}
+	}
+	return len(line)
+}
+
 // flowchartSubgraphClassSuffix is mermaid's style-class suffix on a node
 // (`B1[old]:::hot`). Its class name is not a node id, and reading it as one
 // makes two blocks that tag their nodes with the same class look as if they
@@ -364,9 +399,9 @@ const flowchartSubgraphClassSuffix = ":::"
 // The walk reuses the normalizer's own helpers rather than re-deriving what an
 // id looks like. flowchartEdgeAt consumes each arrow WITH its `|label|`
 // suffix, so edge-label text can never be read as a node; a `:::className`
-// suffix is skipped whole; then a run of flowchartSubgraphIdentByte bytes is
-// the id; then flowchartLabelEnd skips that node's own label, whose text is
-// likewise not an id. Arrows are located on the MASKED copy (see
+// suffix is skipped whole; then flowchartSubgraphIDEnd measures the id; then
+// flowchartLabelEnd skips that node's own label, whose text is likewise not an
+// id. Arrows are located on the MASKED copy (see
 // flowchartMaskLabels) and every slice is taken from the original, the same
 // discipline every other pass in this patch uses.
 func flowchartSubgraphNodeIDs(line string) []string {
@@ -383,10 +418,7 @@ func flowchartSubgraphNodeIDs(line string) []string {
 			continue
 		}
 		if strings.HasPrefix(body[i:], flowchartSubgraphClassSuffix) {
-			i += len(flowchartSubgraphClassSuffix)
-			for i < len(body) && body[i] != ' ' && body[i] != '\t' {
-				i++
-			}
+			i = flowchartSubgraphIDEnd(body, i+len(flowchartSubgraphClassSuffix))
 			continue
 		}
 		if !flowchartSubgraphIdentByte(body[i]) {
@@ -394,9 +426,7 @@ func flowchartSubgraphNodeIDs(line string) []string {
 			continue
 		}
 		start := i
-		for i < len(body) && flowchartSubgraphIdentByte(body[i]) {
-			i++
-		}
+		i = flowchartSubgraphIDEnd(body, i)
 		ids = append(ids, body[start:i])
 		if i < len(body) && (body[i] == '[' || body[i] == '(' || body[i] == '{') {
 			if end := flowchartLabelEnd(body, i+1, 1); end > 0 {
