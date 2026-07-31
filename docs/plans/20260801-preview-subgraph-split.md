@@ -246,12 +246,18 @@ code. Record it in `PATCH.md` under known limitations instead.
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] verify all requirements from the Overview are implemented
-- [ ] verify edge cases are handled
-- [ ] run full test suite: `make test`
-- [ ] run `make lint` - must report 0 issues
-- [ ] run `make build`
-- [ ] verify test coverage for `app/ui` has not dropped
+- [x] verify all requirements from the Overview are implemented — the split runs in
+      `renderMermaidSource` (`mdpreview_transpile.go:2365`) with the single-render fallback intact,
+      and the quote bug is fixed by `normalizeFlowchartEdgeLabelQuotes`
+      (`mdpreview_flowchart.go:396`, called from `normalizeFlowchartLine`)
+- [x] verify edge cases are handled — all five refusal rules, both malformed shapes (unterminated
+      `subgraph`, stray `end`), all three title spellings, the blank/erroring/panicking block, and
+      the adversarial no-panic fences each have a test
+- [x] run full test suite: `make test` — passed, 91.3% total statements
+- [x] run `make lint` - must report 0 issues — 0 issues
+- [x] run `make build`
+- [x] verify test coverage for `app/ui` has not dropped — 95.6% at the pre-plan commit `5a6c5ca`,
+      95.7% now
 
 ### Task 6: [Final] Update documentation
 
