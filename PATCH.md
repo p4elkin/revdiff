@@ -39,6 +39,11 @@ both of which read the real keymap and so list it automatically in this build.
   directives it cannot draw at all. Text-level, structure-preserving — it is NOT a transpiler
   and does not use `flowchartBuilder`.
 - `app/ui/mdpreview_flowchart_test.go` — its tests.
+- `app/ui/mdpreview_subgraph.go` — subgraph splitting for flowchart sources: detects when a
+  diagram contains independent top-level subgraphs, decides whether it is safe to split, and
+  renders each subgraph as a separate diagram stacked under its own title. Covers the five-rule
+  split decision and the render + stack + fallback workflow.
+- `app/ui/mdpreview_subgraph_test.go` — its tests.
 
 A clean rebase never conflicts on these six files — they don't exist upstream. All conflict
 risk is in the hunks below.
@@ -326,6 +331,39 @@ explicitly hid. Two smaller leaks are known and accepted: an `accTitle`/`accDesc
 still draw a box named after itself (no corpus fence has one), and mermaid's `%%{init: ...}%%`
 theme block is read as an ordinary `%%` comment and simply ignored.
 
+### Mermaid diagram subgraph splitting
+
+When a flowchart contains multiple independent `subgraph` blocks, the vendored ASCII renderer
+does not lay them out separately — it builds a single node grid and attempts to draw a rectangle
+around the cells each subgraph occupies, resulting in overlapping borders and nodes drawn in the
+wrong boxes. To fix this, diagrams that meet the split criteria are rendered once per subgraph,
+with each result stacked under its own title and rule line (see `renderMermaidSource` in
+`mdpreview_transpile.go` and the split logic in `mdpreview_subgraph.go`).
+
+**All of the following conditions must hold for a split to be safe. If any one fails, the fence
+renders exactly as it does today:**
+
+1. The diagram is a `graph` or a `flowchart`. No other diagram kind has subgraphs.
+2. There are at least two top-level subgraphs. With one subgraph the renderer draws a single
+   rectangle and nothing overlaps.
+3. No subgraph is nested inside another. Nested subgraphs would fragment during the split and
+   lose their grouping.
+4. Nothing but the header, comments, blank lines and layout directives (`direction`, `style`,
+   `classDef`, etc.) sits outside a subgraph. A node declared outside would be dropped by
+   splitting.
+5. **No node id is mentioned by more than one subgraph.** This catches edges crossing from one
+   subgraph to another, and also nodes that two subgraphs both reference. Both cases would either
+   lose an edge or silently duplicate a box; a single rule covers both and is easy to check.
+
+When any condition fails, the fence falls back to a single render of the whole source — today's
+behavior. The fallback is all-or-nothing: a part that cannot render, renders blank, or panics
+is caught, and the whole fence is re-rendered as one unmodified piece through the existing
+single-render path.
+
+Measured over a corpus of 300 mermaid fences in the author's document set: 89 use `subgraph`, of
+which 23 have an edge crossing between two subgraphs and 30 nest subgraphs. A meaningful share
+keeps today's behavior, so the fallback is a correctness guarantee, not an edge case.
+
 ## Known limitations
 
 These are accepted, documented gaps in the preview mode — not bugs to fix under patch discipline.
@@ -341,6 +379,12 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   column at the right edge. What remains true: only whole columns move, so a box straddling the
   edge is still cut mid-glyph until you pan past it, and prose (already wrapped to the pane by
   glamour) goes blank once you pan past its end.
+- **Spaces inside an edge label render as `─` (dash) on the arrow line.** When a label like
+  `"listVariants (segment coords)"` is drawn on top of an arrow line, space characters do not
+  paint — the arrow line shows through underneath. This is the vendored `mermaid-ascii`
+  renderer's `drawText` function, not the transpiler or normalizer. Fixing it requires changing
+  the vendored drawing code. Workaround: use non-breaking spaces or replace spaces with other
+  characters when the label must sit on an arrow.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
 - **You must leave preview before changing file.** Preview now works in a multi-file review, but no

@@ -266,11 +266,11 @@ code. Record it in `PATCH.md` under known limitations instead.
 
 **Model:** haiku
 
-- [ ] add `app/ui/mdpreview_subgraph.go` and its test to the new-files list in `PATCH.md`
-- [ ] record the split rule and its five conditions in `PATCH.md`
-- [ ] record the space-in-label limitation (spaces drawn as `─` on an arrow) under known
+- [x] add `app/ui/mdpreview_subgraph.go` and its test to the new-files list in `PATCH.md`
+- [x] record the split rule and its five conditions in `PATCH.md`
+- [x] record the space-in-label limitation (spaces drawn as `─` on an arrow) under known
       limitations
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/` — moved after phase completion by the harness
 
 ## Post-Completion
 
