@@ -234,15 +234,15 @@ code. Record it in `PATCH.md` under known limitations instead.
 - Modify: `app/ui/mdpreview_subgraph_test.go` (integration tests, calling the real vendored
   renderer the way the existing tests in `mdpreview_transpile_test.go` do)
 
-- [ ] write an integration test using the before/after diagram from the Overview: it must render
+- [x] write an integration test using the before/after diagram from the Overview: it must render
       as two blocks, both titles present
-- [ ] assert the overlap is gone — no output line may contain two block borders side by side,
+- [x] assert the overlap is gone — no output line may contain two block borders side by side,
       which is the signature of the broken layout
-- [ ] write an integration test that a fence with nested subgraphs renders byte-identically to a
+- [x] write an integration test that a fence with nested subgraphs renders byte-identically to a
       direct `renderMermaidSource` call on the same source, pinning the no-change guarantee
-- [ ] write an adversarial test that never panics: an unterminated `subgraph`, a stray `end`, an
+- [x] write an adversarial test that never panics: an unterminated `subgraph`, a stray `end`, an
       empty subgraph body, a subgraph whose title is only punctuation
-- [ ] run `go test ./app/ui/ -run 'Subgraph|Mermaid|MdPreview' -count=1` - must pass before task 5
+- [x] run `go test ./app/ui/ -run 'Subgraph|Mermaid|MdPreview' -count=1` - must pass before task 5
 
 ### Task 5: Verify acceptance criteria
 

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -314,8 +315,17 @@ func TestRenderMermaidSource_SplitsIndependentSubgraphs(t *testing.T) {
 	}
 }
 
-func TestRenderMermaidSource_NestedSubgraphs_KeepTodaysSingleRender(t *testing.T) {
-	src := `flowchart TD
+// TestRenderMermaidSource_UnsplittableFences_KeepTodaysSingleRender is the
+// no-change guarantee, pinned byte for byte: every fence the five rules refuse
+// must come out of renderMermaidSource exactly as the single whole-source
+// render produces it, with no heading, no rule and no restacking anywhere in
+// it. Roughly half the real corpus takes this path (see the counts in
+// mdpreview_subgraph.go's doc comment), so it is the common case, not a corner.
+func TestRenderMermaidSource_UnsplittableFences_KeepTodaysSingleRender(t *testing.T) {
+	tests := []struct {
+		name, source string
+	}{
+		{"nested subgraphs", `flowchart TD
     subgraph outer["Outer"]
         subgraph inner["Inner"]
             B1 --> B2
@@ -323,15 +333,46 @@ func TestRenderMermaidSource_NestedSubgraphs_KeepTodaysSingleRender(t *testing.T
     end
     subgraph after["After"]
         A1 --> A2
-    end`
+    end`},
+		{"a single subgraph", `flowchart TD
+    subgraph only["Only"]
+        B1 --> B2
+    end`},
+		{"no subgraph at all", "flowchart TD\n    A --> B"},
+		{"a node declared outside every subgraph", `flowchart TD
+    Z[outside]
+    subgraph before["Before"]
+        B1 --> B2
+    end
+    subgraph after["After"]
+        A1 --> A2
+    end`},
+		{"an edge crossing two subgraphs", `flowchart TD
+    subgraph before["Before"]
+        B1 --> A1
+    end
+    subgraph after["After"]
+        A1 --> A2
+    end`},
+		{"a node id shared by two subgraphs", `flowchart TD
+    subgraph before["Before"]
+        B1[old read] --> Shared[store]
+    end
+    subgraph after["After"]
+        A1[new read] --> Shared[store]
+    end`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want, err := mermaidcmd.RenderDiagram(normalizeFlowchartSource(tt.source), nil)
+			require.NoError(t, err)
 
-	want, err := mermaidcmd.RenderDiagram(normalizeFlowchartSource(src), nil)
-	require.NoError(t, err)
+			got, err := renderMermaidSource(tt.source, mermaidUnconstrainedWidth)
+			require.NoError(t, err)
 
-	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
-	require.NoError(t, err)
-
-	assert.Equal(t, want, got, "a fence that may not be split must render exactly as it does today")
+			assert.Equal(t, want, got, "a fence that may not be split must render exactly as it does today")
+		})
+	}
 }
 
 func TestRenderMermaidSource_BlankBlock_FallsBackToSingleRender(t *testing.T) {
@@ -350,6 +391,158 @@ func TestRenderMermaidSource_BlankBlock_FallsBackToSingleRender(t *testing.T) {
 
 	assert.Equal(t, want, got, "a part that cannot render sends the whole fence back to the single render")
 	assert.NotContains(t, got, "Before\n"+mermaidSubgraphRule, "no stacked heading may survive the fallback")
+}
+
+// --- integration: the real diagram this split was written for ---
+
+// variantPlanFence is the before/after diagram from
+// docs/plans/2026-07-31-variant-document-full-adoption.md in the
+// magnolia-content-api worktree, copied verbatim. It is the fence whose broken
+// combined render motivated this whole pass — see mdpreview_subgraph.go's doc
+// comment — so it is pinned here rather than paraphrased: an author's real
+// diagram uses quoted edge labels, em dashes and method-call text, and a
+// hand-written stand-in would quietly stop exercising any of that.
+const variantPlanFence = `flowchart LR
+    subgraph before["Before"]
+        B1["decomposeOverlay"] -->|"listVariants (segment coords)"| BL1["sharedSliceBaseline"]
+        B1 -->|"listVariants (strict mode)"| BL2["strictValidationBaseline"]
+        B3["createVariant"] -->|"listVariants"| BL3["keepTheUnaddressedSibling"]
+    end
+    subgraph after["After"]
+        A1["decomposeOverlay"] -->|"loadForWrite — ONE listVariants"| AD["VariantDocument"]
+        A3["createVariant"] --> AD
+        AD -->|".slice(sharedTarget)"| AL1["sharedSliceBaseline"]
+        AD -->|".composedExcluding(at, excluded)"| AL2["strictValidationBaseline"]
+        AD -->|".slice(write.coords())"| AL3["keepTheUnaddressedSibling"]
+    end`
+
+// mermaidAdjacentBorders matches two frame characters sitting side by side with
+// at most three columns between them. That is the signature of the broken
+// layout: the renderer draws both subgraph rectangles over the same cells, so
+// one rectangle's border ends up right next to the other's on the same row —
+// and where they actually cross, a `┬`/`├` junction appears in the middle of
+// what should be a plain wall.
+//
+// A correctly split render has none of these. There is no subgraph rectangle
+// left in it at all, only node boxes, and the renderer never places two node
+// boxes within three columns of each other.
+var mermaidAdjacentBorders = regexp.MustCompile(`[│├┤┬┴┼]\s{0,3}[│├┤┬┴┼]`)
+
+// adjacentBorderLines counts how many of art's lines carry the broken-layout
+// signature — see mermaidAdjacentBorders.
+func adjacentBorderLines(art string) int {
+	n := 0
+	for line := range strings.SplitSeq(art, "\n") {
+		if mermaidAdjacentBorders.MatchString(line) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestRenderMermaidSource_VariantPlanFence_RendersAsTwoTitledBlocks(t *testing.T) {
+	art, err := renderMermaidSource(variantPlanFence, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+
+	blocks := strings.Split(strings.TrimRight(art, "\n"), "\n\n")
+	require.Len(t, blocks, 2, "the real fence must come out as exactly two blocks")
+
+	for i, want := range []string{"Before", "After"} {
+		lines := strings.Split(blocks[i], "\n")
+		require.Greater(t, len(lines), 2, "each block must carry art of its own, not just a heading")
+		assert.Equal(t, want, lines[0], "each block sits under its own title, in source order")
+		assert.Equal(t, strings.Repeat(mermaidSubgraphRule, runewidth.StringWidth(want)), lines[1])
+	}
+
+	// every node the author drew survives the split, in the block it belongs to.
+	assert.Contains(t, blocks[0], "decomposeOverlay")
+	assert.Contains(t, blocks[0], "createVariant")
+	assert.NotContains(t, blocks[0], "VariantDocument", "an `after` node must not be drawn in the `before` block")
+	assert.Contains(t, blocks[1], "VariantDocument")
+}
+
+// TestRenderMermaidSource_VariantPlanFence_OverlapIsGone is the other half of
+// the pin: it checks the two symptoms the Overview names, and first checks that
+// the pre-split render really does show them, so neither assertion can pass
+// just because the signature stopped being detectable.
+func TestRenderMermaidSource_VariantPlanFence_OverlapIsGone(t *testing.T) {
+	combined, err := mermaidcmd.RenderDiagram(normalizeFlowchartSource(variantPlanFence), nil)
+	require.NoError(t, err)
+	require.Positive(t, adjacentBorderLines(combined),
+		"guard: the single-render path must still show the overlapping-rectangle signature this test looks for")
+	require.Positive(t, titleCollisionLines(combined),
+		"guard: the single-render path must still print both subgraph titles on one row")
+
+	art, err := renderMermaidSource(variantPlanFence, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+
+	assert.Zero(t, adjacentBorderLines(art), "no output line may carry two block borders side by side")
+	assert.Zero(t, titleCollisionLines(art), "the two subgraph titles must no longer share a row")
+}
+
+// titleCollisionLines counts lines carrying BOTH block titles — the second
+// broken-layout symptom from the Overview, where the two subgraph rectangles
+// overlap far enough that their titles print on the same row.
+func titleCollisionLines(art string) int {
+	n := 0
+	for line := range strings.SplitSeq(art, "\n") {
+		if strings.Contains(line, "Before") && strings.Contains(line, "After") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRenderMermaidSource_AdversarialFences_NeverPanic covers the malformed
+// shapes an author can actually type. None may take down the preview: the split
+// must either refuse them (see splitFlowchartSubgraphs) or render them, and an
+// error is an acceptable answer — a panic is not. renderMermaidBlock's own
+// recover is the last net, so this pins the layer BELOW it, where a panic would
+// otherwise cost the reader the whole fence's rendering and leave raw text.
+func TestRenderMermaidSource_AdversarialFences_NeverPanic(t *testing.T) {
+	tests := []struct {
+		name, source string
+	}{
+		{"an unterminated subgraph", `flowchart TD
+    subgraph before["Before"]
+        B1 --> B2
+    subgraph after["After"]
+        A1 --> A2
+    end`},
+		{"a stray end with nothing open", `flowchart TD
+    subgraph before["Before"]
+        B1 --> B2
+    end
+    end
+    subgraph after["After"]
+        A1 --> A2
+    end`},
+		{"one empty subgraph body", `flowchart TD
+    subgraph before["Before"]
+        B1 --> B2
+    end
+    subgraph after["After"]
+    end`},
+		{"every subgraph body empty", "flowchart TD\n    subgraph before\n    end\n    subgraph after\n    end"},
+		{"a title that is only punctuation", `flowchart TD
+    subgraph before["***"]
+        B1 --> B2
+    end
+    subgraph after["!!!"]
+        A1 --> A2
+    end`},
+		{"a bare subgraph keyword with no id", "flowchart TD\n    subgraph\n        B1 --> B2\n    end\n" +
+			"    subgraph\n        A1 --> A2\n    end"},
+		{"nothing but subgraph structure", "flowchart TD\n    subgraph\n    end"},
+		{"an end with no diagram at all", "end"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotPanics(t, func() {
+				_, _ = renderMermaidSource(tt.source, mermaidUnconstrainedWidth)
+			})
+		})
+	}
 }
 
 func TestFlowchartSubgraphNodeIDs(t *testing.T) {
