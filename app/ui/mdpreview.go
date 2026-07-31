@@ -323,12 +323,19 @@ func spliceMermaidArt(rendered, nonce string, arts []string) string {
 }
 
 // mermaidArtWithoutControls drops C0 control bytes and DEL from one diagram's
-// art, keeping newline and tab. The art is the one thing on this path that
-// never goes through glamour (see spliceMermaidArt), so a raw ESC written into
-// a node label — or sitting in the fence text renderMermaidBlock falls back to
-// verbatim — would otherwise reach the terminal as a live escape sequence and
-// repaint the screen. flowchartSubgraphHeading already drops the same bytes
-// from a stacked block's heading; this covers the rest of the art with it.
+// spliced-in art, keeping newline and tab. The art bypasses glamour entirely
+// (see spliceMermaidArt), so without this, a raw ESC written into a node
+// label — or sitting in the fence text renderMermaidBlock falls back to
+// verbatim — would reach the terminal as a live escape sequence and repaint
+// the screen. flowchartSubgraphHeading already drops the same bytes from a
+// stacked block's heading; this covers the rest of the art with it.
+//
+// This is NOT a document-wide escape filter — it only cleans the art this
+// function is handed. Prose, headings, table cells and non-mermaid code
+// fences all go through glamour instead, and glamour does not strip control
+// bytes from the source text either, so a raw ESC anywhere else in the
+// markdown still reaches the terminal untouched. See PATCH.md's "Known
+// limitations" for that wider gap; closing it is a separate change.
 //
 // The diagram's own box-drawing glyphs are multi-byte UTF-8, never C0, so
 // nothing here can change the shape of a diagram. Tab is kept because the

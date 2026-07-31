@@ -249,7 +249,9 @@ var flowchartSubgraphBreak = regexp.MustCompile(`(?i)<br\s*/?>`)
 //
 // Control bytes are dropped for the same width reason and one more: the
 // heading is written straight into the art, which bypasses glamour, so a raw
-// ESC in an author's label would otherwise reach the terminal unescaped.
+// ESC in an author's label would otherwise reach the terminal unescaped. This
+// covers only the heading text on this path — see mermaidArtWithoutControls
+// for how far the filtering goes and what it does not cover.
 func flowchartSubgraphHeading(label string) string {
 	label = flowchartSubgraphBreak.ReplaceAllString(label, " ")
 	label = strings.Map(func(r rune) rune {

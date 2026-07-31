@@ -388,11 +388,12 @@ Two malformed shapes refuse as well, and neither follows from the five condition
 unterminated `subgraph` (no closing `end`) and a stray `end` with nothing open. Neither can be
 split into blocks that mean what the author wrote.
 
-Rendered art is spliced into the document after glamour has run, so it is the one part of the
-preview nothing else escapes. C0 control bytes and DEL are dropped from it (newline and tab
-kept) before it is spliced, so an ESC written into a node label — or sitting in the fence text
-used as the verbatim fallback — cannot reach the terminal as a live escape sequence. Box-drawing
-glyphs are multi-byte UTF-8 and are never touched by that filter.
+Rendered art is spliced into the document after glamour has run, bypassing glamour entirely.
+C0 control bytes and DEL are dropped from it (newline and tab kept) before it is spliced, so an
+ESC written into a node label — or sitting in the fence text used as the verbatim fallback —
+cannot reach the terminal as a live escape sequence. Box-drawing glyphs are multi-byte UTF-8 and
+are never touched by that filter. This filter is scoped to the mermaid art only, not the whole
+document — see "Known limitations" below for what is still unfiltered.
 
 When any condition fails, the fence falls back to a single render of the whole source — today's
 behavior. The fallback is all-or-nothing: a part that cannot render, renders blank, or panics
@@ -519,6 +520,21 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   {outcome}` and `resolve {outcome} (act without claiming)` both render as `resolve` because
   `mermaidCutParenthetical` and the brace cut are content rules that run regardless of width. That
   shortening is deliberate (see the plan's "Edge label" section) and is not affected by the cap.
+- **A markdown document from an untrusted source can still repaint the terminal with a raw escape
+  sequence, outside the mermaid art.** Only the spliced-in mermaid art is filtered for control
+  bytes (`mermaidArtWithoutControls`, see above). Prose, headings, table cells, and non-mermaid
+  code fences are rendered by glamour instead, and glamour does not strip control bytes from the
+  source text — it only adds its own styling escapes on top. Verified with
+  `renderMarkdownDocument(..., noColors=true)`, where glamour emits no escapes of its own: a raw
+  `ESC` placed in prose, in a heading, in a table cell, or inside a plain code fence still reaches
+  the output live (`"hello \x1b[31mRED\x1b[0m world"` comes out as
+  `"  hello \x1b[31mRED\x1b[0m world"`), so a document from an untrusted source can repaint the
+  terminal on `P`. This predates the mermaid-art fix and is not part of it — the mermaid path is
+  genuinely closed, it is just a small part of the whole surface. Closing the rest would mean
+  filtering the whole rendered document before or after glamour, which is a separate change: it
+  risks stripping escape-like bytes a document legitimately wants to show (e.g. inside a code
+  fence that is itself displaying an escape sequence as text), so it needs its own plan rather
+  than being folded into this patch.
 
 ## Dependencies added
 
