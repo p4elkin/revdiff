@@ -1,8 +1,8 @@
 package ui
 
 import (
-	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
 	"github.com/mattn/go-runewidth"
@@ -59,7 +59,17 @@ const (
 	flowchartSubgraphEnd     = "end"
 )
 
-// mermaidSubgraph is one top-level `subgraph ... end` block: the block's own
+// flowchartBlockKeywords is the part of flowchartStructuralKeywords this pass
+// dispatches on: the two keywords that carry BLOCK structure. The other two
+// members of that list, `accTitle` and `accDescr`, carry author prose and no
+// structure, so they are deliberately left out here. Outside a subgraph an
+// accessibility directive then trips rule 4 and refuses the split; inside a
+// block its prose words are walked as node ids and may refuse it through rule
+// 5. Both are refusals, so such a fence keeps today's single render — neither
+// can produce a wrong picture, which is the only outcome that would matter.
+var flowchartBlockKeywords = []string{flowchartSubgraphKeyword, flowchartSubgraphEnd}
+
+// flowchartSubgraph is one top-level `subgraph ... end` block: the block's own
 // id, the title to print above its art, and the body lines between the header
 // and the closing `end`, in source order with their original indentation and
 // any inline `%%` comment intact.
@@ -69,7 +79,7 @@ const (
 // subgraph. Rule 5 of splitFlowchartSubgraphs has to see those ids or it would
 // split a fence whose blocks really do reference each other — see
 // flowchartSubgraphsDisjoint.
-type mermaidSubgraph struct {
+type flowchartSubgraph struct {
 	id    string
 	title string
 	body  []string
@@ -101,16 +111,18 @@ type mermaidSubgraph struct {
 // that two subgraphs both point at. Either case would lose an edge or silently
 // duplicate a box, and one rule covers both.
 //
-// Two malformed shapes refuse as well, for the same reason: an unterminated
-// `subgraph` and a stray `end` with nothing open. Neither can be split into
-// blocks that mean what the author wrote.
+// Three malformed shapes refuse as well, for the same reason: an unterminated
+// `subgraph`, a stray `end` with nothing open, and a `subgraph` or `end` line
+// carrying a second statement behind a ';' separator (see
+// flowchartSecondStatement). None can be split into blocks that mean what the
+// author wrote.
 //
 // Rule 4 tolerates a styling or layout directive outside a subgraph, which on
 // the production path never comes up — normalizeFlowchartSource has already
 // removed every one of them by the time this runs. The tolerance is there so
 // that a direct call on un-normalized source refuses for a real reason rather
 // than for a line the renderer would have dropped anyway.
-func splitFlowchartSubgraphs(source string) (header string, blocks []mermaidSubgraph, ok bool) {
+func splitFlowchartSubgraphs(source string) (header string, blocks []flowchartSubgraph, ok bool) {
 	switch mermaidDiagramKind(source) {
 	case "graph", "flowchart":
 	default:
@@ -127,13 +139,17 @@ func splitFlowchartSubgraphs(source string) (header string, blocks []mermaidSubg
 			headerSeen, header = true, line
 			continue
 		}
-		switch flowchartDirective(trimmed, flowchartStructuralKeywords) {
+		keyword := flowchartDirective(trimmed, flowchartBlockKeywords)
+		if keyword != "" && flowchartSecondStatement(trimmed) {
+			return "", nil, false // a statement hidden behind a ';' separator
+		}
+		switch keyword {
 		case flowchartSubgraphKeyword:
 			if inBlock {
 				return "", nil, false // rule 3: nested
 			}
 			id, title := flowchartSubgraphHeader(trimmed)
-			blocks = append(blocks, mermaidSubgraph{id: id, title: title})
+			blocks = append(blocks, flowchartSubgraph{id: id, title: title})
 			inBlock = true
 		case flowchartSubgraphEnd:
 			if !inBlock {
@@ -160,25 +176,48 @@ func splitFlowchartSubgraphs(source string) (header string, blocks []mermaidSubg
 	return header, blocks, true
 }
 
-// mermaidSubgraphRule is the character the title underline is drawn with. A
+// flowchartSecondStatement reports whether a `subgraph` or `end` line carries
+// another statement after a ';' separator, as in `end; B2 --> A1`.
+//
+// Mermaid accepts ';' as a statement separator, and the structural dispatch in
+// splitFlowchartSubgraphs reads such a line as the keyword ALONE: the tail
+// belongs to no block, so it would vanish from every rendered block, and rule 5
+// would never see the node ids in it. A fence whose only crossing edge is
+// written this way would then split and lose that edge — a clean-looking
+// picture saying something the author did not write, which is the one outcome
+// the whole split pass is built to avoid.
+//
+// Refusing costs nothing real. The vendored renderer does not split statements
+// on ';' either (it reads `A --> B; B --> C` as a node labeled `B[b]; B`), so
+// the single-render fallback these lines drop to is exactly as good as it was.
+//
+// Labels are masked first, so a ';' inside a title (`subgraph a["one; two"]`)
+// is not a separator, and a trailing ';' with nothing after it is not one
+// either — that is the plain statement terminator.
+func flowchartSecondStatement(trimmed string) bool {
+	_, tail, found := strings.Cut(flowchartMaskLabels(trimmed), ";")
+	return found && strings.TrimSpace(tail) != ""
+}
+
+// flowchartSubgraphRule is the character the title underline is drawn with. A
 // box-drawing horizontal, matching the art the renderer itself emits, so the
 // heading does not read as a different kind of output from the diagram below
 // it.
-const mermaidSubgraphRule = "─"
+const flowchartSubgraphRule = "─"
 
 // source renders this block as standalone diagram source: the fence's own
 // header line, then the block's body lines exactly as they were written. The
 // body is already normalized (see this file's doc comment) and, by rule 5 of
 // splitFlowchartSubgraphs, mentions no node any other block mentions, so
 // nothing outside the block is needed to draw it.
-func (s mermaidSubgraph) source(header string) string {
+func (s flowchartSubgraph) source(header string) string {
 	return header + "\n" + strings.Join(s.body, "\n") + "\n"
 }
 
 // stackFlowchartSubgraphs renders each block as its own diagram and returns
 // them stacked, each under its own title and a rule of the same display width,
 // with a blank line between blocks. A block whose title is empty (a bare
-// `subgraph` header — see flowchartSubgraphTitle) gets no heading at all
+// `subgraph` header — see flowchartSubgraphHeader) gets no heading at all
 // rather than an empty one.
 //
 // It is all-or-nothing: if any single block errors, renders blank, or panics
@@ -201,7 +240,7 @@ func (s mermaidSubgraph) source(header string) string {
 // appends exactly one newline to whichever it got and spliceMermaidArt strips
 // exactly one back off, so a trailing newline here would print as a blank line
 // under a split diagram and under no other.
-func stackFlowchartSubgraphs(header string, blocks []mermaidSubgraph) (art string, ok bool) {
+func stackFlowchartSubgraphs(header string, blocks []flowchartSubgraph) (art string, ok bool) {
 	if len(blocks) == 0 {
 		return "", false // nothing to stack: the caller must render the whole source
 	}
@@ -225,7 +264,7 @@ func stackFlowchartSubgraphs(header string, blocks []mermaidSubgraph) (art strin
 		if block.title != "" {
 			out.WriteString(block.title)
 			out.WriteString("\n")
-			out.WriteString(strings.Repeat(mermaidSubgraphRule, runewidth.StringWidth(block.title)))
+			out.WriteString(strings.Repeat(flowchartSubgraphRule, runewidth.StringWidth(block.title)))
 			out.WriteString("\n")
 		}
 		out.WriteString(strings.TrimRight(rendered, "\n"))
@@ -234,10 +273,6 @@ func stackFlowchartSubgraphs(header string, blocks []mermaidSubgraph) (art strin
 	return strings.TrimRight(out.String(), "\n"), true
 }
 
-// flowchartSubgraphBreak matches mermaid's HTML line break in a label, in
-// every spelling the vendored renderer's own htmlBreakPattern accepts.
-var flowchartSubgraphBreak = regexp.MustCompile(`(?i)<br\s*/?>`)
-
 // flowchartSubgraphHeading turns a raw subgraph label into the single plain
 // line printed above a stacked block.
 //
@@ -245,17 +280,21 @@ var flowchartSubgraphBreak = regexp.MustCompile(`(?i)<br\s*/?>`)
 // into a real line break inside a NODE box (see its newGraphLabel), but a
 // heading here is one line, and printed as-is the tag would show literally and
 // the rule under it would be sized to count the tag's characters. Roughly 80%
-// of the corpus fences carry a `<br/>` somewhere, so this is not a corner.
+// of the corpus fences carry a `<br/>` somewhere, so this is not a corner. The
+// pattern is mermaidBRPattern, shared with the transpiler, so a literal `\n`
+// escape an author typed is folded here for the same reason it is folded there.
 //
-// Control bytes are dropped for the same width reason and one more: the
-// heading is written straight into the art, which bypasses glamour, so a raw
-// ESC in an author's label would otherwise reach the terminal unescaped. This
-// covers only the heading text on this path — see mermaidArtWithoutControls
-// for how far the filtering goes and what it does not cover.
+// Control bytes are dropped for the WIDTH reason alone: the rule under the
+// title is sized from this string, so an ESC counted as characters would draw a
+// rule that does not match what the reader sees. The escaping risk itself is
+// already closed downstream — spliceMermaidArt runs mermaidArtWithoutControls
+// over the whole stacked art, heading included. Both use mermaidControlRune, so
+// "control byte" is defined in one place; the difference is only that this one
+// drops newline and tab too, since a heading is one line.
 func flowchartSubgraphHeading(label string) string {
-	label = flowchartSubgraphBreak.ReplaceAllString(label, " ")
+	label = mermaidBRPattern.ReplaceAllString(label, " ")
 	label = strings.Map(func(r rune) rune {
-		if r < ' ' || r == 0x7f {
+		if mermaidControlRune(r) {
 			return -1
 		}
 		return r
@@ -272,7 +311,7 @@ func flowchartSubgraphHeading(label string) string {
 //	subgraph before              no label at all
 //
 // The id is always the token before the bracket, and it is returned separately
-// because rule 5 has to treat it as a node id — see mermaidSubgraph. The title
+// because rule 5 has to treat it as a node id — see flowchartSubgraph. The title
 // is the label when there is one and the id otherwise. A header with neither
 // (a bare `subgraph`) yields "" for both, which the caller renders as an
 // untitled block rather than refusing the split — a missing title costs a
@@ -310,7 +349,7 @@ func flowchartSubgraphHeader(trimmed string) (id, title string) {
 // A block id is claimed as ONE whole string, and that only works because
 // flowchartSubgraphIDEnd reads a body reference the same way — an id carrying a
 // '-' or a '.' comes back whole from both sides, so the two can meet.
-func flowchartSubgraphsDisjoint(blocks []mermaidSubgraph) bool {
+func flowchartSubgraphsDisjoint(blocks []flowchartSubgraph) bool {
 	owner := make(map[string]int, len(blocks))
 	claim := func(id string, i int) bool {
 		if first, seen := owner[id]; seen && first != i {
@@ -337,47 +376,61 @@ func flowchartSubgraphsDisjoint(blocks []mermaidSubgraph) bool {
 	return true
 }
 
-// flowchartSubgraphIdentByte widens flowchartIdentByte to every non-ASCII
-// byte, so an id written in a non-Latin script is a node id here too.
-//
-// flowchartIdentByte itself must stay ASCII-only: flowchartShapeAt uses it as
-// a lookbehind to decide whether a bracket opens a node's label, and widening
-// it there would change what the normalization pass rewrites. Here the
-// consequence of missing an id is far worse than a missed rewrite — rule 5
-// would not see the shared node at all, so a fence with a genuine crossing
-// edge between two Cyrillic-named nodes would split, lose the edge and draw
-// the shared node twice.
-func flowchartSubgraphIdentByte(b byte) bool {
-	return b >= 0x80 || flowchartIdentByte(b)
-}
+// flowchartSubgraphIDPunct holds the three punctuation characters
+// mermaidIdentRune allows INSIDE an identifier. They are listed apart from it
+// because an id can never BEGIN with one of them, and because each only
+// continues an id when a plain identifier rune follows — see
+// flowchartSubgraphIDEnd.
+const flowchartSubgraphIDPunct = "-./"
 
 // flowchartSubgraphIDEnd returns the index just past the id that starts at
-// start. A '-' or a '.' stays INSIDE the id when another id byte follows it, so
-// `after-state` and `svc.a` each come back as one id, while the '-' of `A-->B`
-// still ends the id at `A` — the byte after it is another '-', not an id byte.
+// start.
 //
-// Both characters are legal in a mermaid id, and both sides of rule 5 have to
-// read them the same way. flowchartSubgraphsDisjoint claims a block's own id as
-// one whole string, so a body reference to `after-state` split into `after` and
-// `state` could never match that claim: the fence would split, and the block
-// the edge points at would be drawn a second time as a stray box named
-// `after-state` — exactly the case the up-front claim exists to catch.
+// What may be in an id is mermaidIdentRune, the same rule the transpiler uses
+// to find where a directive keyword ends: letters, digits, '_', and the three
+// punctuation characters real diagrams write inside names — '-' for kebab-case,
+// '.' for dotted names, '/' for path-like ones. Reusing it rather than
+// re-deriving an id keeps one definition of an identifier in the package, and
+// reading it at RUNE level matters in both directions. A Cyrillic id comes back
+// whole, and a non-Latin punctuation mark between two ids (`A·B`, an em dash)
+// ENDS the first id instead of gluing the pair into one string that rule 5
+// could never match against either half.
 //
-// It also ends the `:::className` skip below. Stopping there at the first byte
+// flowchartIdentByte, the normalizer's own byte test, is deliberately not the
+// rule here. It must stay ASCII-only because flowchartShapeAt uses it as a
+// lookbehind to decide whether a bracket opens a node's label, so widening it
+// there would change what the normalization pass rewrites.
+//
+// The three punctuation characters stay inside the id only when a plain
+// identifier rune follows. That is what keeps `after-state`, `svc.a` and
+// `after/state` whole while the '-' of `A-->B` still ends the id at `A` — the
+// rune after it is another '-'.
+//
+// Both sides of rule 5 have to read an id the same way.
+// flowchartSubgraphsDisjoint claims a block's own id as one whole string, so a
+// body reference to `after-state` split into `after` and `state` could never
+// match that claim: the fence would split, and the block the edge points at
+// would be drawn a second time as a stray box named `after-state` — exactly the
+// case the up-front claim exists to catch.
+//
+// It also ends the `:::className` skip below. Stopping there at the first rune
 // that cannot be part of a class name is what leaves `-->B` for the walk to
 // read; stopping at the next space instead swallowed the whole rest of a
 // statement written tight against the suffix (`A:::hot-->B`), and every id
 // after it with the rest.
 func flowchartSubgraphIDEnd(line string, start int) int {
 	for i := start; i < len(line); {
-		switch {
-		case flowchartSubgraphIdentByte(line[i]):
-			i++
-		case (line[i] == '-' || line[i] == '.') && i+1 < len(line) && flowchartSubgraphIdentByte(line[i+1]):
-			i += 2
-		default:
+		r, size := utf8.DecodeRuneInString(line[i:])
+		if !mermaidIdentRune(r) {
 			return i
 		}
+		if strings.ContainsRune(flowchartSubgraphIDPunct, r) {
+			next, _ := utf8.DecodeRuneInString(line[i+size:])
+			if !mermaidIdentRune(next) || strings.ContainsRune(flowchartSubgraphIDPunct, next) {
+				return i
+			}
+		}
+		i += size
 	}
 	return len(line)
 }
@@ -423,8 +476,12 @@ func flowchartSubgraphNodeIDs(line string) []string {
 			i = flowchartSubgraphIDEnd(body, i+len(flowchartSubgraphClassSuffix))
 			continue
 		}
-		if !flowchartSubgraphIdentByte(body[i]) {
-			i++
+		// an id must OPEN with a plain identifier rune. Letting one of the
+		// three punctuation characters open it would measure a zero-width id on
+		// a shape like `-.->` and leave this walk stuck on the same index.
+		r, size := utf8.DecodeRuneInString(body[i:])
+		if !mermaidIdentRune(r) || strings.ContainsRune(flowchartSubgraphIDPunct, r) {
+			i += size
 			continue
 		}
 		start := i

@@ -379,14 +379,25 @@ renders exactly as it does today:**
    draws a stray box literally named after the other subgraph.
 
 Rule 5 only works if both sides read an id the same way. A block's own id is claimed as one
-whole string, so the walk over the bodies keeps a `-` or a `.` inside an id (`after-state`,
-`svc.a` are one id each) while still ending the id at the `-` of `A-->B`. A `:::className`
-suffix is skipped up to the end of the class name, not up to the next space, so a statement
-written tight against it (`A:::hot-->B`) still shows every id after the suffix.
+whole string, so the walk over the bodies has to produce that same string. What may be in an id
+is `mermaidIdentRune`, the rule the transpiler already uses to find where a directive keyword
+ends: letters, digits, `_`, and the three punctuation characters real diagrams write inside
+names — `-`, `.` and `/`. Each of those three stays inside the id only when another identifier
+rune follows, which keeps `after-state`, `svc.a` and `after/state` whole while still ending the
+id at the `-` of `A-->B`. The walk reads runes, not bytes, so a Cyrillic id comes back whole and
+a non-Latin punctuation mark between two ids (`A·B`, an em dash) ends the first one instead of
+gluing the pair into a string that matches neither half. A `:::className` suffix is skipped up to
+the end of the class name, not up to the next space, so a statement written tight against it
+(`A:::hot-->B`) still shows every id after the suffix.
 
-Two malformed shapes refuse as well, and neither follows from the five conditions: an
-unterminated `subgraph` (no closing `end`) and a stray `end` with nothing open. Neither can be
-split into blocks that mean what the author wrote.
+Three malformed shapes refuse as well, and none follows from the five conditions: an unterminated
+`subgraph` (no closing `end`), a stray `end` with nothing open, and a `subgraph` or `end` line
+carrying a second statement behind a `;` separator (`end; B2 --> A1`). Mermaid accepts `;` as a
+statement separator, and the structural dispatch reads such a line as the keyword alone, so the
+tail would belong to no block and rule 5 would never see the node ids in it — a fence whose only
+crossing edge is written that way would split and lose it. The vendored renderer does not split
+statements on `;` either, so the single-render fallback these lines drop to is exactly as good as
+it was. A `;` inside a label, and a trailing `;` with nothing after it, are not separators.
 
 Rendered art is spliced into the document after glamour has run, bypassing glamour entirely.
 C0 control bytes and DEL are dropped from it (newline and tab kept) before it is spliced, so an
@@ -556,10 +567,9 @@ dependencies change.
 The patch imports `github.com/AlexanderGrooff/mermaid-ascii/cmd` for exactly one symbol,
 `RenderDiagram`, from two call sites: `renderMermaidSource` in `app/ui/mdpreview_transpile.go`
 (the whole-source render) and `stackFlowchartSubgraphs` in `app/ui/mdpreview_subgraph.go` (one
-call per subgraph block). That
-package also contains `web.go`, which implements an HTTP server for the upstream tool's own web
-mode. Go links a package as a whole, so importing `cmd` at all drags in everything `web.go` needs,
-even though nothing in revdiff can ever reach it.
+call per subgraph block). That package also contains `web.go`, which implements an HTTP server
+for the upstream tool's own web mode. Go links a package as a whole, so importing `cmd` at all
+drags in everything `web.go` needs, even though nothing in revdiff can ever reach it.
 
 Measured on the `md-preview` branch (2026-07-29, `go build ./app`, no `-s -w`):
 

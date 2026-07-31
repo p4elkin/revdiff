@@ -346,11 +346,20 @@ func mermaidArtWithoutControls(art string) string {
 		if r == '\n' || r == '\t' {
 			return r
 		}
-		if r < ' ' || r == 0x7f {
+		if mermaidControlRune(r) {
 			return -1
 		}
 		return r
 	}, art)
+}
+
+// mermaidControlRune reports whether r is a C0 control byte or DEL — the bytes
+// that must never reach the terminal from text this patch writes outside
+// glamour. One definition, two callers: mermaidArtWithoutControls keeps newline
+// and tab before consulting it, flowchartSubgraphHeading drops those two as
+// well because a stacked block's heading is a single line.
+func mermaidControlRune(r rune) bool {
+	return r < ' ' || r == 0x7f
 }
 
 // renderMarkdownDocument turns lines (the full, ordered source of a single

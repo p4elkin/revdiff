@@ -34,8 +34,11 @@ diagrams, not a rare corner.
     more than one render because it returns the finished art rather than a source string.
   - `app/ui/mdpreview_flowchart.go` — holds `normalizeFlowchartLine` and `flowchartLinkText`,
     where the quote bug lives.
-  - `app/ui/mdpreview.go` — `renderMermaidBlock` calls `renderMermaidSource`. Unchanged by this
-    plan; listed because it owns the verbatim fallback and the `recover()` that still cover us.
+  - `app/ui/mdpreview.go` — `renderMermaidBlock` calls `renderMermaidSource`. Listed at first
+    because it owns the verbatim fallback and the `recover()` that still cover us. It was
+    expected to stay unchanged, but review found a raw `ESC` in a node label reaching the
+    terminal through the spliced art, so this file gained `mermaidArtWithoutControls` and
+    `spliceMermaidArt` now routes every art through it — see the added task below.
 - Related patterns found: `normalizeFlowchartSource` already leaves `subgraph` and `end` alone by
   design (`flowchartStructuralKeywords`), so the split can run after it on clean source.
 - Dependencies: none new. The vendored `mermaid-ascii` is called exactly as it is today, just
@@ -264,6 +267,31 @@ code. Record it in `PATCH.md` under known limitations instead.
 - [x] run `make build`
 - [x] verify test coverage for `app/ui` has not dropped — 95.6% at the pre-plan commit `5a6c5ca`,
       95.7% now
+
+### ➕ Task 5b: Strip control bytes from the spliced art
+
+Found during review, not in the original scope. The stacked heading is written straight into the
+art, and the art bypasses glamour, so a raw `ESC` in an author's subgraph label reached the
+terminal as a live escape sequence and could repaint the screen. The same hole was already open
+on the whole-diagram path and on the verbatim fence fallback, so the fix belongs one level up
+from the heading.
+
+**Files:**
+- Modify: `app/ui/mdpreview.go` (`spliceMermaidArt`, plus the new `mermaidArtWithoutControls`)
+- Modify: `app/ui/mdpreview_subgraph.go` (`flowchartSubgraphHeading`)
+- Modify: `app/ui/mdpreview_test.go`, `app/ui/mdpreview_subgraph_test.go`
+- Modify: `PATCH.md` (known limitations)
+
+- [x] add `mermaidArtWithoutControls`, dropping C0 bytes and DEL (newline and tab kept), and call
+      it from `spliceMermaidArt` so one call covers the stacked art, the single-render art and
+      the verbatim fallback
+- [x] drop the same bytes from a stacked block's heading, where the reason is width: the rule
+      under the title is sized from that string before the art filter runs
+- [x] write tests that no control byte reaches the rendered document, on both the single-render
+      and the split path
+- [x] record in `PATCH.md` that this closes the mermaid path only — prose, headings, table cells
+      and non-mermaid fences go through glamour, which does not filter escapes, so a raw `ESC`
+      elsewhere in a document still reaches the terminal
 
 ### Task 6: [Final] Update documentation
 

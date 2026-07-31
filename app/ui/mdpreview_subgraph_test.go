@@ -72,19 +72,22 @@ func TestSplitFlowchartSubgraphs_TitleSpellings(t *testing.T) {
 		{"bare keyword", "subgraph", "", ""},
 		{"html line break becomes a space", `subgraph one["Read<br/>then write"]`, "one", "Read then write"},
 		{"html line break, self-closing variant", `subgraph one["Read<br>then write"]`, "one", "Read then write"},
+		// the heading shares mermaidBRPattern with the transpiler, so a literal
+		// two-character escape folds the same way an HTML break does.
+		{"a literal newline escape becomes a space", `subgraph one["Read\nthen write"]`, "one", "Read then write"},
 		{"a control byte is dropped from the heading", "subgraph one[\"A\x1b[31mRED\"]", "one", "A[31mRED"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			source := "flowchart TD\n    " + tt.first + "\n        A1 --> A2\n    end\n" +
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "flowchart TD\n    " + tc.first + "\n        A1 --> A2\n    end\n" +
 				"    subgraph two[Second]\n        B1 --> B2\n    end"
 
 			_, blocks, ok := splitFlowchartSubgraphs(source)
 
 			require.True(t, ok)
 			require.Len(t, blocks, 2)
-			assert.Equal(t, tt.want, blocks[0].title)
-			assert.Equal(t, tt.wantID, blocks[0].id)
+			assert.Equal(t, tc.want, blocks[0].title)
+			assert.Equal(t, tc.wantID, blocks[0].id)
 		})
 	}
 }
@@ -193,9 +196,9 @@ func TestSplitFlowchartSubgraphs_Refusals(t *testing.T) {
         A1 --> A2
     end`},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			header, blocks, ok := splitFlowchartSubgraphs(tt.source)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			header, blocks, ok := splitFlowchartSubgraphs(tc.source)
 
 			assert.False(t, ok, "this fence must keep today's single-render behavior")
 			assert.Empty(t, header, "a refusal returns nothing for the caller to use by mistake")
@@ -334,10 +337,19 @@ func TestSplitFlowchartSubgraphs_PunctuatedIDReferencedAcrossBlocks(t *testing.T
     subgraph svc.b["B"]
         A1[new] --> A2[write]
     end`},
+		// '/' is legal in a mermaid id and reading `after/state` as the two
+		// words `after` and `state` hid this reference from rule 5 entirely.
+		{"a path-like subgraph id", `flowchart TD
+    subgraph before/state["Before"]
+        B1[read] --> after/state
+    end
+    subgraph after/state["After"]
+        A1[new] --> A2[write]
+    end`},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, _, ok := splitFlowchartSubgraphs(normalizeFlowchartSource(tt.source))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, ok := splitFlowchartSubgraphs(normalizeFlowchartSource(tc.source))
 
 			assert.False(t, ok, "an edge pointing at another block must refuse the split")
 		})
@@ -345,22 +357,85 @@ func TestSplitFlowchartSubgraphs_PunctuatedIDReferencedAcrossBlocks(t *testing.T
 }
 
 // TestSplitFlowchartSubgraphs_PunctuatedIDsStillSplit is the other half of that
-// pin: reading a hyphenated or dotted id whole must not make ordinary fences
-// refuse. `before-state` and `after-state` share the word `state` and nothing
-// else, so they are two different nodes and the fence splits.
+// pin: reading a punctuated id whole must not make ordinary fences refuse.
+// `before-state` and `after-state` share the word `state` and nothing else, so
+// they are two different nodes and the fence splits — same for the dotted and
+// path-like spellings.
 func TestSplitFlowchartSubgraphs_PunctuatedIDsStillSplit(t *testing.T) {
-	source := `flowchart TD
-    subgraph before-state["Before"]
-        B1[read] --> B2[write]
+	tests := []struct {
+		name, first, second string
+	}{
+		{"hyphenated ids", "before-state", "after-state"},
+		{"dotted ids", "svc.before", "svc.after"},
+		{"path-like ids", "svc/before", "svc/after"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			source := "flowchart TD\n" +
+				"    subgraph " + tc.first + `["Before"]` + "\n        B1[read] --> B2[write]\n    end\n" +
+				"    subgraph " + tc.second + `["After"]` + "\n        A1[new read] --> A2[new write]\n    end"
+
+			_, blocks, ok := splitFlowchartSubgraphs(normalizeFlowchartSource(source))
+
+			require.True(t, ok, "two blocks whose ids merely share a segment share no node")
+			require.Len(t, blocks, 2)
+		})
+	}
+}
+
+// TestSplitFlowchartSubgraphs_SemicolonStatementTail pins the shape that used
+// to split while quietly losing a statement. Mermaid accepts ';' as a statement
+// separator, so `end; B2 --> A1` is a closing `end` AND a crossing edge — but
+// the structural dispatch reads the line as `end` alone, the tail belongs to no
+// block, and rule 5 never sees the ids in it. The fence would then split into
+// two clean-looking blocks with the crossing edge simply gone. It must refuse
+// instead — see flowchartSecondStatement.
+func TestSplitFlowchartSubgraphs_SemicolonStatementTail(t *testing.T) {
+	tests := []struct {
+		name, source string
+		wantSplit    bool
+	}{
+		{name: "a crossing edge hidden behind an end separator", source: `flowchart TD
+    subgraph before["Before"]
+        B1 --> B2
+    end; B2 --> A1
+    subgraph after["After"]
+        A1 --> A2
+    end`},
+		{name: "a statement hidden behind a subgraph header separator", source: `flowchart TD
+    subgraph before; X --> Y
+        B1 --> B2
     end
-    subgraph after-state["After"]
-        A1[new read] --> A2[new write]
-    end`
+    subgraph after["After"]
+        A1 --> A2
+    end`},
+		// the two shapes that carry no second statement must still split, or
+		// the refusal would cost fences it was never meant to touch.
+		{name: "a trailing separator with nothing after it", wantSplit: true, source: `flowchart TD
+    subgraph before["Before"]
+        B1 --> B2
+    end;
+    subgraph after["After"]
+        A1 --> A2
+    end;`},
+		{name: "a semicolon inside a title is not a separator", wantSplit: true, source: `flowchart TD
+    subgraph before["read; then write"]
+        B1 --> B2
+    end
+    subgraph after["After"]
+        A1 --> A2
+    end`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, blocks, ok := splitFlowchartSubgraphs(tc.source)
 
-	_, blocks, ok := splitFlowchartSubgraphs(normalizeFlowchartSource(source))
-
-	require.True(t, ok, "two blocks whose ids merely share a word share no node")
-	require.Len(t, blocks, 2)
+			require.Equal(t, tc.wantSplit, ok)
+			if tc.wantSplit {
+				require.Len(t, blocks, 2)
+			}
+		})
+	}
 }
 
 // TestSplitFlowchartSubgraphs_NonLatinIDsStillSplit is the other half of the
@@ -421,17 +496,17 @@ func TestStackFlowchartSubgraphs_TitleRuleAndOrder(t *testing.T) {
 		{"Before", "old read", "new read"},
 		{"After", "new read", "old read"},
 	}
-	for i, tt := range want {
+	for i, tc := range want {
 		lines := strings.Split(chunks[i], "\n")
 		require.Greater(t, len(lines), 2)
 
-		assert.Equal(t, tt.title, lines[0], "blocks are stacked in source order, each under its own title")
-		assert.Equal(t, strings.Repeat(mermaidSubgraphRule, runewidth.StringWidth(tt.title)), lines[1],
+		assert.Equal(t, tc.title, lines[0], "blocks are stacked in source order, each under its own title")
+		assert.Equal(t, strings.Repeat(flowchartSubgraphRule, runewidth.StringWidth(tc.title)), lines[1],
 			"the rule under a title matches the title's display width")
 
 		body := strings.Join(lines[2:], "\n")
-		assert.Contains(t, body, tt.drawn, "the block's own art sits under its own title")
-		assert.NotContains(t, body, tt.notDrawn, "the other block's art must not appear here")
+		assert.Contains(t, body, tc.drawn, "the block's own art sits under its own title")
+		assert.NotContains(t, body, tc.notDrawn, "the other block's art must not appear here")
 	}
 }
 
@@ -440,7 +515,7 @@ func TestStackFlowchartSubgraphs_TitleRuleAndOrder(t *testing.T) {
 // ASCII, where the two agree, so the expected length here is hardcoded rather
 // than recomputed with the helper the implementation itself uses.
 func TestStackFlowchartSubgraphs_TitleRuleIsDisplayWidth(t *testing.T) {
-	art, ok := stackFlowchartSubgraphs("flowchart TD", []mermaidSubgraph{
+	art, ok := stackFlowchartSubgraphs("flowchart TD", []flowchartSubgraph{
 		{id: "one", title: "数据", body: []string{"B1 --> B2"}},
 		{id: "two", title: "After", body: []string{"A1 --> A2"}},
 	})
@@ -469,7 +544,7 @@ func TestStackFlowchartSubgraphs_ErroringBlockRefuses(t *testing.T) {
 	_, err := mermaidcmd.RenderDiagram("sequenceDiagram\nB1 --> B2\n", nil)
 	require.Error(t, err, "guard: this header must still make the vendored renderer return an error")
 
-	art, ok := stackFlowchartSubgraphs("sequenceDiagram", []mermaidSubgraph{
+	art, ok := stackFlowchartSubgraphs("sequenceDiagram", []flowchartSubgraph{
 		{id: "before", title: "Before", body: []string{"B1 --> B2"}},
 		{id: "after", title: "After", body: []string{"A1 --> A2"}},
 	})
@@ -479,14 +554,14 @@ func TestStackFlowchartSubgraphs_ErroringBlockRefuses(t *testing.T) {
 }
 
 func TestStackFlowchartSubgraphs_UntitledBlockGetsNoHeading(t *testing.T) {
-	art, ok := stackFlowchartSubgraphs("flowchart TD", []mermaidSubgraph{
+	art, ok := stackFlowchartSubgraphs("flowchart TD", []flowchartSubgraph{
 		{body: []string{"B1 --> B2"}},
 		{title: "After", body: []string{"A1 --> A2"}},
 	})
 
 	require.True(t, ok, "a missing title costs a heading, not the whole split")
 	assert.True(t, strings.HasPrefix(art, "┌"), "an untitled block starts straight into its art, with no empty heading")
-	assert.Contains(t, art, "After\n"+mermaidSubgraphRule)
+	assert.Contains(t, art, "After\n"+flowchartSubgraphRule)
 }
 
 func TestStackFlowchartSubgraphs_BlankBlockRefuses(t *testing.T) {
@@ -516,7 +591,7 @@ func TestStackFlowchartSubgraphs_PanickingBlockRefuses(t *testing.T) {
 	require.Panics(t, func() { _, _ = mermaidcmd.RenderDiagram(panicking, nil) },
 		"guard: this block's source must still PANIC the vendored renderer, not merely error or blank out")
 
-	art, ok := stackFlowchartSubgraphs("flowchart TD", []mermaidSubgraph{
+	art, ok := stackFlowchartSubgraphs("flowchart TD", []flowchartSubgraph{
 		{id: "before", title: "Before", body: []string{"B1 --> B2"}},
 		{id: "after", title: "After", body: []string{"classDef dashed stroke-dasharray: 5 5", "A1 --> A2"}},
 	})
@@ -637,12 +712,12 @@ func TestRenderMermaidSource_UnsplittableFences_KeepTodaysSingleRender(t *testin
         A1[new read] --> Shared[store]
     end`},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			want, err := mermaidcmd.RenderDiagram(normalizeFlowchartSource(tt.source), nil)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			want, err := mermaidcmd.RenderDiagram(normalizeFlowchartSource(tc.source), nil)
 			require.NoError(t, err)
 
-			got, err := renderMermaidSource(tt.source, mermaidUnconstrainedWidth)
+			got, err := renderMermaidSource(tc.source, mermaidUnconstrainedWidth)
 			require.NoError(t, err)
 
 			assert.Equal(t, want, got, "a fence that may not be split must render exactly as it does today")
@@ -665,7 +740,7 @@ func TestRenderMermaidSource_BlankBlock_FallsBackToSingleRender(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, want, got, "a part that cannot render sends the whole fence back to the single render")
-	assert.NotContains(t, got, "Before\n"+mermaidSubgraphRule, "no stacked heading may survive the fallback")
+	assert.NotContains(t, got, "Before\n"+flowchartSubgraphRule, "no stacked heading may survive the fallback")
 }
 
 // --- integration: the real diagram this split was written for ---
@@ -732,6 +807,19 @@ func repeatedLabelLines(art, label string) int {
 	return n
 }
 
+// titleCollisionLines counts lines carrying BOTH block titles — the second
+// broken-layout symptom from the Overview, where the two subgraph rectangles
+// overlap far enough that their titles print on the same row.
+func titleCollisionLines(art string) int {
+	n := 0
+	for line := range strings.SplitSeq(art, "\n") {
+		if strings.Contains(line, "Before") && strings.Contains(line, "After") {
+			n++
+		}
+	}
+	return n
+}
+
 func TestRenderMermaidSource_VariantPlanFence_RendersAsTwoTitledBlocks(t *testing.T) {
 	art, err := renderMermaidSource(variantPlanFence, mermaidUnconstrainedWidth)
 	require.NoError(t, err)
@@ -743,7 +831,7 @@ func TestRenderMermaidSource_VariantPlanFence_RendersAsTwoTitledBlocks(t *testin
 		lines := strings.Split(blocks[i], "\n")
 		require.Greater(t, len(lines), 2, "each block must carry art of its own, not just a heading")
 		assert.Equal(t, want, lines[0], "each block sits under its own title, in source order")
-		assert.Equal(t, strings.Repeat(mermaidSubgraphRule, runewidth.StringWidth(want)), lines[1])
+		assert.Equal(t, strings.Repeat(flowchartSubgraphRule, runewidth.StringWidth(want)), lines[1])
 	}
 
 	// every node the author drew survives the split, in the block it belongs to
@@ -795,19 +883,6 @@ func TestRenderMermaidSource_VariantPlanFence_OverlapIsGone(t *testing.T) {
 	}
 }
 
-// titleCollisionLines counts lines carrying BOTH block titles — the second
-// broken-layout symptom from the Overview, where the two subgraph rectangles
-// overlap far enough that their titles print on the same row.
-func titleCollisionLines(art string) int {
-	n := 0
-	for line := range strings.SplitSeq(art, "\n") {
-		if strings.Contains(line, "Before") && strings.Contains(line, "After") {
-			n++
-		}
-	}
-	return n
-}
-
 // TestRenderMermaidSource_AdversarialFences_NeverPanic covers the malformed
 // shapes an author can actually type. None may take down the preview: the split
 // must either refuse them (see splitFlowchartSubgraphs) or render them, and an
@@ -851,12 +926,12 @@ func TestRenderMermaidSource_AdversarialFences_NeverPanic(t *testing.T) {
 		{"nothing but subgraph structure", "flowchart TD\n    subgraph\n    end"},
 		{"an end with no diagram at all", "end"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			var art string
 			var err error
 			require.NotPanics(t, func() {
-				art, err = renderMermaidSource(tt.source, mermaidUnconstrainedWidth)
+				art, err = renderMermaidSource(tc.source, mermaidUnconstrainedWidth)
 			})
 			// an error is an acceptable answer, and so is art; silently
 			// returning neither is not — renderMermaidBlock reads empty art
@@ -894,8 +969,19 @@ func TestFlowchartSubgraphNodeIDs(t *testing.T) {
 		{"a hyphenated id stays whole", "after-state --> B", []string{"after-state", "B"}},
 		{"a dotted id stays whole", "svc.a --> svc.b", []string{"svc.a", "svc.b"}},
 		{"a hyphenated id written against the arrow", "after-state-->B", []string{"after-state", "B"}},
+		{"a path-like id stays whole", "after/state --> B", []string{"after/state", "B"}},
+		{"a path-like id written against the arrow", "svc/a-->B", []string{"svc/a", "B"}},
 		{"a non-Latin id", "Начало --> Конец", []string{"Начало", "Конец"}},
 		{"a non-Latin id with a label", "Начало[читать] --> B", []string{"Начало", "B"}},
+		// non-Latin punctuation must END an id rather than continue it. Read as
+		// one id, `A·B` matches neither `A` nor `B` and hides a genuinely shared
+		// node from rule 5.
+		{"a middle dot separates two ids", "A·B --> C", []string{"A", "B", "C"}},
+		{"an em dash separates two ids", "A—B --> C", []string{"A", "B", "C"}},
+		// a guard for a DIRECT call on un-normalized source: a dotted arrow
+		// opens with a character that may sit inside an id but never start one.
+		// Letting it start one measures a zero-width id and wedges the walk.
+		{"an un-normalized dotted arrow is not an id", "A -.-> B", []string{"A", "B"}},
 		// Both of the next two are guards for a DIRECT call: normalization has
 		// already removed every dropped directive, and splitFlowchartSubgraphs
 		// skips comment-only lines, so neither shape reaches here in production.
@@ -903,9 +989,9 @@ func TestFlowchartSubgraphNodeIDs(t *testing.T) {
 		{"a style directive mentions nothing", "style A fill:#f9f", nil},
 		{"a comment line mentions nothing", "%% A --> B", nil},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, flowchartSubgraphNodeIDs(tt.line))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, flowchartSubgraphNodeIDs(tc.line))
 		})
 	}
 }

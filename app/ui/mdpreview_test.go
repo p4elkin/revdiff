@@ -224,9 +224,9 @@ func TestRenderMarkdownDocument_MermaidArtCarriesNoControlBytes(t *testing.T) {
 			"    subgraph before[\"Before\"]\n        B1[\"b\x1b[31mRED\"] --> B2[old write]\n    end\n" +
 			"    subgraph after[\"After\"]\n        A1[new read] --> A2[new write]\n    end"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			doc := "prose\n\n```mermaid\n" + tt.fence + "\n```\n"
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := "prose\n\n```mermaid\n" + tc.fence + "\n```\n"
 
 			got := renderMarkdownDocument(mdLines(doc), 80, true)
 
