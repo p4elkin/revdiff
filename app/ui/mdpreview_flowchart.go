@@ -372,6 +372,65 @@ func flowchartEdgeAt(line, masked string, i int) (segment string, next int, ok b
 	return line[i:end], end, true
 }
 
+// normalizeFlowchartEdgeLabelQuotes drops one layer of surrounding double
+// quotes from every `|label|` written directly after an arrow, so
+// `A -->|"listVariants (strict mode)"| B` reaches the renderer as
+// `A -->|listVariants (strict mode)| B`.
+//
+// flowchartLinkText already unquotes a label, but only for the labels IT
+// builds — the ones written in the inline `-- label -->` form. A label written
+// the common way, straight after the arrow, is part of neither
+// flowchartLinkPattern alternative: the arrow matches the bare-link
+// alternative and the `|...|` that follows is copied through untouched. Its
+// quotes then survive into the art, where the renderer draws them.
+//
+// Arrows are found in the MASKED copy and the text is sliced out of the
+// original, the same discipline the other two passes use, so a `-->|"x"|` that
+// is really node-label text is not rewritten. This runs after
+// normalizeFlowchartLinks, so `-->` and `<-->` are the only arrows left.
+//
+// A layer comes off only when the label opens and closes with a quote and
+// carries none inside. That leaves `|"a" and "b"|` alone rather than eating
+// its inner quotes, and it is also what makes the pass a fixed point: what it
+// writes back can never be stripped a second time.
+func normalizeFlowchartEdgeLabelQuotes(line string) string {
+	masked := flowchartMaskLabels(line)
+
+	var out strings.Builder
+	for i := 0; i < len(line); {
+		segment, next, ok := flowchartEdgeAt(line, masked, i)
+		if !ok {
+			out.WriteByte(line[i])
+			i++
+			continue
+		}
+		out.WriteString(unquoteFlowchartEdgeLabel(segment))
+		i = next
+	}
+	return out.String()
+}
+
+// unquoteFlowchartEdgeLabel trims the surrounding quotes off one arrow segment
+// as returned by flowchartEdgeAt — either a bare arrow, or an arrow followed
+// by `|label|`. The segment is handed back unchanged when there is no label,
+// when the label is not quoted on both ends, or when it carries a quote of its
+// own.
+func unquoteFlowchartEdgeLabel(segment string) string {
+	open := strings.IndexByte(segment, '|')
+	if open < 0 {
+		return segment
+	}
+	label := segment[open+1 : len(segment)-1]
+	if len(label) <= 2 || label[0] != '"' || label[len(label)-1] != '"' {
+		return segment
+	}
+	inner := label[1 : len(label)-1]
+	if strings.Contains(inner, `"`) {
+		return segment
+	}
+	return segment[:open+1] + inner + "|"
+}
+
 // normalizeFlowchartNodes rewrites every node shape on line into the
 // square-bracket form and turns any '|' inside a node label into '/'. Arrows
 // and their `|label|` suffixes are copied through untouched.
@@ -471,8 +530,9 @@ func flowchartDirective(text string, keywords []string) string {
 	return mermaidDirective(strings.TrimSpace(flowchartMaskLabels(text)), keywords)
 }
 
-// normalizeFlowchartLine normalizes one body line: links first, then node
-// shapes (see this file's doc comment for why that order is load-bearing).
+// normalizeFlowchartLine normalizes one body line: links first, then the
+// quotes around whatever edge label those links left behind, then node shapes
+// (see this file's doc comment for why links-before-nodes is load-bearing).
 // keep is false when the line is a styling or layout directive and must be
 // dropped from the source entirely — see flowchartDroppedKeywords.
 //
@@ -492,7 +552,7 @@ func flowchartDirective(text string, keywords []string) string {
 // is no longer there.
 func normalizeFlowchartLine(line string) (normalized string, keep bool) {
 	body, comment, hasComment := strings.Cut(line, "%%")
-	linked := normalizeFlowchartLinks(body)
+	linked := normalizeFlowchartEdgeLabelQuotes(normalizeFlowchartLinks(body))
 
 	if flowchartDirective(linked, flowchartStructuralKeywords) != "" {
 		return line, true

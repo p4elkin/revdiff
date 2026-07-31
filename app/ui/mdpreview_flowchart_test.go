@@ -123,6 +123,44 @@ func TestNormalizeFlowchartSource_PipeInsideNodeLabel_BecomesSlash(t *testing.T)
 	}
 }
 
+func TestNormalizeFlowchartSource_QuotedEdgeLabel_LosesItsQuotes(t *testing.T) {
+	// mermaid quotes an edge label to protect the spaces in it, a job the
+	// `|...|` delimiters already do here. The vendored renderer draws the quote
+	// marks, so `-->|"listVariants (strict mode)"|` shows them in the art.
+	tests := []struct {
+		name, input, want string
+	}{
+		{
+			"quoted pipe label",
+			`A -->|"listVariants (strict mode)"| B`,
+			"A -->|listVariants (strict mode)| B",
+		},
+		{"bidirectional", `A <-->|"both ways"| B`, "A <-->|both ways| B"},
+		{"link normalized first", `A ==>|"thick"| B`, "A -->|thick| B"},
+		{"space before the label", `A --> |"spaced"| B`, "A --> |spaced| B"},
+		{"two labeled links on one line", `A -->|"one"| B -->|"two"| C`, "A -->|one| B -->|two| C"},
+		// Nothing below may change. The inline `-- label -->` form is unquoted by
+		// flowchartLinkText and must keep behaving as it does; a label carrying
+		// its own quotes is left whole rather than half-eaten; and a node label
+		// is not an edge label, however much punctuation it holds.
+		{"inline labeled form still unquoted", `A -- "with spaces" --> B`, "A -->|with spaces| B"},
+		{"interior quotes only", `A -->|say "hi" now| B`, `A -->|say "hi" now| B`},
+		{"quoted on both ends, quoted inside", `A -->|"a" and "b"| B`, `A -->|"a" and "b"| B`},
+		{"unquoted label", "A -->|already| B", "A -->|already| B"},
+		{"empty quoted label", `A -->|""| B`, `A -->|""| B`},
+		{"node label keeps its quotes", `A -->|"go"| B["target"]`, `A -->|go| B["target"]`},
+		{"pipe inside a node label", `A --> B["a|b"]`, `A --> B["a/b"]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeFlowchartBody(t, tc.input)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, got, normalizeFlowchartBody(t, got),
+				"one layer only: a second pass must change nothing")
+		})
+	}
+}
+
 func TestNormalizeFlowchartSource_WellFormedConstructs_NotDisturbed(t *testing.T) {
 	// Everything the corpus scan found working today. Each of these renders
 	// correctly through the vendored parser already, so the normalization pass

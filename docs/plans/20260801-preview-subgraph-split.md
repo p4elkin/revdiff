@@ -181,14 +181,14 @@ code. Record it in `PATCH.md` under known limitations instead.
   `flowchartLinkText`)
 - Modify: `app/ui/mdpreview_flowchart_test.go` (beside the existing link-normalization tests)
 
-- [ ] write a failing test: `A -->|"listVariants (strict mode)"| B` must normalize to
+- [x] write a failing test: `A -->|"listVariants (strict mode)"| B` must normalize to
       `A -->|listVariants (strict mode)| B`
-- [ ] add a pass over the line that finds a `|...|` region directly following an arrow and trims
+- [x] add a pass over the line that finds a `|...|` region directly following an arrow and trims
       one layer of surrounding double quotes from it
-- [ ] make it a fixed point — running it twice must give the same result as running it once
-- [ ] write tests for the cases that must NOT change: the `-- label -->` form still works, a
+- [x] make it a fixed point — running it twice must give the same result as running it once
+- [x] write tests for the cases that must NOT change: the `-- label -->` form still works, a
       label with an interior quote is left alone, a `|` inside a node label is untouched
-- [ ] run `go test ./app/ui/ -run 'Flowchart' -count=1` - must pass before task 2
+- [x] run `go test ./app/ui/ -run 'Flowchart' -count=1` - must pass before task 2
 
 ### Task 2: Parse top-level subgraphs and decide whether a fence may be split
 
