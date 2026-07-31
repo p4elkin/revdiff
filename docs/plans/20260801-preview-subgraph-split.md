@@ -196,17 +196,17 @@ code. Record it in `PATCH.md` under known limitations instead.
 - Create: `app/ui/mdpreview_subgraph.go`
 - Create: `app/ui/mdpreview_subgraph_test.go`
 
-- [ ] create `app/ui/mdpreview_subgraph.go` with a type holding one subgraph's title and body
+- [x] create `app/ui/mdpreview_subgraph.go` with a type holding one subgraph's title and body
       lines, and a function that walks normalized flowchart source and returns the header line
       plus the top-level subgraphs it found
-- [ ] extract the title from all three header spellings: `subgraph id["Label"]`,
+- [x] extract the title from all three header spellings: `subgraph id["Label"]`,
       `subgraph id [Label]`, bare `subgraph id`
-- [ ] implement the five-rule split decision from the Solution Overview, returning "not
+- [x] implement the five-rule split decision from the Solution Overview, returning "not
       splittable" rather than an error for every refusal
-- [ ] write one test per refusal rule: single subgraph, nested subgraphs, an edge crossing two
+- [x] write one test per refusal rule: single subgraph, nested subgraphs, an edge crossing two
       subgraphs, a node id shared by two subgraphs, a node declared outside every subgraph
-- [ ] write tests for the positive case and for all three title spellings
-- [ ] run `go test ./app/ui/ -run 'Subgraph' -count=1` - must pass before task 3
+- [x] write tests for the positive case and for all three title spellings
+- [x] run `go test ./app/ui/ -run 'Subgraph' -count=1` - must pass before task 3
 
 ### Task 3: Render each subgraph separately and stack the results
 
