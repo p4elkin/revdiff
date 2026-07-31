@@ -418,6 +418,13 @@ const flowchartSubgraphIDPunct = "-./"
 // read; stopping at the next space instead swallowed the whole rest of a
 // statement written tight against the suffix (`A:::hot-->B`), and every id
 // after it with the rest.
+//
+// Known limitation: a subgraph id containing punctuation outside this set (e.g.
+// `A·B` with a middle dot, or `a+b` with a plus) is claimed whole by the block
+// header but tokenized into pieces when walked from the body text. This causes
+// flowchartSubgraphsDisjoint to miss a crossing edge pointing at such a block.
+// Real-world ids are alphanumeric, so this gap is accepted rather than fixed
+// (see the Known limitations section in PATCH.md).
 func flowchartSubgraphIDEnd(line string, start int) int {
 	for i := start; i < len(line); {
 		r, size := utf8.DecodeRuneInString(line[i:])
