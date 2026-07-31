@@ -59,17 +59,19 @@ current HEAD of `md-preview`; they will drift after every rebase — treat them 
 - `app/ui/model.go`
   - `mdPreview bool` field on `modeState`
   - `markdownPreviewable bool` field on `loadedFileState` — the real gate for preview mode (a
-    single, full-context markdown file). It exists because `mdTOC` is nil for a heading-less
+    full-context markdown file). It exists because `mdTOC` is nil for a heading-less
     markdown file, so `mdTOC != nil` wrongly refused preview for valid heading-less docs.
   - `keymap.ActionTogglePreview` added to the toggle-grouping `case` that routes to
     `handleViewToggle`
   - `case keymap.ActionTogglePreview: m.toggleMarkdownPreview()` inside `handleViewToggle`
 - `app/ui/loaders.go`
   - in `handleFileLoaded`, beside the existing `mdTOC` computation: sets
-    `m.file.markdownPreviewable = m.file.singleFile && m.isMarkdownFile(msg.file) &&
-    m.file.singleColLineNum` (the same three conditions that gate `mdTOC`, minus the
-    has-headings requirement). This makes `loaders.go` a newly-touched file for the patch, so a
-    rebase moving that block will surface a fresh conflict here.
+    `m.file.markdownPreviewable = m.isMarkdownFile(msg.file) && m.file.singleColLineNum`.
+    This makes `loaders.go` a newly-touched file for the patch, so a rebase moving that block
+    will surface a fresh conflict here.
+  - the `mdTOC` build below it gained its own `m.file.singleFile &&` condition (second hunk in
+    this file). The two conditions used to be one shared expression; they are now deliberately
+    different, and each carries a comment saying so. See "Preview in multi-file reviews" below.
 - `app/ui/diffview.go`
   - line ~280: early-return branch in `renderDiff()` — `if m.modes.mdPreview &&
     m.file.markdownPreviewable { return m.renderMarkdownPreview() }`, placed beside the existing
@@ -77,7 +79,7 @@ current HEAD of `md-preview`; they will drift after every rebase — treat them 
 - `app/ui/view.go`
   - line 459: `{"▤", m.modes.mdPreview}` added to `statusModeIcons()`
 
-That is 9 hunks across 4 files. The plan's Task 4 text counts by checklist item, not by literal
+That is 12 hunks across 5 files. The plan's Task 4 text counts by checklist item, not by literal
 diff hunk (e.g. `keymap.go`'s enum + validActions edit is one checklist item but two hunks), so
 its site count differs — use the itemized list above as the actual hunk map.
 
@@ -190,6 +192,39 @@ previewing — same root cause as Task 5, caught at three more sites):**
 - `app/ui/model.go` — no new hunk: the existing `dispatchAction` guard changed shape (see the
   Task 5 entry above).
 
+**Preview in multi-file reviews (the gate no longer demands a single-file review):**
+
+The first version of the gate also required `m.file.singleFile`, so `P` was inert in every review
+holding more than one file — including a mixed markdown + java review where the displayed file was
+a perfectly renderable full-context document. What makes a whole-document glamour render safe is
+that the displayed file is full context (every line present, so no table or code block can be shown
+half-rendered); the size of the review says nothing about that. The `singleFile` term was extra
+caution, not a safety condition, and it is gone.
+
+- `app/ui/loaders.go` — the two conditions in `handleFileLoaded` now differ on purpose:
+  - `m.file.markdownPreviewable = m.isMarkdownFile(msg.file) && m.file.singleColLineNum` — no
+    `singleFile` term.
+  - the `mdTOC` build keeps `m.file.singleFile &&` of its own. The TOC renders into the `paneTree`
+    slot (`view.go`'s `m.file.singleFile && m.file.mdTOC != nil` branch), which in a multi-file
+    review is the file tree's. Building a TOC there would replace the file list with a table of
+    contents and leave no way to reach the other files. Preview has no such conflict — it renders
+    into the diff pane, which belongs to the displayed file either way.
+
+  Because the two were one shared expression before, both carry a comment saying they are now
+  different. A rebase must not "tidy" them back into one.
+- Nothing else changed. `mdTOC` is nil in a multi-file review, so every TOC-dependent path
+  (`treePaneHidden`, `togglePane`, `toggleTreePane`, `handleTreeAction`'s TOC dispatch,
+  `handleFileOrSearchNav`'s TOC branch, `view.go`'s TOC render branch) behaves exactly as it did
+  before this change.
+- Pane geometry: in a multi-file review with the tree visible, `handleResize` sets
+  `viewport.Width = width - treeWidth - 4`, which is the same value `View` uses as `diffPaneW`. The
+  pan clamp reads `mdPreviewCutWidth()` = `viewport.Width`, so it clamps against the narrower
+  two-pane width and the `»` glyph still lands inside the pane. Pinned by
+  `TestView_MdPreviewInMultiFileReview_PaneGeometryIntact` and
+  `TestPanMarkdownPreview_MultiFileReview_ClampsAgainstTwoPaneWidth`.
+- `mdPreviewAllowedActions` is unchanged. `next_item`/`prev_item` stay blocked — see the expanded
+  comment above the map, and the "must leave preview before changing file" limitation below.
+
 **Test-only, mechanical, not part of the feature itself:**
 
 - `app/keymap/keymap_test.go` — asserts `P` resolves to `ActionTogglePreview`
@@ -202,8 +237,8 @@ previewing — same root cause as Task 5, caught at three more sites):**
 
 `app/ui/diffview.go` and `app/ui/model.go` are the most actively developed files upstream and
 the most likely to conflict — this was flagged going in (see the plan's "Patch discipline"
-section) and confirmed empirically: `model.go` alone carries 6 of the patch's 19 existing-file
-hunks (keymap 4, model 6, diffview 1, mouse 3, view 4, diffnav 1).
+section) and confirmed empirically: `model.go` alone carries 6 of the patch's 21 existing-file
+hunks (keymap 4, model 6, loaders 2, diffview 1, mouse 3, view 4, diffnav 1).
 
 ## Mermaid diagram type coverage
 
@@ -308,6 +343,16 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   glamour) goes blank once you pan past its end.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
+- **You must leave preview before changing file.** Preview now works in a multi-file review, but no
+  file-changing key is on the allowlist: `n`/`p` (`next_item`/`prev_item`), tree focus, and tree
+  navigation all stay blocked, and a mouse click in either pane is read-only while previewing. So
+  reading two markdown files in one review is `P`, read, `P`, `n`, `P`. The mode itself survives a
+  file switch correctly (it stays on for another full-context markdown, and `handleFileLoaded`
+  switches it off for anything else) — there is simply no key that performs the switch from inside
+  preview. Allowing `n`/`p` was considered and rejected: with a search still live they navigate
+  search matches instead of files, which writes `m.nav.diffCursor` and jumps the viewport in
+  diff-line coordinates the preview render does not have. See the comment above
+  `mdPreviewAllowedActions`.
 - **Most transpiled classDiagram/stateDiagram-v2 fences are wider than an 80-column pane, and the
   adaptive label cap only reduces that — it does not prevent it.** Re-measured 2026-07-29 over
   every class/state mermaid fence in the author's document corpus (18 fences), rendered at a pane

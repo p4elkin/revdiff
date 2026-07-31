@@ -552,10 +552,17 @@ func (m Model) handleFileLoaded(msg fileLoadedMsg) (tea.Model, tea.Cmd) {
 	m.file.singleColLineNum = m.isFullContext(msg.lines)
 
 	// detect markdown full-context mode and build TOC. markdownPreviewable is the
-	// gate for preview mode: a single, full-context markdown file. mdTOC is a
-	// narrower thing — it is nil when that markdown file has no headings — so it
-	// cannot double as the preview gate (see toggleMarkdownPreview).
-	m.file.markdownPreviewable = m.file.singleFile && m.isMarkdownFile(msg.file) && m.file.singleColLineNum
+	// gate for preview mode: a full-context markdown file, whatever else the
+	// review contains. Full context is what makes a whole-document render safe —
+	// every line of the file is present, so nothing can be shown half-rendered.
+	// The number of files in the review says nothing about that, so it is
+	// deliberately NOT part of this condition.
+	//
+	// mdTOC is a narrower thing and has its own, DIFFERENT condition below — the
+	// two used to be one expression, so do not assume they still match. It is nil
+	// when the markdown file has no headings, so it cannot double as the preview
+	// gate (see toggleMarkdownPreview).
+	m.file.markdownPreviewable = m.isMarkdownFile(msg.file) && m.file.singleColLineNum
 	if !m.file.markdownPreviewable {
 		// preview mode cannot survive into a file it is not allowed to render:
 		// renderDiff would fall back to the ordinary diff while dispatchAction
@@ -565,7 +572,13 @@ func (m Model) handleFileLoaded(msg fileLoadedMsg) (tea.Model, tea.Cmd) {
 		m.modes.mdPreview = false
 	}
 	m.file.mdTOC = nil
-	if m.file.markdownPreviewable {
+	// the TOC keeps the single-file condition preview dropped: it renders into
+	// the paneTree slot (see the render branch in view.go), which in a
+	// multi-file review already belongs to the file tree. Building it there
+	// would replace the file list with a table of contents and leave no way to
+	// reach the other files. Preview has no such conflict — it renders into the
+	// diff pane, which is the displayed file's own space either way.
+	if m.file.singleFile && m.file.markdownPreviewable {
 		m.file.mdTOC = m.parseTOC(msg.lines, msg.file)
 	}
 	switch {

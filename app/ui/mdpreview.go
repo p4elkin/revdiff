@@ -385,12 +385,15 @@ func renderMarkdownDocument(lines []diff.DiffLine, width int, noColors bool) str
 
 // toggleMarkdownPreview flips markdown preview mode on/off for the currently
 // loaded file. Turning it ON is refused (no state change) unless
-// m.file.markdownPreviewable is set — that flag marks a single, full-context
-// markdown file (see the gate in loaders.go), which is exactly the condition
-// under which a whole-document render is safe (no partially-shown table — see
-// the plan's Overview). It is deliberately NOT gated on m.file.mdTOC: mdTOC is
-// nil for a heading-less markdown file, which is still a valid full-context
-// document that must be previewable. Turning it OFF is always allowed: gating
+// m.file.markdownPreviewable is set — that flag marks a full-context markdown
+// file (see the gate in loaders.go), which is exactly the condition under which
+// a whole-document render is safe (no partially-shown table — see the plan's
+// Overview). The review may hold any number of other files: full context is a
+// property of the displayed file alone. It is deliberately NOT gated on
+// m.file.mdTOC either, for two separate reasons — mdTOC is nil for a
+// heading-less markdown file, which is still a valid full-context document, and
+// it is nil for EVERY file of a multi-file review because the TOC would have to
+// take the file tree's pane. Turning it OFF is always allowed: gating
 // the OFF transition too would strand the mode with no exit key if a file
 // switch cleared markdownPreviewable while preview was on. The mode defaults
 // to off.
@@ -714,12 +717,27 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, bool) {
 // harmless action-by-action.
 //
 // next_item/prev_item (n/N/p) are excluded even though they read like
-// harmless "file navigation": when the markdown TOC is active (the same gate
-// that allows preview at all — see toggleMarkdownPreview), these actions
-// route to jumpTOCEntry, which calls syncDiffToTOCCursor and unconditionally
-// reassigns m.nav.diffCursor — exactly the class of bug this allowlist
-// exists to prevent, just reached through TOC navigation instead of the diff
-// pane's own j/k.
+// harmless "file navigation". They stay excluded in every review shape, for
+// two different reasons — one per branch of handleFileOrSearchNav:
+//
+//   - with a search still live (a search run before P was pressed leaves
+//     m.search.matches populated; only a file load clears it), the FIRST
+//     branch wins in any review, single- or multi-file. It calls
+//     nextSearchMatch/prevSearchMatch, which reassign m.nav.diffCursor and
+//     then centerViewportOnCursor — a viewport jump computed in diff-line
+//     coordinates that the preview render does not have. That is exactly the
+//     class of bug this allowlist exists to prevent.
+//   - with no search live and a single-file markdown review, the TOC branch
+//     wins: jumpTOCEntry calls syncDiffToTOCCursor, which unconditionally
+//     reassigns m.nav.diffCursor. Same bug, reached through TOC navigation
+//     instead of the diff pane's own j/k.
+//
+// In a multi-file review with no search live the third branch would be
+// reachable and would merely switch files (StepFile + loadSelectedIfChanged,
+// no cursor write). Allowing it only in that case would make the allowlist
+// depend on runtime state, and would still have to keep the search branch
+// out. So the answer stays "no": to move between files, press P first, then
+// navigate, then press P again on the next markdown file.
 var mdPreviewAllowedActions = map[keymap.Action]bool{
 	keymap.ActionTogglePreview:  true,
 	keymap.ActionQuit:           true,

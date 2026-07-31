@@ -332,7 +332,7 @@ func mdPreviewTestModel(lines []diff.DiffLine) Model {
 	m.file.name = "plan.md"
 	m.file.lines = lines
 	m.file.singleFile = true
-	m.file.markdownPreviewable = true // a single full-context markdown file, the way loaders.go sets it
+	m.file.markdownPreviewable = true // full-context markdown, the way loaders.go sets it
 	m.file.mdTOC = sidepane.ParseTOC(lines, "plan.md")
 	m.layout.focus = paneDiff
 	m.layout.viewport.Width = 80
@@ -440,6 +440,204 @@ func TestRenderDiff_MarkdownPreviewOn_FileWithoutTOC_FallsBackToNormalDiff(t *te
 	out := m.renderDiff()
 
 	assert.Contains(t, xansi.Strip(out), "# Title", "when not previewable, renderDiff must fall back to the normal diff render")
+}
+
+// --- multi-file reviews: preview follows the displayed file, not the review size ---
+//
+// What makes a whole-document glamour render safe is that the displayed file is
+// full-context markdown — every line of it is present, so nothing can be shown
+// half-rendered. How many files the review contains has nothing to do with that,
+// so markdownPreviewable is not gated on m.file.singleFile. The markdown TOC is:
+// it draws into the paneTree slot that the file tree owns in a multi-file review
+// (see the gate in loaders.go and the render branch in view.go).
+
+// javaDiffLines is the stand-in for the non-markdown file in a mixed review: a
+// real diff with added and removed lines, so isFullContext is false for it for
+// two independent reasons (extension and change types).
+func javaDiffLines() []diff.DiffLine {
+	return []diff.DiffLine{
+		{OldNum: 1, NewNum: 1, Content: "class Main {", ChangeType: diff.ChangeContext},
+		{OldNum: 2, Content: "  int old;", ChangeType: diff.ChangeRemove},
+		{NewNum: 2, Content: "  int shiny;", ChangeType: diff.ChangeAdd},
+		{OldNum: 3, NewNum: 3, Content: "}", ChangeType: diff.ChangeContext},
+	}
+}
+
+// mdPreviewMultiFileModel builds a review holding several files, with the file
+// list already loaded so m.file.singleFile is false the way handleFilesLoaded
+// leaves it. No file diff is loaded yet — each test drives handleFileLoaded
+// itself for the file it cares about. Viewport width matches View's two-pane
+// diffPaneW (width - treeWidth - 4), the way handleResize sets it.
+func mdPreviewMultiFileModel(t *testing.T, paths []string, diffs map[string][]diff.DiffLine) Model {
+	t.Helper()
+	entries := make([]diff.FileEntry, len(paths))
+	for i, p := range paths {
+		entries[i] = diff.FileEntry{Path: p}
+	}
+	m := testModel(paths, diffs)
+	result, _ := m.Update(filesLoadedMsg{entries: entries})
+	m = result.(Model)
+	require.False(t, m.file.singleFile, "fixture sanity: a multi-file review must not be single-file")
+	m.layout.focus = paneDiff
+	m.layout.viewport.Width = m.layout.width - m.layout.treeWidth - 4
+	m.layout.viewport.Height = 20
+	return m
+}
+
+func TestHandleFileLoaded_MultiFileReview_FullContextMarkdownIsPreviewable(t *testing.T) {
+	// the reported bug: a mixed markdown + java review refused P on the markdown
+	// file, because the gate also demanded a single-file review.
+	mdSrc := mdLines("# Plan\n\nSome prose.\n")
+	m := mdPreviewMultiFileModel(t, []string{"Main.java", "plan.md"},
+		map[string][]diff.DiffLine{"Main.java": javaDiffLines(), "plan.md": mdSrc})
+
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "plan.md", lines: mdSrc, seq: m.file.loadSeq})
+	m = result.(Model)
+
+	assert.True(t, m.file.markdownPreviewable,
+		"a full-context markdown file must be previewable even when the review holds other files")
+}
+
+func TestHandleFileLoaded_MultiFileReview_MarkdownKeepsFileTreeInsteadOfTOC(t *testing.T) {
+	// the TOC must NOT follow the relaxed preview gate: it renders into the
+	// paneTree slot, which in a multi-file review is the file tree's.
+	mdSrc := mdLines("# Plan\n\n## Section\n\nSome prose.\n")
+	m := mdPreviewMultiFileModel(t, []string{"Main.java", "plan.md"},
+		map[string][]diff.DiffLine{"Main.java": javaDiffLines(), "plan.md": mdSrc})
+
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "plan.md", lines: mdSrc, seq: m.file.loadSeq})
+	m = result.(Model)
+
+	assert.Nil(t, m.file.mdTOC, "the markdown TOC must stay off in a multi-file review")
+	assert.False(t, m.treePaneHidden(), "the file tree pane must stay visible")
+	assert.Contains(t, xansi.Strip(m.View()), "Main.java",
+		"the left pane must still render the file tree, not a table of contents")
+}
+
+func TestToggleMarkdownPreview_MultiFileReview_TogglesOnAndRendersPreview(t *testing.T) {
+	mdSrc := mdLines("# Plan\n\nSome prose.\n")
+	m := mdPreviewMultiFileModel(t, []string{"Main.java", "plan.md"},
+		map[string][]diff.DiffLine{"Main.java": javaDiffLines(), "plan.md": mdSrc})
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "plan.md", lines: mdSrc, seq: m.file.loadSeq})
+	m = result.(Model)
+	require.False(t, m.modes.mdPreview)
+
+	m.toggleMarkdownPreview()
+
+	require.True(t, m.modes.mdPreview, "P must turn preview on for the markdown file of a mixed review")
+	out := m.renderDiff()
+	assert.Equal(t, m.renderMarkdownPreview(), out, "renderDiff must dispatch to the markdown preview render")
+	assert.NotContains(t, xansi.Strip(out), "# Plan", "glamour must style away the raw '#' heading marker")
+}
+
+func TestHandleFileLoaded_MultiFileReview_PreviewSurvivesSwitchToAnotherMarkdown(t *testing.T) {
+	// both files are full-context markdown, so the mode stays on across the
+	// switch and the pane shows the newly loaded document.
+	first := mdLines("# First\n\nprose about the first plan.\n")
+	second := mdLines("# Second\n\nprose about the second plan.\n")
+	m := mdPreviewMultiFileModel(t, []string{"first.md", "second.md"},
+		map[string][]diff.DiffLine{"first.md": first, "second.md": second})
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "first.md", lines: first, seq: m.file.loadSeq})
+	m = result.(Model)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	result, _ = m.handleFileLoaded(fileLoadedMsg{file: "second.md", lines: second, seq: m.file.loadSeq})
+	m = result.(Model)
+
+	assert.True(t, m.modes.mdPreview, "preview must stay on when the next file is previewable too")
+	rendered := xansi.Strip(m.renderDiff())
+	assert.Contains(t, rendered, "prose about the second plan", "the pane must show the newly loaded document")
+	assert.NotContains(t, rendered, "prose about the first plan", "the previous document must be gone")
+	assert.NotContains(t, rendered, "# Second", "the new document must be rendered, not shown as raw source")
+}
+
+func TestHandleFileLoaded_MultiFileReview_SwitchToJavaClearsPreview(t *testing.T) {
+	mdSrc := mdLines("# Plan\n\nSome prose.\n")
+	java := javaDiffLines()
+	m := mdPreviewMultiFileModel(t, []string{"Main.java", "plan.md"},
+		map[string][]diff.DiffLine{"Main.java": java, "plan.md": mdSrc})
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "plan.md", lines: mdSrc, seq: m.file.loadSeq})
+	m = result.(Model)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	result, _ = m.handleFileLoaded(fileLoadedMsg{file: "Main.java", lines: java, seq: m.file.loadSeq})
+	m = result.(Model)
+
+	assert.False(t, m.file.markdownPreviewable, "a java file is never previewable")
+	assert.False(t, m.modes.mdPreview, "preview must switch off when the next file cannot render it")
+	assert.Contains(t, xansi.Strip(m.renderDiff()), "int shiny", "the java file must render as an ordinary diff")
+}
+
+func TestHandleFileLoaded_MultiFileReview_ModifiedMarkdownIsNotPreviewable(t *testing.T) {
+	// a markdown file shown as a real diff is only partly present, so the
+	// full-context condition still refuses it — relaxing singleFile did not
+	// widen the gate in that direction.
+	partial := []diff.DiffLine{
+		{OldNum: 1, NewNum: 1, Content: "# Plan", ChangeType: diff.ChangeContext},
+		{OldNum: 2, Content: "old wording", ChangeType: diff.ChangeRemove},
+		{NewNum: 2, Content: "new wording", ChangeType: diff.ChangeAdd},
+	}
+	m := mdPreviewMultiFileModel(t, []string{"Main.java", "plan.md"},
+		map[string][]diff.DiffLine{"Main.java": javaDiffLines(), "plan.md": partial})
+
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "plan.md", lines: partial, seq: m.file.loadSeq})
+	m = result.(Model)
+
+	require.False(t, m.file.markdownPreviewable, "a partially shown markdown file must stay refused")
+	m.toggleMarkdownPreview()
+	assert.False(t, m.modes.mdPreview, "P must be refused for a modified (not full-context) markdown file")
+}
+
+func TestView_MdPreviewInMultiFileReview_PaneGeometryIntact(t *testing.T) {
+	// same invariant as TestView_MdPreviewPanned_PaneGeometryIntact, but with the
+	// file tree present: the pan clamp uses the narrower two-pane viewport width,
+	// so no row may overflow the terminal or soft-wrap and shift the scrollbar's
+	// hardcoded first-viewport-row offset.
+	wide := mdLines(mdPreviewWideDoc)
+	m := mdPreviewMultiFileModel(t, []string{"Main.java", "wide.md"},
+		map[string][]diff.DiffLine{"Main.java": javaDiffLines(), "wide.md": wide})
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "wide.md", lines: wide, seq: m.file.loadSeq})
+	m = result.(Model)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	require.False(t, m.treePaneHidden(), "fixture sanity: the tree pane must be visible for this geometry")
+
+	before := strings.Split(m.View(), "\n")
+	for range 3 {
+		m.panMarkdownPreview(1)
+	}
+	require.Positive(t, m.layout.scrollX, "fixture sanity: the art must be pannable")
+	after := strings.Split(m.View(), "\n")
+
+	assert.Len(t, after, len(before), "panning must not change the frame's row count (no soft-wrapped row)")
+	for i, line := range after {
+		assert.LessOrEqual(t, xansi.StringWidth(line), m.layout.width,
+			"row %d of the panned frame must fit the terminal width", i)
+	}
+}
+
+func TestPanMarkdownPreview_MultiFileReview_ClampsAgainstTwoPaneWidth(t *testing.T) {
+	// the clamp basis is the viewport width, which is narrower here than in the
+	// full-width single-file case, so the same document pans further.
+	wide := mdLines(mdPreviewWideDoc)
+	m := mdPreviewMultiFileModel(t, []string{"Main.java", "wide.md"},
+		map[string][]diff.DiffLine{"Main.java": javaDiffLines(), "wide.md": wide})
+	result, _ := m.handleFileLoaded(fileLoadedMsg{file: "wide.md", lines: wide, seq: m.file.loadSeq})
+	m = result.(Model)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	rendered := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
+	want := mdPreviewMaxOffset(rendered, m.mdPreviewCutWidth())
+	require.Positive(t, want, "fixture sanity: the art must be wider than the two-pane viewport")
+
+	for range 50 {
+		m.panMarkdownPreview(1)
+	}
+
+	assert.Equal(t, want, m.layout.scrollX, "the pan must clamp at the two-pane viewport width, not the full width")
 }
 
 // --- Task 5: annotation and cursor keys inert in preview mode ---
@@ -792,7 +990,7 @@ func mdPreviewMouseModel(t *testing.T, lines []diff.DiffLine) Model {
 	m.file.name = "plan.md"
 	m.file.lines = lines
 	m.file.singleFile = true
-	m.file.markdownPreviewable = true // a single full-context markdown file, the way loaders.go sets it
+	m.file.markdownPreviewable = true // full-context markdown, the way loaders.go sets it
 	m.file.mdTOC = sidepane.ParseTOC(lines, "plan.md")
 	require.NotNil(t, m.file.mdTOC, "fixture sanity: markdown lines with headings must produce a TOC")
 	m.layout.focus = paneDiff

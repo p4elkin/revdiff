@@ -309,7 +309,7 @@ type loadedFileState struct {
 	canceledLoadSeq     uint64                 // same-sequence request canceled by returning to the displayed file
 	canceledLoadPath    string                 // path rejected for canceledLoadSeq
 	mdTOC               TOCComponent           // markdown table-of-contents (nil when not applicable, or when the markdown file has no headings)
-	markdownPreviewable bool                   // true for a single full-context markdown file — the real gate for preview mode (mdTOC is nil for heading-less markdown, so it cannot serve as this gate)
+	markdownPreviewable bool                   // true for a full-context markdown file, whatever else the review contains — the real gate for preview mode (mdTOC is narrower: it also needs headings AND a single-file review, so it cannot serve as this gate)
 	singleFile          bool                   // true when diff contains exactly one file
 }
 
