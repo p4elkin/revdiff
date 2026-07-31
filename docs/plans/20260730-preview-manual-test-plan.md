@@ -105,15 +105,77 @@ New in `ef903b1`. Height was always scrollable; width was not, which made wide a
 - [ ] toggling `P` off and on resets the pan to the left edge
 - [ ] right-arrow does **not** move focus into the TOC pane
 
-## 6. What is still not fixed
+## 6. Subgraph splitting
 
-Neither is a regression; both are limits of the vendored renderer, recorded in `PATCH.md`.
+The vendored renderer does not lay out `subgraph` blocks — it draws one node grid and puts a
+rectangle around the cells it guessed, so two rectangles overlap and nodes land in the wrong one.
+A fence whose subgraphs do not reference each other is now drawn one diagram per subgraph,
+stacked, each under its own title and a rule the same width. A fence that does reference across
+its subgraphs keeps the old single render, on purpose.
+
+Two independent blocks — this one must stack:
+
+```mermaid
+flowchart LR
+    subgraph before["Before"]
+        B1["decomposeOverlay"] -->|"listVariants (strict mode)"| BL1["strictValidationBaseline"]
+    end
+    subgraph after["After"]
+        A1["decomposeOverlay"] -->|"loadForWrite"| AD["VariantDocument"]
+        AD -->|".slice(sharedTarget)"| AL1["sharedSliceBaseline"]
+    end
+```
+
+- [ ] two blocks, one above the other, `Before` first and `After` second
+- [ ] each title has a `─` rule under it, exactly as wide as the title
+- [ ] there is **no** rectangle drawn around either group any more — only node boxes
+- [ ] no row carries two node labels side by side, and no label is drawn twice
+- [ ] the edge labels show no quote marks (`listVariants (strict mode)`, not `"listVariants ..."`)
+- [ ] each block is narrower than the pane, so neither needs panning
+
+A crossing edge — this one must look exactly as it did before the split existed:
+
+```mermaid
+flowchart TD
+    subgraph left["Left"]
+        L1[read] --> L2[write]
+    end
+    subgraph right["Right"]
+        L2 --> R1[publish]
+    end
+```
+
+- [ ] one combined render, with both group rectangles still drawn
+- [ ] no `Left` / `Right` heading with a rule under it appears anywhere
+
+A nested subgraph — also unchanged:
+
+```mermaid
+flowchart TD
+    subgraph outer["Outer"]
+        subgraph inner["Inner"]
+            N1 --> N2
+        end
+    end
+    subgraph other["Other"]
+        O1 --> O2
+    end
+```
+
+- [ ] one combined render, no stacked headings
+
+## 7. What is still not fixed
+
+None is a regression; all are limits of the vendored renderer, recorded in `PATCH.md`.
 
 - [ ] a node fanning out to several targets loses all but one edge label — confirm this still
       happens rather than silently producing something worse
+- [ ] a space inside a label drawn on top of an arrow line shows as `─`, so
+      `listVariants (strict mode)` reads as `listVariants─(strict─mode)` — the arrow line shows
+      through where the space should be
 - [ ] `erDiagram`, `gantt` and `quadrantChart` still show their raw fence text
 
-## 7. Regression — the paths that must be untouched
+## 8. Regression — the paths that must be untouched
 
 - [ ] a plain `flowchart` with no shapes, no `---` and no directives renders as it always did
 - [ ] a `sequenceDiagram` renders as it always did

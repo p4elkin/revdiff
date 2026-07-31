@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"regexp"
 	"strings"
 
 	mermaidcmd "github.com/AlexanderGrooff/mermaid-ascii/cmd"
@@ -51,17 +52,25 @@ import (
 
 // flowchartSubgraphKeyword is the statement keyword that opens a block, and
 // flowchartSubgraphEnd is the line that closes one. Named rather than spelled
-// inline so this file and flowchartStructuralKeywords cannot drift apart.
+// inline because flowchartStructuralKeywords is built from these same two
+// constants, so this file and that list cannot drift apart.
 const (
 	flowchartSubgraphKeyword = "subgraph"
 	flowchartSubgraphEnd     = "end"
 )
 
-// mermaidSubgraph is one top-level `subgraph ... end` block: the title to
-// print above its art, and the body lines between the header and the closing
-// `end`, in source order with their original indentation and any inline `%%`
-// comment intact.
+// mermaidSubgraph is one top-level `subgraph ... end` block: the block's own
+// id, the title to print above its art, and the body lines between the header
+// and the closing `end`, in source order with their original indentation and
+// any inline `%%` comment intact.
+//
+// The id is kept because it is a node id like any other as far as the renderer
+// is concerned: `A --> groupB` is valid mermaid and points an edge at a whole
+// subgraph. Rule 5 of splitFlowchartSubgraphs has to see those ids or it would
+// split a fence whose blocks really do reference each other — see
+// flowchartSubgraphsDisjoint.
 type mermaidSubgraph struct {
+	id    string
 	title string
 	body  []string
 }
@@ -83,7 +92,9 @@ type mermaidSubgraph struct {
 //  4. Nothing but the header, comments, blank lines and layout directives sits
 //     outside a subgraph. A node declared outside would simply be dropped by
 //     splitting.
-//  5. No node id is mentioned by more than one subgraph.
+//  5. No node id is mentioned by more than one subgraph. A subgraph's OWN id
+//     counts as a node id here, since an edge may point straight at a whole
+//     block (`A --> groupB`).
 //
 // The last rule is the important one and it is deliberately strict. It catches
 // an edge crossing from one subgraph to another, and it also catches a node
@@ -93,6 +104,12 @@ type mermaidSubgraph struct {
 // Two malformed shapes refuse as well, for the same reason: an unterminated
 // `subgraph` and a stray `end` with nothing open. Neither can be split into
 // blocks that mean what the author wrote.
+//
+// Rule 4 tolerates a styling or layout directive outside a subgraph, which on
+// the production path never comes up — normalizeFlowchartSource has already
+// removed every one of them by the time this runs. The tolerance is there so
+// that a direct call on un-normalized source refuses for a real reason rather
+// than for a line the renderer would have dropped anyway.
 func splitFlowchartSubgraphs(source string) (header string, blocks []mermaidSubgraph, ok bool) {
 	switch mermaidDiagramKind(source) {
 	case "graph", "flowchart":
@@ -103,27 +120,33 @@ func splitFlowchartSubgraphs(source string) (header string, blocks []mermaidSubg
 	headerSeen, inBlock := false, false
 	for line := range strings.SplitSeq(source, "\n") {
 		trimmed := strings.TrimSpace(mermaidStripComment(line))
-		switch {
-		case trimmed == "":
+		if trimmed == "" {
 			continue
-		case !headerSeen:
+		}
+		if !headerSeen {
 			headerSeen, header = true, line
-		case flowchartFirstWord(trimmed) == flowchartSubgraphKeyword:
+			continue
+		}
+		switch flowchartDirective(trimmed, flowchartStructuralKeywords) {
+		case flowchartSubgraphKeyword:
 			if inBlock {
 				return "", nil, false // rule 3: nested
 			}
-			blocks = append(blocks, mermaidSubgraph{title: flowchartSubgraphTitle(trimmed)})
+			id, title := flowchartSubgraphHeader(trimmed)
+			blocks = append(blocks, mermaidSubgraph{id: id, title: title})
 			inBlock = true
-		case trimmed == flowchartSubgraphEnd:
+		case flowchartSubgraphEnd:
 			if !inBlock {
 				return "", nil, false // a stray `end`
 			}
 			inBlock = false
-		case !inBlock:
-			if flowchartDirective(trimmed, flowchartDroppedKeywords) == "" {
-				return "", nil, false // rule 4: a statement outside every subgraph
-			}
 		default:
+			if !inBlock {
+				if flowchartDirective(trimmed, flowchartDroppedKeywords) == "" {
+					return "", nil, false // rule 4: a statement outside every subgraph
+				}
+				continue
+			}
 			blocks[len(blocks)-1].body = append(blocks[len(blocks)-1].body, line)
 		}
 	}
@@ -167,8 +190,22 @@ func (s mermaidSubgraph) source(header string) string {
 // outer recover falls back to the fence's VERBATIM text, which is strictly
 // worse than the single whole-source render this returns to. Catching a panic
 // here keeps the guarantee that splitting can never make a fence render worse
-// than it does today.
+// than it does today. It buys nothing for a panic the whole source triggers
+// too (the one demonstrated trigger, a column-0 `classDef` with no colon, is
+// of that kind and takes the fallback render down as well); it is here for an
+// unspecified vendored panic that one block's source reaches and the whole
+// source does not.
+//
+// The stacked art carries NO trailing newline, matching what
+// mermaidcmd.RenderDiagram returns on the single-render path. renderMermaidBlock
+// appends exactly one newline to whichever it got and spliceMermaidArt strips
+// exactly one back off, so a trailing newline here would print as a blank line
+// under a split diagram and under no other.
 func stackFlowchartSubgraphs(header string, blocks []mermaidSubgraph) (art string, ok bool) {
+	if len(blocks) == 0 {
+		return "", false // nothing to stack: the caller must render the whole source
+	}
+
 	defer func() {
 		if recover() != nil {
 			art, ok = "", false
@@ -194,75 +231,144 @@ func stackFlowchartSubgraphs(header string, blocks []mermaidSubgraph) (art strin
 		out.WriteString(strings.TrimRight(rendered, "\n"))
 		out.WriteString("\n")
 	}
-	return out.String(), true
+	return strings.TrimRight(out.String(), "\n"), true
 }
 
-// flowchartFirstWord returns the first whitespace-delimited token of an
-// already-trimmed line. This is how a `subgraph` header is told from a node
-// whose id merely starts with the word: `subgraphOne --> B` has first word
-// "subgraphOne", which is not the keyword, so it stays a node statement.
-func flowchartFirstWord(trimmed string) string {
-	if i := strings.IndexAny(trimmed, " \t"); i >= 0 {
-		return trimmed[:i]
-	}
-	return trimmed
+// flowchartSubgraphBreak matches mermaid's HTML line break in a label, in
+// every spelling the vendored renderer's own htmlBreakPattern accepts.
+var flowchartSubgraphBreak = regexp.MustCompile(`(?i)<br\s*/?>`)
+
+// flowchartSubgraphHeading turns a raw subgraph label into the single plain
+// line printed above a stacked block.
+//
+// An HTML line break becomes one space. The vendored renderer turns `<br/>`
+// into a real line break inside a NODE box (see its newGraphLabel), but a
+// heading here is one line, and printed as-is the tag would show literally and
+// the rule under it would be sized to count the tag's characters. Roughly 80%
+// of the corpus fences carry a `<br/>` somewhere, so this is not a corner.
+//
+// Control bytes are dropped for the same width reason and one more: the
+// heading is written straight into the art, which bypasses glamour, so a raw
+// ESC in an author's label would otherwise reach the terminal unescaped.
+func flowchartSubgraphHeading(label string) string {
+	label = flowchartSubgraphBreak.ReplaceAllString(label, " ")
+	label = strings.Map(func(r rune) rune {
+		if r < ' ' || r == 0x7f {
+			return -1
+		}
+		return r
+	}, label)
+	return strings.TrimSpace(label)
 }
 
-// flowchartSubgraphTitle extracts the title from a subgraph header line.
-// Mermaid writes it three ways and all three appear in the real corpus:
+// flowchartSubgraphHeader extracts a subgraph header line's id and the title
+// to print above its art. Mermaid writes the header three ways and all three
+// appear in the real corpus:
 //
 //	subgraph before["Before"]    the bracketed, quoted label
 //	subgraph before [Before]     the bracketed, bare label
 //	subgraph before              no label at all
 //
-// The first two give the label, the third gives the id. A header with neither
-// (a bare `subgraph`) yields "", which the caller renders as an untitled
-// block rather than refusing the split — a missing title costs a heading, not
-// correctness.
-func flowchartSubgraphTitle(trimmed string) string {
+// The id is always the token before the bracket, and it is returned separately
+// because rule 5 has to treat it as a node id — see mermaidSubgraph. The title
+// is the label when there is one and the id otherwise. A header with neither
+// (a bare `subgraph`) yields "" for both, which the caller renders as an
+// untitled block rather than refusing the split — a missing title costs a
+// heading, not correctness.
+func flowchartSubgraphHeader(trimmed string) (id, title string) {
 	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, flowchartSubgraphKeyword))
 	if open := strings.IndexAny(rest, "[("); open >= 0 {
 		if end := flowchartLabelEnd(rest, open+1, 1); end > 0 {
-			if label := strings.Trim(strings.TrimSpace(rest[open+1:end-1]), `"`); label != "" {
-				return label
-			}
+			title = flowchartSubgraphHeading(strings.Trim(strings.TrimSpace(rest[open+1:end-1]), `"`))
 		}
 		rest = strings.TrimSpace(rest[:open])
 	}
-	return strings.Trim(rest, `"`)
+	id = strings.Trim(rest, `"`)
+	if title == "" {
+		title = flowchartSubgraphHeading(id)
+	}
+	return id, title
 }
 
 // flowchartSubgraphsDisjoint reports whether no node id is mentioned by more
-// than one block — rule 5 of splitFlowchartSubgraphs. It walks the blocks in
-// order, records which one first mentions each id, and fails the moment an id
-// turns up again under a different one.
+// than one block — rule 5 of splitFlowchartSubgraphs. It records which block
+// owns each id and fails the moment an id turns up again under a different
+// one.
+//
+// Every block's OWN id is claimed first, before any body is walked, and that
+// order is load-bearing in both directions. An edge may point straight at a
+// whole subgraph — `Z --> groupA` is valid, documented mermaid — and the
+// target block may be declared either before or after the edge that names it.
+// Claiming all the block ids up front catches the reference whichever way it
+// points. Without it the pair looks disjoint, the fence splits, and the art
+// then shows a stray box literally named `groupA` in one block while the other
+// block's rectangle has become a plain heading, with nothing in the output
+// correlating the two.
 func flowchartSubgraphsDisjoint(blocks []mermaidSubgraph) bool {
 	owner := make(map[string]int, len(blocks))
+	claim := func(id string, i int) bool {
+		if first, seen := owner[id]; seen && first != i {
+			return false
+		}
+		owner[id] = i
+		return true
+	}
+
+	for i, block := range blocks {
+		if block.id != "" && !claim(block.id, i) {
+			return false
+		}
+	}
 	for i, block := range blocks {
 		for _, line := range block.body {
 			for _, id := range flowchartSubgraphNodeIDs(line) {
-				if first, seen := owner[id]; seen && first != i {
+				if !claim(id, i) {
 					return false
 				}
-				owner[id] = i
 			}
 		}
 	}
 	return true
 }
 
+// flowchartSubgraphIdentByte widens flowchartIdentByte to every non-ASCII
+// byte, so an id written in a non-Latin script is a node id here too.
+//
+// flowchartIdentByte itself must stay ASCII-only: flowchartShapeAt uses it as
+// a lookbehind to decide whether a bracket opens a node's label, and widening
+// it there would change what the normalization pass rewrites. Here the
+// consequence of missing an id is far worse than a missed rewrite — rule 5
+// would not see the shared node at all, so a fence with a genuine crossing
+// edge between two Cyrillic-named nodes would split, lose the edge and draw
+// the shared node twice.
+func flowchartSubgraphIdentByte(b byte) bool {
+	return b >= 0x80 || flowchartIdentByte(b)
+}
+
+// flowchartSubgraphClassSuffix is mermaid's style-class suffix on a node
+// (`B1[old]:::hot`). Its class name is not a node id, and reading it as one
+// makes two blocks that tag their nodes with the same class look as if they
+// share a node, refusing a fence that splits perfectly well. `classDef`
+// appears in 24% of the corpus fences, so the suffix is not rare.
+const flowchartSubgraphClassSuffix = ":::"
+
 // flowchartSubgraphNodeIDs returns every node id one statement line mentions,
 // in order. A directive line (see flowchartDroppedKeywords) mentions none: a
 // `direction TB` written inside two different subgraphs would otherwise read
-// as the same two ids in both and refuse a perfectly splittable fence.
+// as the same two ids in both and refuse a perfectly splittable fence. That
+// branch, and the comment-stripping above it, are guards for a DIRECT call —
+// normalizeFlowchartSource has already removed every dropped directive and
+// splitFlowchartSubgraphs skips comment-only lines, so neither fires on the
+// production path.
 //
-// The walk reuses the normalizer's own three helpers rather than re-deriving
-// what an id looks like. flowchartEdgeAt consumes each arrow WITH its
-// `|label|` suffix, so edge-label text can never be read as a node; then a run
-// of flowchartIdentByte bytes is the id; then flowchartLabelEnd skips that
-// node's own label, whose text is likewise not an id. Arrows are located on
-// the MASKED copy (see flowchartMaskLabels) and every slice is taken from the
-// original, the same discipline every other pass in this patch uses.
+// The walk reuses the normalizer's own helpers rather than re-deriving what an
+// id looks like. flowchartEdgeAt consumes each arrow WITH its `|label|`
+// suffix, so edge-label text can never be read as a node; a `:::className`
+// suffix is skipped whole; then a run of flowchartSubgraphIdentByte bytes is
+// the id; then flowchartLabelEnd skips that node's own label, whose text is
+// likewise not an id. Arrows are located on the MASKED copy (see
+// flowchartMaskLabels) and every slice is taken from the original, the same
+// discipline every other pass in this patch uses.
 func flowchartSubgraphNodeIDs(line string) []string {
 	body := mermaidStripComment(line)
 	if flowchartDirective(body, flowchartDroppedKeywords) != "" {
@@ -276,12 +382,19 @@ func flowchartSubgraphNodeIDs(line string) []string {
 			i = next
 			continue
 		}
-		if !flowchartIdentByte(body[i]) {
+		if strings.HasPrefix(body[i:], flowchartSubgraphClassSuffix) {
+			i += len(flowchartSubgraphClassSuffix)
+			for i < len(body) && body[i] != ' ' && body[i] != '\t' {
+				i++
+			}
+			continue
+		}
+		if !flowchartSubgraphIdentByte(body[i]) {
 			i++
 			continue
 		}
 		start := i
-		for i < len(body) && flowchartIdentByte(body[i]) {
+		for i < len(body) && flowchartSubgraphIdentByte(body[i]) {
 			i++
 		}
 		ids = append(ids, body[start:i])

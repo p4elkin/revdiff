@@ -45,7 +45,7 @@ both of which read the real keymap and so list it automatically in this build.
   split decision and the render + stack + fallback workflow.
 - `app/ui/mdpreview_subgraph_test.go` — its tests.
 
-A clean rebase never conflicts on these six files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these eight files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -287,6 +287,18 @@ What `normalizeFlowchartSource` rewrites, and what each one did before:
 - **`|` inside a node label → `/`.** The edge pattern's label group is greedy, so one stray pipe
   in a label swallowed half the line: `A -->|go| B["x=with|without"]` captured `go| B["x=with`
   as the edge label and left `without"]` as the target node.
+- **Quotes around an edge label → dropped.** `A -->|"listVariants (strict mode)"| B` becomes
+  `A -->|listVariants (strict mode)| B`. Mermaid quotes a label to protect the spaces in it, a
+  job the `|...|` delimiters already do here, and the vendored renderer draws a label verbatim —
+  so the quote marks showed up in the art. `flowchartLinkText` already unquoted a label, but only
+  for the labels it BUILDS, the ones written in the inline `-- label -->` form. A label written
+  the common way, straight after the arrow, matches neither `flowchartLinkPattern` alternative:
+  the arrow matches the bare-link alternative and the `|...|` after it was copied through
+  untouched. The rewrite happens in the node pass, on each arrow segment that pass already
+  consumes whole (`unquoteFlowchartEdgeLabel`). Exactly one layer comes off, and only when the
+  label opens and closes with a quote and carries none inside — so `|"a" and "b"|` is left whole
+  rather than half-eaten, and the pass stays a fixed point, because what it writes back can never
+  be stripped a second time.
 - **Styling and layout directives → dropped.** `style`, `classDef`, `class`, `linkStyle`, a
   standalone `direction` (the one written inside a `subgraph`), and the interaction directives
   `click` / `href` / `callback`. Each described how the diagram should look or behave, which the
@@ -340,6 +352,14 @@ wrong boxes. To fix this, diagrams that meet the split criteria are rendered onc
 with each result stacked under its own title and rule line (see `renderMermaidSource` in
 `mdpreview_transpile.go` and the split logic in `mdpreview_subgraph.go`).
 
+**The split fires on structure alone, not on a detected defect.** Every fence meeting the five
+conditions below is stacked, including the ones the combined render would have laid out
+correctly. That is the wanted output, not a side effect: separately titled blocks are what a
+reader asked for, and each block is narrower than the combined render, so a wide diagram becomes
+readable. Gating on an actual overlap was considered and rejected — it would mean rendering every
+fence twice just to decide, and it would make the output depend on the vendored renderer's
+current grid heuristics.
+
 **All of the following conditions must hold for a split to be safe. If any one fails, the fence
 renders exactly as it does today:**
 
@@ -353,7 +373,14 @@ renders exactly as it does today:**
    splitting.
 5. **No node id is mentioned by more than one subgraph.** This catches edges crossing from one
    subgraph to another, and also nodes that two subgraphs both reference. Both cases would either
-   lose an edge or silently duplicate a box; a single rule covers both and is easy to check.
+   lose an edge or silently duplicate a box; a single rule covers both and is easy to check. A
+   subgraph's OWN id counts as a node id here, because an edge may point straight at a whole
+   block (`A --> groupB` is valid mermaid) — without that, the pair looks disjoint and the split
+   draws a stray box literally named after the other subgraph.
+
+Two malformed shapes refuse as well, and neither follows from the five conditions: an
+unterminated `subgraph` (no closing `end`) and a stray `end` with nothing open. Neither can be
+split into blocks that mean what the author wrote.
 
 When any condition fails, the fence falls back to a single render of the whole source — today's
 behavior. The fallback is all-or-nothing: a part that cannot render, renders blank, or panics
@@ -376,9 +403,13 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   indicators the diff pane uses, so every column of a wide diagram is reachable. Measured on a
   real 206-cell `flowchart TD` at a 120-column pane: the third subgraph starts past column 120
   and is unreadable at offset 0, and the pan clamps at offset 86, which puts the diagram's last
-  column at the right edge. What remains true: only whole columns move, so a box straddling the
-  edge is still cut mid-glyph until you pan past it, and prose (already wrapped to the pane by
-  glamour) goes blank once you pan past its end.
+  column at the right edge. **Those numbers predate subgraph splitting and describe a fence the
+  split declines.** A three-subgraph fence that meets the five split conditions is now drawn as
+  three stacked blocks, each only as wide as its own nodes, so it no longer needs panning at all;
+  re-measure against a declined fence before quoting a width again. What remains true for any
+  render still wider than the pane: only whole columns move, so a box straddling the edge is
+  still cut mid-glyph until you pan past it, and prose (already wrapped to the pane by glamour)
+  goes blank once you pan past its end.
 - **Spaces inside an edge label render as `─` (dash) on the arrow line.** When a label like
   `"listVariants (segment coords)"` is drawn on top of an arrow line, space characters do not
   paint — the arrow line shows through underneath. This is the vendored `mermaid-ascii`
@@ -495,7 +526,9 @@ dependencies change.
 ### Dependency cost (measured, accepted for now)
 
 The patch imports `github.com/AlexanderGrooff/mermaid-ascii/cmd` for exactly one symbol,
-`RenderDiagram` (one call site, `renderMermaidSource` in `app/ui/mdpreview_transpile.go`). That
+`RenderDiagram`, from two call sites: `renderMermaidSource` in `app/ui/mdpreview_transpile.go`
+(the whole-source render) and `stackFlowchartSubgraphs` in `app/ui/mdpreview_subgraph.go` (one
+call per subgraph block). That
 package also contains `web.go`, which implements an HTTP server for the upstream tool's own web
 mode. Go links a package as a whole, so importing `cmd` at all drags in everything `web.go` needs,
 even though nothing in revdiff can ever reach it.

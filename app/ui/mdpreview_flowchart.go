@@ -38,6 +38,10 @@ import (
 //     never matches, and `style`, `class`, `direction`, `linkStyle`, `click`
 //     and friends match no pattern at all. Every one of those lines falls
 //     through to parseNode and becomes a node whose label is the whole line.
+//   - An edge label keeps its quotes. Mermaid quotes a label to protect the
+//     spaces in it, a job the `|...|` delimiters already do here, and the
+//     renderer draws the label verbatim — so `-->|"listVariants (strict
+//     mode)"|` shows the quote marks in the art.
 //
 // Corpus scan over the unique `flowchart`/`graph` fences in the user's plan
 // documents: round/stadium shapes ~28%, diamond shapes ~33%, undirected `---`
@@ -61,7 +65,7 @@ import (
 // cannot tolerate, since it names its members by id.
 //
 // So this pass rewrites the SOURCE TEXT and leaves its structure alone: same
-// order, same subgraph blocks, same node ids, same comments. The three
+// order, same subgraph blocks, same node ids, same comments. The four
 // mis-parsed constructs above are rewritten in place, and the styling and
 // layout directives are removed outright (see flowchartDroppedKeywords for why
 // removal is the only honest option there). Anything the pass does not
@@ -78,13 +82,19 @@ import (
 //
 // # How the two passes fit together
 //
-// Each body line goes through link normalization FIRST and node-shape
-// normalization SECOND, and that order is load-bearing. After the link pass
-// every link is written as `-->` or `-->|label|`, so the node pass can tell an
-// EDGE label (delimited by '|' right after an arrow, and left strictly alone)
-// from a NODE label (inside brackets, where a '|' becomes '/'). Running the
-// node pass first would have to guess which '|' is which, and an inline
-// labeled link like `A -- foo(1) --> B` would look like a node shape.
+// Each body line goes through link normalization FIRST and node normalization
+// SECOND, and that order is load-bearing. After the link pass every link is
+// written as `-->` or `-->|label|`, so the node pass can tell an EDGE label
+// (delimited by '|' right after an arrow) from a NODE label (inside brackets).
+// Running the node pass first would have to guess which '|' is which, and an
+// inline labeled link like `A -- foo(1) --> B` would look like a node shape.
+//
+// The node pass handles both label kinds, differently: inside a node label a
+// '|' becomes '/', while an edge label is copied through with only its
+// surrounding quotes dropped (see unquoteFlowchartEdgeLabel). Both live in
+// that one pass because both need the same thing — each arrow consumed whole,
+// its `|label|` suffix included — and a separate quote pass would mask and
+// re-scan every line to find the arrows the node pass already has in hand.
 
 // flowchartMaskByte fills every masked byte in flowchartMaskLabels's output.
 // It must not be a space and must not be any character link syntax is built
@@ -372,10 +382,10 @@ func flowchartEdgeAt(line, masked string, i int) (segment string, next int, ok b
 	return line[i:end], end, true
 }
 
-// normalizeFlowchartEdgeLabelQuotes drops one layer of surrounding double
-// quotes from every `|label|` written directly after an arrow, so
-// `A -->|"listVariants (strict mode)"| B` reaches the renderer as
-// `A -->|listVariants (strict mode)| B`.
+// unquoteFlowchartEdgeLabel drops one layer of surrounding double quotes from
+// one arrow segment as returned by flowchartEdgeAt — either a bare arrow, or
+// an arrow followed by `|label|` — so `A -->|"listVariants (strict mode)"| B`
+// reaches the renderer as `A -->|listVariants (strict mode)| B`.
 //
 // flowchartLinkText already unquotes a label, but only for the labels IT
 // builds — the ones written in the inline `-- label -->` form. A label written
@@ -384,40 +394,19 @@ func flowchartEdgeAt(line, masked string, i int) (segment string, next int, ok b
 // alternative and the `|...|` that follows is copied through untouched. Its
 // quotes then survive into the art, where the renderer draws them.
 //
-// Arrows are found in the MASKED copy and the text is sliced out of the
-// original, the same discipline the other two passes use, so a `-->|"x"|` that
-// is really node-label text is not rewritten. This runs after
-// normalizeFlowchartLinks, so `-->` and `<-->` are the only arrows left.
+// The segment is handed back unchanged when there is no label, when the label
+// is not quoted on both ends, or when it carries a quote of its own. That
+// leaves `|"a" and "b"|` alone rather than eating its inner quotes, and it is
+// also what makes the rewrite a fixed point: what it writes back can never be
+// stripped a second time.
 //
-// A layer comes off only when the label opens and closes with a quote and
-// carries none inside. That leaves `|"a" and "b"|` alone rather than eating
-// its inner quotes, and it is also what makes the pass a fixed point: what it
-// writes back can never be stripped a second time.
-func normalizeFlowchartEdgeLabelQuotes(line string) string {
-	masked := flowchartMaskLabels(line)
-
-	var out strings.Builder
-	for i := 0; i < len(line); {
-		segment, next, ok := flowchartEdgeAt(line, masked, i)
-		if !ok {
-			out.WriteByte(line[i])
-			i++
-			continue
-		}
-		out.WriteString(unquoteFlowchartEdgeLabel(segment))
-		i = next
-	}
-	return out.String()
-}
-
-// unquoteFlowchartEdgeLabel trims the surrounding quotes off one arrow segment
-// as returned by flowchartEdgeAt — either a bare arrow, or an arrow followed
-// by `|label|`. The segment is handed back unchanged when there is no label,
-// when the label is not quoted on both ends, or when it carries a quote of its
-// own.
+// The closing `|` is required rather than assumed. flowchartEdgeAt only
+// extends the segment past an opening pipe once it has found the closing one,
+// so today the check never fires — but the alternative to checking is a
+// slice-bounds panic that would cost the reader the whole fence's art.
 func unquoteFlowchartEdgeLabel(segment string) string {
 	open := strings.IndexByte(segment, '|')
-	if open < 0 {
+	if open < 0 || !strings.HasSuffix(segment, "|") {
 		return segment
 	}
 	label := segment[open+1 : len(segment)-1]
@@ -432,21 +421,24 @@ func unquoteFlowchartEdgeLabel(segment string) string {
 }
 
 // normalizeFlowchartNodes rewrites every node shape on line into the
-// square-bracket form and turns any '|' inside a node label into '/'. Arrows
-// and their `|label|` suffixes are copied through untouched.
+// square-bracket form, turns any '|' inside a node label into '/', and drops
+// the surrounding quotes from an edge label (see unquoteFlowchartEdgeLabel).
+// An arrow and its `|label|` suffix are otherwise copied through untouched.
 //
 // The walk is a single left-to-right pass with no lookbehind beyond one byte,
-// which is what keeps the two rules from fighting: an arrow is consumed whole
+// which is what keeps the rules from fighting: an arrow is consumed whole
 // (label included) before any byte of it can be mistaken for a shape
 // delimiter, and a shape is only recognized when a node id sits directly in
-// front of it.
+// front of it. The edge-label unquoting rides on that same "arrow consumed
+// whole" step, which is why it is not a pass of its own — a separate walk
+// would mask and re-scan every line to find the arrows this one already has.
 func normalizeFlowchartNodes(line string) string {
 	masked := flowchartMaskLabels(line)
 
 	var out strings.Builder
 	for i := 0; i < len(line); {
 		if segment, next, ok := flowchartEdgeAt(line, masked, i); ok {
-			out.WriteString(segment)
+			out.WriteString(unquoteFlowchartEdgeLabel(segment))
 			i = next
 			continue
 		}
@@ -475,7 +467,7 @@ func normalizeFlowchartNodes(line string) string {
 // A subgraph's CONTENTS are still normalized — only the header and the
 // closing `end` are skipped.
 var flowchartStructuralKeywords = []string{
-	"subgraph", "end", "accTitle", "accDescr",
+	flowchartSubgraphKeyword, flowchartSubgraphEnd, "accTitle", "accDescr",
 }
 
 // flowchartDroppedKeywords lists the statement keywords whose lines are
@@ -530,8 +522,7 @@ func flowchartDirective(text string, keywords []string) string {
 	return mermaidDirective(strings.TrimSpace(flowchartMaskLabels(text)), keywords)
 }
 
-// normalizeFlowchartLine normalizes one body line: links first, then the
-// quotes around whatever edge label those links left behind, then node shapes
+// normalizeFlowchartLine normalizes one body line: links first, then nodes
 // (see this file's doc comment for why links-before-nodes is load-bearing).
 // keep is false when the line is a styling or layout directive and must be
 // dropped from the source entirely — see flowchartDroppedKeywords.
@@ -552,7 +543,7 @@ func flowchartDirective(text string, keywords []string) string {
 // is no longer there.
 func normalizeFlowchartLine(line string) (normalized string, keep bool) {
 	body, comment, hasComment := strings.Cut(line, "%%")
-	linked := normalizeFlowchartEdgeLabelQuotes(normalizeFlowchartLinks(body))
+	linked := normalizeFlowchartLinks(body)
 
 	if flowchartDirective(linked, flowchartStructuralKeywords) != "" {
 		return line, true
@@ -570,7 +561,7 @@ func normalizeFlowchartLine(line string) (normalized string, keep bool) {
 
 // normalizeFlowchartSource rewrites a whole `graph`/`flowchart` fence into the
 // subset of mermaid syntax the vendored renderer actually parses correctly —
-// see this file's doc comment for the three constructs it fixes, the corpus
+// see this file's doc comment for the four constructs it fixes, the corpus
 // measurement behind them, and why this is a text-level pass rather than a
 // rebuild through flowchartBuilder.
 //

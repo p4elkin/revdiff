@@ -100,13 +100,19 @@ All of the following must hold. If any one fails, the fence renders exactly as i
 3. No subgraph is nested inside another.
 4. Nothing but the header, comments, blank lines and `direction` statements sits outside a
    subgraph. A node declared outside would simply be dropped by splitting.
-5. No node id is mentioned by more than one subgraph.
+5. No node id is mentioned by more than one subgraph. A subgraph's own id counts as a node id
+   here, because an edge may point straight at a whole block (`A --> groupB`).
 
 The last rule is the important one and it is deliberately strict. It catches an edge crossing
 from one subgraph to another, and it also catches a node that two subgraphs both point at. Both
 cases would either lose an edge or silently duplicate a box. One rule covers both, and it is easy
-to check: walk the subgraphs, record which one first mentions each id, and bail the moment an id
-turns up again under a different one.
+to check: claim every block's own id first, then walk the bodies recording which block mentions
+each id, and bail the moment an id turns up again under a different one.
+
+These rules are about structure only. A fence that passes them is split even when the combined
+render happens to come out correct — stacked, separately titled blocks are the wanted output, and
+each block is narrower than the combined render. Gating on a detected overlap would mean
+rendering every fence twice just to decide.
 
 From the same corpus scan, over the 89 fences using `subgraph`: 23 have an edge crossing between
 two subgraphs and 30 nest subgraphs. A meaningful share keeps today's behavior, so the fallback
