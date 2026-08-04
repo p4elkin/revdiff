@@ -33,6 +33,7 @@ func TestParseArgs_Defaults(t *testing.T) {
 	assert.False(t, opts.NoMouse)
 	assert.False(t, opts.Wrap)
 	assert.False(t, opts.Collapsed)
+	assert.False(t, opts.Preview)
 	assert.False(t, opts.Compact)
 	assert.Equal(t, 5, opts.CompactContext)
 	assert.False(t, opts.CrossFileHunks)
@@ -202,6 +203,31 @@ func TestParseArgs_Collapsed(t *testing.T) {
 		opts, err := parseArgs([]string{"--config", cfgPath})
 		require.NoError(t, err)
 		assert.True(t, opts.Collapsed)
+	})
+}
+
+func TestParseArgs_Preview(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		opts, err := parseArgs(append(noConfigArgs(t), "--preview"))
+		require.NoError(t, err)
+		assert.True(t, opts.Preview)
+	})
+
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("REVDIFF_PREVIEW", "true")
+		opts, err := parseArgs(noConfigArgs(t))
+		require.NoError(t, err)
+		assert.True(t, opts.Preview)
+	})
+
+	t.Run("config file", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "config")
+		err := os.WriteFile(cfgPath, []byte("[Application Options]\npreview = true\n"), 0o600)
+		require.NoError(t, err)
+		opts, err := parseArgs([]string{"--config", cfgPath})
+		require.NoError(t, err)
+		assert.True(t, opts.Preview)
 	})
 }
 

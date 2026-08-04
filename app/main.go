@@ -214,6 +214,7 @@ func run(opts options) (int, error) {
 		Wrap:                 opts.Wrap,
 		WrapIndent:           opts.WrapIndent,
 		Collapsed:            opts.Collapsed,
+		Preview:              opts.Preview,
 		Compact:              opts.Compact,
 		CompactContext:       opts.CompactContext,
 		CrossFileHunks:       opts.CrossFileHunks,

@@ -88,6 +88,27 @@ That is 12 hunks across 5 files. The plan's Task 4 text counts by checklist item
 diff hunk (e.g. `keymap.go`'s enum + validActions edit is one checklist item but two hunks), so
 its site count differs — use the itemized list above as the actual hunk map.
 
+**`--preview` flag (start in markdown preview mode, added later, local-only like everything
+else in this file):**
+
+Same reasoning as the `P` binding and `▤` icon above — this is a preview-only option, so it is
+NOT added to `README.md`/`site/docs.html`/plugin `config.md` (which describe the released
+binary, no preview mode). Discoverable via `--help` and `--dump-config` in this build.
+
+- `app/config.go` — `Preview bool` next to `Collapsed`, tag
+  `` `long:"preview" ini-name:"preview" env:"REVDIFF_PREVIEW"` ``, description "start in
+  markdown preview mode"
+- `app/main.go` — `Preview: opts.Preview,` in the `ui.ModelConfig{}` literal, next to
+  `Collapsed:`
+- `app/ui/model.go`
+  - `Preview bool` on `ModelConfig` (Configuration values section, next to `Collapsed`)
+  - `NewModel`'s `modes: modeState{...}` literal seeds `mdPreview: cfg.Preview`
+- No new applicability gate needed (unlike `Compact`'s `CompactApplicable`): the existing
+  per-file `markdownPreviewable` check in `handleFileLoaded` (loaders.go) already resets
+  `m.modes.mdPreview` to `false` on the first file load if that file is not previewable, so an
+  unusable seed (e.g. `--preview` against a non-markdown file, or a renderer/mode that produces
+  a non-full-context diff) silently no-ops instead of needing its own gate.
+
 **Task 5 wiring (making annotation/cursor keys inert during preview — required additional
 edits beyond Task 4's file list, see the plan's Task 5 section for why):**
 
