@@ -289,6 +289,41 @@ func TestModel_NoTreeFromConfig(t *testing.T) {
 	})
 }
 
+func TestModel_PreviewFromConfig(t *testing.T) {
+	renderer := &mocks.RendererMock{
+		ChangedFilesFunc: func(string, bool) ([]diff.FileEntry, error) { return nil, nil },
+		FileDiffFunc:     func(diff.FileDiffRequest) ([]diff.DiffLine, error) { return nil, nil },
+	}
+	store := annotation.NewStore()
+	mdLines := []diff.DiffLine{{NewNum: 1, Content: "# Title", ChangeType: diff.ChangeContext}}
+	goLines := []diff.DiffLine{{NewNum: 1, Content: "package main", ChangeType: diff.ChangeContext}}
+
+	t.Run("Preview seeds mdPreview before any file loads", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{Preview: true})
+		assert.True(t, m.modes.mdPreview)
+	})
+
+	t.Run("a previewable first file keeps preview on", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{Preview: true})
+		result, _ := m.handleFileLoaded(fileLoadedMsg{file: "notes.md", lines: mdLines, seq: m.file.loadSeq})
+		m = result.(Model)
+		assert.True(t, m.modes.mdPreview, "a previewable first file must keep the preview seed")
+	})
+
+	t.Run("a non-previewable first file drops the preview seed", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{Preview: true})
+		require.True(t, m.modes.mdPreview)
+		result, _ := m.handleFileLoaded(fileLoadedMsg{file: "main.go", lines: goLines, seq: m.file.loadSeq})
+		m = result.(Model)
+		assert.False(t, m.modes.mdPreview, "a non-markdown first file must not stay in preview mode")
+	})
+
+	t.Run("Preview unset keeps preview off by default", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{})
+		assert.False(t, m.modes.mdPreview)
+	})
+}
+
 func TestModel_Init(t *testing.T) {
 	m := testModel([]string{"a.go", "b.go"}, nil)
 	cmd := m.Init()

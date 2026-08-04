@@ -746,6 +746,7 @@ type ModelConfig struct {
 	Wrap             bool     // enable line wrapping
 	WrapIndent       int      // extra indent (cols) for wrap continuation rows; 0 disables
 	Collapsed        bool     // start in collapsed diff mode
+	Preview          bool     // start in markdown preview mode; the file-load gate (markdownPreviewable) applies as usual
 	CrossFileHunks   bool     // allow [ and ] to jump across file boundaries
 	LineNumbers      bool     // show line numbers in diff gutter
 	ShowBlame        bool     // show blame gutter; requires Blamer
@@ -910,6 +911,7 @@ func NewModel(cfg ModelConfig) (Model, error) {
 			wrap:           cfg.Wrap,
 			lineNumbers:    cfg.LineNumbers,
 			collapsed:      collapsedState{enabled: cfg.Collapsed},
+			mdPreview:      cfg.Preview,
 			wordDiff:       cfg.WordDiff,
 			showBlame:      cfg.ShowBlame && cfg.Blamer != nil,
 			showUntracked:  cfg.ShowUntracked && cfg.LoadUntracked != nil,
