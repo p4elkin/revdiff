@@ -632,3 +632,28 @@ If `go mod tidy` removes glamour/mermaid-ascii from `go.mod` after conflict reso
 that `app/ui/mdpreview.go` still imports both — a conflict resolution that accidentally drops
 an import will cause tidy to prune the dependency instead of erroring, which surfaces as a
 build failure only once something else tries to use it.
+
+### The `P` key collision with upstream's `jump_file`
+
+Upstream added a `jump_file` action (open a file picker) bound to `P` by default. That
+collides with this patch's own `"P": ActionTogglePreview` — `go vet`/the Go compiler catches
+it immediately as a duplicate map key, so a rebase that pulls in `jump_file` will not build
+until this is resolved.
+
+Resolution (already applied on this branch, `app/keymap/keymap.go`'s `defaultBindings()`):
+`P` stays `ActionTogglePreview` (this patch's binding, and the muscle memory this whole file
+documents), `jump_file` moves to `ctrl+p` instead of its upstream default. `ctrl+p` is
+otherwise unbound and — per gotchas.md's file-picker note — is not a bare printable key, so it
+correctly toggles the picker closed on a second press (upstream's own default `P` binding
+could not do that; see `README.md`'s file-picker paragraph on printable-key filtering, which
+still describes upstream's `P` default accurately and is deliberately NOT edited to match this
+fork, per the doc-split policy at the top of this file).
+
+Following files carry test/behavior assertions tied to this specific key and need re-checking
+on every rebase that touches `jump_file`'s default: `app/keymap/keymap_test.go`
+(`TestActionJumpFile_DefaultBinding`, `TestActionJumpFile_RegistrationHelpAndDump`,
+`TestActionJumpFile_CustomConfiguration`), `app/ui/filepicker_test.go`
+(`TestModel_JumpFileOpensPickerAndLoadsSelection` sends `tea.KeyCtrlP`;
+`TestModel_JumpFileKeyFiltersInsideOpenPicker` explicitly rebinds `P` to `ActionJumpFile` to
+still exercise the printable-key-filters-not-closes behavior upstream's own default used to
+demonstrate), `app/ui/search_test.go` (`TestModel_SearchPrompt_SwallowsTogglePreviewKey`).

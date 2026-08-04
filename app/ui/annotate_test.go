@@ -2,9 +2,11 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	bubblecursor "github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -12,7 +14,6 @@ import (
 	"github.com/umputun/revdiff/app/annotation"
 	"github.com/umputun/revdiff/app/diff"
 	"github.com/umputun/revdiff/app/keymap"
-	"github.com/umputun/revdiff/app/ui/mocks"
 	"github.com/umputun/revdiff/app/ui/overlay"
 	"github.com/umputun/revdiff/app/ui/sidepane"
 	"github.com/umputun/revdiff/app/ui/style"
@@ -45,7 +46,7 @@ func TestModel_AnnotateKey(t *testing.T) {
 	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	model := result.(Model)
 	assert.True(t, model.annot.annotating)
-	assert.NotNil(t, cmd) // textinput blink command
+	assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 }
 
 func TestModel_EnterInDiffPaneStartsAnnotation(t *testing.T) {
@@ -64,7 +65,7 @@ func TestModel_EnterInDiffPaneStartsAnnotation(t *testing.T) {
 	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model := result.(Model)
 	assert.True(t, model.annot.annotating, "enter in diff pane should start annotation mode")
-	assert.NotNil(t, cmd, "should return textinput blink command")
+	assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 	assert.Equal(t, paneDiff, model.layout.focus, "focus should remain on diff pane")
 }
 
@@ -92,7 +93,7 @@ func TestModel_EnterInDiffPaneScrollsToShowAnnotationInputAtBottom(t *testing.T)
 	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model := result.(Model)
 	require.True(t, model.annot.annotating, "enter should start annotation mode")
-	require.NotNil(t, cmd)
+	require.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 
 	inputY := model.cursorViewportY() + model.wrappedLineCount(model.nav.diffCursor)
 	assert.GreaterOrEqual(t, inputY, model.layout.viewport.YOffset, "input row should be within visible viewport")
@@ -1034,7 +1035,7 @@ func TestModel_ShiftAStartsFileAnnotation(t *testing.T) {
 	model := result.(Model)
 	assert.True(t, model.annot.annotating, "A should start annotation mode")
 	assert.True(t, model.annot.fileAnnotating, "A should set fileAnnotating=true")
-	assert.NotNil(t, cmd, "should return textinput blink command")
+	assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 }
 
 func TestModel_AnnotationInputCharLimit(t *testing.T) {
@@ -1068,10 +1069,10 @@ func TestModel_AnnotationInputCharLimit(t *testing.T) {
 			m.layout.treeWidth = 30
 
 			if tt.fileLevel {
-				require.NotNil(t, m.startFileAnnotation())
+				require.Nil(t, m.startFileAnnotation(), "annotation input cursor is static, so no blink command is scheduled")
 				require.True(t, m.annot.fileAnnotating)
 			} else {
-				require.NotNil(t, m.startAnnotation())
+				require.Nil(t, m.startAnnotation(), "annotation input cursor is static, so no blink command is scheduled")
 				require.True(t, m.annot.annotating)
 			}
 
@@ -1101,14 +1102,14 @@ func TestModel_AnnotationInputWidthNarrowTerminal(t *testing.T) {
 
 	// line-level annotation
 	cmd := m.startAnnotation()
-	assert.NotNil(t, cmd)
+	assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 	assert.True(t, m.annot.annotating)
 	assert.GreaterOrEqual(t, m.annot.input.Width, 10, "text input width should be at least 10")
 
 	// file-level annotation
 	m.annot.annotating = false
 	cmd = m.startFileAnnotation()
-	assert.NotNil(t, cmd)
+	assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 	assert.True(t, m.annot.fileAnnotating)
 	assert.GreaterOrEqual(t, m.annot.input.Width, 10, "file text input width should be at least 10")
 }
@@ -1286,7 +1287,7 @@ func TestModel_EnterOnFileAnnotationLineTriggersFileAnnotation(t *testing.T) {
 	model := result.(Model)
 	assert.True(t, model.annot.annotating, "enter on file annotation line should start annotation mode")
 	assert.True(t, model.annot.fileAnnotating, "enter on file annotation line should set fileAnnotating")
-	assert.NotNil(t, cmd, "should return textinput blink command")
+	assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 }
 
 func TestModel_EnterOnFileAnnotationLinePreFillsText(t *testing.T) {
@@ -1326,7 +1327,7 @@ func TestModel_EnterOnRegularDiffLineStillTriggersLineAnnotation(t *testing.T) {
 	model := result.(Model)
 	assert.True(t, model.annot.annotating, "enter on regular line should start annotation mode")
 	assert.False(t, model.annot.fileAnnotating, "enter on regular line should not set fileAnnotating")
-	assert.NotNil(t, cmd, "should return textinput blink command")
+	assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 }
 
 func TestModel_DeleteFileAnnotationViaD(t *testing.T) {
@@ -1803,7 +1804,7 @@ func TestModel_AnnotationsWithTOCActive(t *testing.T) {
 		result, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 		model = result.(Model)
 		assert.True(t, model.annot.annotating, "should enter annotation mode in diff pane with TOC")
-		assert.NotNil(t, cmd)
+		assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 	})
 
 	t.Run("file annotation with TOC active", func(t *testing.T) {
@@ -1822,7 +1823,7 @@ func TestModel_AnnotationsWithTOCActive(t *testing.T) {
 		model = result.(Model)
 		assert.True(t, model.annot.annotating, "should enter file annotation mode with TOC")
 		assert.True(t, model.annot.fileAnnotating, "should be file-level annotation")
-		assert.NotNil(t, cmd)
+		assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 	})
 
 	t.Run("annotation list with TOC active", func(t *testing.T) {
@@ -1904,7 +1905,7 @@ func TestModel_ShiftAOnlyWorksFromDiffPane(t *testing.T) {
 	model = result.(Model)
 	assert.True(t, model.annot.annotating, "A should work from diff pane")
 	assert.True(t, model.annot.fileAnnotating)
-	assert.NotNil(t, cmd)
+	assert.Nil(t, cmd, "annotation input cursor is static, so no blink command is scheduled")
 }
 
 func TestModel_WrappedAnnotationLineCount_MultiLine(t *testing.T) {
@@ -3177,24 +3178,6 @@ func TestModel_AnnotationVisualRows(t *testing.T) {
 	})
 }
 
-func TestModel_InvalidateAnnotationRows(t *testing.T) {
-	m := testModel(nil, nil)
-	m.file.name = "a.go"
-	m.layout.width = 120
-	m.layout.treeWidth = 20
-
-	m.annotationVisualRows("\U0001f4ac ", "one")
-	m.annotationVisualRows("\U0001f4ac ", "two")
-	require.Len(t, m.annot.rowCache, 2)
-
-	m.invalidateAnnotationRows()
-	assert.Empty(t, m.annot.rowCache)
-
-	// cache must be usable after invalidation (not nil-mapped into a no-op)
-	m.annotationVisualRows("\U0001f4ac ", "after")
-	assert.Len(t, m.annot.rowCache, 1)
-}
-
 // TestModel_WrappedAnnotationLineCount_MatchesChokepoint pins the height-vs-paint
 // invariant after the chokepoint refactor: wrappedAnnotationLineCount(key) must
 // equal len(annotationVisualRows(prefix, body)) for every annotation shape. this
@@ -3247,69 +3230,6 @@ func TestModel_WrappedAnnotationLineCount_MatchesChokepoint(t *testing.T) {
 			assert.Equal(t, len(rows), count, "wrappedAnnotationLineCount must equal len(annotationVisualRows)")
 		})
 	}
-}
-
-// TestModel_HandleFileLoaded_InvalidatesAnnotationRows pins the file-load
-// invalidation hook. handleFileLoaded must call invalidateAnnotationRows so
-// per-file annotation sets don't leak cached rows across files.
-func TestModel_HandleFileLoaded_InvalidatesAnnotationRows(t *testing.T) {
-	m := testModel([]string{"a.go", "b.go"}, nil)
-	m.tree = testNewFileTree([]string{"a.go", "b.go"})
-	m.file.name = "a.go"
-	m.layout.width = 120
-	m.layout.treeWidth = 20
-
-	// populate the cache from the "current file" state
-	m.annotationVisualRows("\U0001f4ac ", "one")
-	m.annotationVisualRows("\U0001f4ac ", "two")
-	require.Len(t, m.annot.rowCache, 2)
-
-	lines := []diff.DiffLine{{NewNum: 1, Content: "package main", ChangeType: diff.ChangeContext}}
-	result, _ := m.Update(fileLoadedMsg{file: "b.go", lines: lines})
-	model := result.(Model)
-
-	assert.Empty(t, model.annot.rowCache, "cache must be cleared after file load")
-}
-
-// TestModel_ApplyTheme_InvalidatesAnnotationRows pins the theme-apply
-// invalidation hook. cached rows bake in AnnotationInline resolver styling, so
-// applyTheme must clear the cache or stale colors persist.
-func TestModel_ApplyTheme_InvalidatesAnnotationRows(t *testing.T) {
-	renderer := &mocks.RendererMock{
-		ChangedFilesFunc: func(string, bool) ([]diff.FileEntry, error) { return nil, nil },
-		FileDiffFunc:     func(diff.FileDiffRequest) ([]diff.DiffLine, error) { return nil, nil },
-	}
-	highlighter := &mocks.SyntaxHighlighterMock{
-		HighlightLinesFunc: func(string, []diff.DiffLine) []string { return nil },
-		SetStyleFunc:       func(string) bool { return true },
-		StyleNameFunc:      func() string { return "orig-style" },
-	}
-	m := testNewModel(t, renderer, annotation.NewStore(), highlighter, ModelConfig{
-		TreeWidthRatio: 3, Overlay: overlay.NewManager(),
-	})
-	m.file.name = "a.go"
-	m.layout.width = 120
-	m.layout.treeWidth = 20
-
-	m.annotationVisualRows("\U0001f4ac ", "one")
-	m.annotationVisualRows("\U0001f4ac ", "two")
-	require.Len(t, m.annot.rowCache, 2)
-
-	m.applyTheme(ThemeSpec{
-		Colors: style.Colors{
-			Accent: "#bd93f9", Border: "#6272a4", Normal: "#f8f8f2", Muted: "#6272a4",
-			SelectedFg: "#f8f8f2", SelectedBg: "#44475a", Annotation: "#f1fa8c",
-			CursorFg: "#282a36", CursorBg: "#f8f8f2",
-			AddFg: "#50fa7b", AddBg: "#2a4a2a", RemoveFg: "#ff5555", RemoveBg: "#4a2a2a",
-			ModifyFg: "#ffb86c", ModifyBg: "#3a3a2a",
-			TreeBg: "#21222c", DiffBg: "#282a36",
-			StatusFg: "#f8f8f2", StatusBg: "#44475a",
-			SearchFg: "#282a36", SearchBg: "#f1fa8c",
-		},
-		ChromaStyle: "dracula",
-	})
-
-	assert.Empty(t, m.annot.rowCache, "cache must be cleared after applyTheme")
 }
 
 // TestModel_AnnotationVisualRows_EmptyBodyEmitsPrefixRow pins the regression caught
@@ -3479,4 +3399,53 @@ func TestModel_AnnotationVisualRows_ByteEquivalentToMaster(t *testing.T) {
 			assert.Equal(t, tc.expected, got, "annotationVisualRows must match pre-refactor master byte-for-byte")
 		})
 	}
+}
+
+// BenchmarkModel_AnnotationKeystroke measures the full round-trip a user feels
+// per typed character while an annotation input is open: Update dispatch, the
+// textinput update, the full-diff re-render, and the frame paint.
+func BenchmarkModel_AnnotationKeystroke(b *testing.B) {
+	for _, n := range benchDiffSizes {
+		b.Run(fmt.Sprintf("lines=%d", n), func(b *testing.B) {
+			m := benchModel(b, n)
+			m.startAnnotation()
+			key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				res, _ := m.Update(key)
+				m = res.(Model)
+				sink = m.View()
+			}
+		})
+	}
+}
+
+// BenchmarkModel_AnnotationBlinkTick measures the same re-render triggered by the
+// textinput cursor blink, which fires on a timer while annotating even when the
+// user types nothing (model.go forwards unhandled msgs to the input and re-renders).
+func BenchmarkModel_AnnotationBlinkTick(b *testing.B) {
+	for _, n := range benchDiffSizes {
+		b.Run(fmt.Sprintf("lines=%d", n), func(b *testing.B) {
+			m := benchModel(b, n)
+			m.startAnnotation()
+			blink := bubblecursor.BlinkMsg{}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				res, _ := m.Update(blink)
+				m = res.(Model)
+				sink = m.View()
+			}
+		})
+	}
+}
+
+func TestModel_AnnotationInputCursorIsStatic(t *testing.T) {
+	// a blinking cursor is invisible here anyway (the input is painted inside renderDiff)
+	// but its timer would drive a full re-render twice a second
+	m := testModel([]string{"a.go"}, nil)
+	ti, cmd := m.newAnnotationInput("annotation...", 4)
+	assert.Equal(t, bubblecursor.CursorStatic, ti.Cursor.Mode(), "cursor must not blink")
+	assert.Nil(t, cmd, "focus must not schedule a blink command")
 }

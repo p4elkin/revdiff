@@ -357,6 +357,7 @@ Positional arguments support several forms:
 | `--tab-width` | Number of spaces per tab character, env: `REVDIFF_TAB_WIDTH` | `4` |
 | `--no-colors` | Disable all colors including syntax highlighting, env: `REVDIFF_NO_COLORS` | `false` |
 | `--no-status-bar` | Hide the status bar, env: `REVDIFF_NO_STATUS_BAR` | `false` |
+| `--no-tree` | Start with the file tree / TOC pane hidden, env: `REVDIFF_NO_TREE` | `false` |
 | `--wrap` | Enable line wrapping in diff view, env: `REVDIFF_WRAP` | `false` |
 | `--wrap-indent` | Indent wrap continuation rows by N columns so they hang under the first row's content (helps when reviewing markdown lists where unindented continuation can be misread as a new bullet), env: `REVDIFF_WRAP_INDENT` | `0` |
 | `--collapsed` | Start in collapsed diff mode, env: `REVDIFF_COLLAPSED` | `false` |
@@ -723,11 +724,11 @@ In the Claude Code and Codex plugins, you can also tell the agent to use a past 
 | `Home/End` | Jump to first/last item |
 | `Enter` | Switch to diff pane (tree) / start annotation (diff pane) |
 | `n/p` | Next/previous changed file; next/prev header in markdown TOC mode (n = next match when search active) |
-| `Ctrl+P` | Open the file picker |
+| `P` | Open the file picker |
 | `[` / `]` | Jump to previous/next change hunk in diff; add `--cross-file-hunks` to continue into the previous/next file at the boundary |
 | `e` | Open focused file in `$EDITOR` |
 
-The file picker lists paths currently visible in the sidebar, so annotated-only and unreviewed-only filters remain active. Printable keys always filter full relative paths; use the arrow keys or mouse wheel to move, and press `Enter` or left-click to jump. `Backspace` edits the filter. The first `Esc` clears a non-empty filter and keeps the picker open; the second closes it. `Ctrl+P` also closes the picker.
+The file picker lists paths currently visible in the sidebar, so annotated-only and unreviewed-only filters remain active. Printable keys always filter full relative paths; use the arrow keys or mouse wheel to move, and press `Enter` or left-click to jump. `Backspace` edits the filter. The first `Esc` clears a non-empty filter and keeps the picker open; the second closes it. Because printable keys always filter, `P` typed inside the picker adds to the filter rather than closing it; a `jump_file` binding with a modifier (e.g. `map alt+f jump_file`) closes the picker when pressed again.
 
 **Search:**
 
@@ -835,6 +836,7 @@ Horizontal wheel, right-click, middle-click, drag selection, and clicks on the s
 
 - **kitty**: hold `Ctrl+Shift` while dragging
 - **iTerm2**: hold `Option` while dragging
+- **ghostty** (and ghostty-based terminals such as agterm): hold `Shift` while dragging. Ghostty also uses `Shift` to *extend* an existing selection, so if text is already selected the drag grows that selection instead of starting a new one - clear it first. Ghostty 1.3.0+ additionally has a `toggle_mouse_reporting` keybind, unbound by default, which suspends mouse capture without restarting revdiff
 - **most other terminals**: hold `Shift` while dragging
 
 Because the tree pane is rendered alongside the diff on the same rows, multi-line Shift+drag will include tree content. For clean copies of diff text, use your terminal's block-select mode (Option+drag in iTerm2, Ctrl+Shift+drag in kitty) or run with `--no-mouse` to disable mouse capture entirely.

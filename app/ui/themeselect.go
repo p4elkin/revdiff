@@ -90,7 +90,7 @@ func (m *Model) cancelThemeSelect() {
 		log.Printf("[WARN] failed to restore chroma style %q", m.themePreview.origChroma)
 	}
 	m.themePreview = nil
-	m.invalidateAnnotationRows()
+	m.invalidateRenderCaches()
 	m.refreshDiff()
 }
 
@@ -114,7 +114,7 @@ func (m *Model) applyTheme(spec ThemeSpec) {
 			log.Printf("[WARN] failed to apply chroma style %q, keeping %q", spec.ChromaStyle, prevStyle)
 		}
 	}
-	m.invalidateAnnotationRows()
+	m.invalidateRenderCaches()
 	if m.file.name != "" && len(m.file.lines) > 0 {
 		if chromaChanged {
 			m.file.highlighted = m.highlighter.HighlightLines(m.file.name, m.file.lines)
@@ -124,9 +124,13 @@ func (m *Model) applyTheme(spec ThemeSpec) {
 }
 
 // refreshDiff re-highlights and re-renders the current diff if one is loaded.
+// Invalidates first: file.highlighted feeds every rendered line but is not part of
+// globalRenderKey, so reassigning it without clearing would repaint cached blocks
+// built from the previous highlighting.
 func (m *Model) refreshDiff() {
 	if m.file.name != "" && len(m.file.lines) > 0 {
 		m.file.highlighted = m.highlighter.HighlightLines(m.file.name, m.file.lines)
+		m.invalidateRenderCaches()
 		m.layout.viewport.SetContent(m.renderDiff())
 	}
 }

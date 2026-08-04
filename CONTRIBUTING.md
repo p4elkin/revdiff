@@ -6,7 +6,7 @@ Thank you for your interest in contributing!
 
 ### First-time contributors
 
-If this is your first PR to revdiff, please **open an issue first** describing what you plan to build and why. Wait for maintainer approval before writing code. This saves everyone's time — some ideas may not fit the project's direction, and it's better to find out early than after investing effort into a PR.
+If this is your first PR to revdiff, please **open an issue first** describing what you plan to build and why. Wait for maintainer approval before writing code. The issue has to answer why: state the problem you actually hit and what does not work for you today. An issue that only specifies the proposed behavior, flag names, or defaults does not answer it, and neither does one written after the code. This saves everyone's time — some ideas may not fit the project's direction, and it's better to find out early than after investing effort into a PR.
 
 ### Check existing functionality
 

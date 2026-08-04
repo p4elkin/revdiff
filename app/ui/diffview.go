@@ -291,24 +291,105 @@ func (m Model) renderDiff() string {
 	var b strings.Builder
 	m.renderFileAnnotationHeader(&b, fileComment)
 
-	for i, dl := range m.file.lines {
-		m.renderDiffLine(&b, i, dl)
-		m.renderAnnotationOrInput(&b, i, annotationMap)
+	m.renderCache.rebase(m.globalRenderKey(), len(m.file.lines))
+	// a large diff assembles into megabytes; without this the builder reallocates its way
+	// there on every render. the previous render's size is the right estimate because
+	// consecutive renders differ by a line or two.
+	if n := m.renderCache.lastLen; n > 0 {
+		b.Grow(n)
 	}
+	for i, dl := range m.file.lines {
+		flags := m.lineRenderFlags(i, annotationMap)
+		if block, ok := m.renderCache.get(i, flags); ok {
+			b.WriteString(block)
+			continue
+		}
+		var lb strings.Builder
+		m.renderDiffLine(&lb, i, dl)
+		m.renderAnnotationOrInput(&lb, i, annotationMap)
+		block := lb.String()
+		m.renderCache.put(i, flags, block)
+		b.WriteString(block)
+	}
+	m.renderCache.lastLen = b.Len()
 	return b.String()
+}
+
+// globalRenderKey captures every comparable input to a line's rendered block that
+// is not per-line. A change to any field invalidates the whole cache, so the key
+// must list everything renderDiffLine and renderAnnotationOrInput read beyond the
+// line itself — a missing field means stale rows painted after that state moves.
+// TestModel_RenderDiffCacheMatchesColdRender exercises the list, but only as far as
+// goldenStates reaches: a field is covered only when some pair of states differs in it
+// while still producing a cache hit. searchTerm was missing here and the matrix could not
+// see it, because its single search state made every pair flip searchMatch and miss. Add a
+// state alongside any field added here, or the gap moves with you.
+//
+// Four inputs are absent because they are not comparable, and all four invalidate
+// through invalidateRenderCaches instead — see its doc for the contract: the style
+// resolver, file.blameData, file.highlighted and file.intraRanges. The last two are
+// additionally covered today by loadSeq/fileName (handleFileLoaded) and the wordDiff
+// key field, but that is a property of their current mutation sites, not a guarantee:
+// any new path that re-highlights or recomputes intra-line ranges owes an explicit
+// invalidation.
+func (m Model) globalRenderKey() globalRenderKey {
+	k := globalRenderKey{
+		contentWidth: m.diffContentWidth(), scrollX: m.layout.scrollX,
+		wrap: m.modes.wrap, lineNumbers: m.modes.lineNumbers,
+		showBlame: m.modes.showBlame, wordDiff: m.modes.wordDiff,
+		noColors: m.cfg.noColors, tabSpaces: m.cfg.tabSpaces, searchTerm: m.search.term,
+		annotPrefix: m.cfg.annotPrefix, annotFilePrefix: m.cfg.annotFilePrefix,
+		fileName: m.file.name, loadSeq: m.file.loadSeq,
+		lineNumWidth: m.file.lineNumWidth, singleColLineNum: m.file.singleColLineNum,
+		blameAuthorLen: m.file.blameAuthorLen,
+		annotating:     m.annot.annotating, fileAnnotating: m.annot.fileAnnotating,
+	}
+	// the blame gutter renders a relative age, so its text drifts with wall time even
+	// when nothing else moves. bucket to the minute: blame-off sessions never pay, and
+	// a blame-on session rebuilds at most once a minute instead of showing frozen ages.
+	if m.modes.showBlame {
+		k.blameMinute = m.blameNow.Truncate(time.Minute).Unix()
+	}
+	return k
+}
+
+// lineRenderFlags captures the per-line state a cached block was rendered under.
+func (m Model) lineRenderFlags(idx int, annotationMap map[annotLineKey]string) lineRenderFlags {
+	f := lineRenderFlags{
+		cursor:      m.isCursorLine(idx),
+		searchMatch: m.search.matchSet[idx],
+	}
+	// the live input row carries textinput's own state (value, cursor position), which is
+	// not reducible to a comparable key — mark it uncacheable rather than key on it.
+	if m.annot.annotating && !m.annot.fileAnnotating && idx == m.nav.diffCursor {
+		f.liveInput = true
+		return f
+	}
+	if len(annotationMap) == 0 {
+		return f
+	}
+	dl := m.file.lines[idx]
+	if dl.ChangeType != diff.ChangeDivider {
+		if comment, ok := annotationMap[annotLineKey{line: m.diffLineNum(dl), changeType: dl.ChangeType}]; ok {
+			f.comment = comment
+			f.hasComment = true
+			f.annotCursor = idx == m.nav.diffCursor && m.annot.cursorOnAnnotation && m.layout.focus == paneDiff
+		}
+	}
+	return f
 }
 
 // buildAnnotationMap creates a lookup map of line annotations for the current file.
 // returns the annotation map and the file-level comment (empty if none).
-func (m Model) buildAnnotationMap() (annotations map[string]string, fileComment string) {
+func (m Model) buildAnnotationMap() (annotations map[annotLineKey]string, fileComment string) {
 	all := m.store.Get(m.file.name)
-	annotations = make(map[string]string, len(all))
+	annotations = make(map[annotLineKey]string, len(all))
 	for _, a := range all {
 		if a.Line == 0 {
 			fileComment = a.Comment
 			continue
 		}
-		annotations[m.annotationKey(a.Line, a.Type)] = a.Comment
+		annotations[annotLineKey{line: a.Line, changeType: diff.ChangeType(a.Type)}] = a.Comment
 	}
 	return annotations, fileComment
 }
@@ -657,7 +738,7 @@ func (m Model) extendLineBg(styled string, bg style.Color) string {
 }
 
 // renderAnnotationOrInput writes the annotation input or existing annotation below a diff line.
-func (m Model) renderAnnotationOrInput(b *strings.Builder, idx int, annotationMap map[string]string) {
+func (m Model) renderAnnotationOrInput(b *strings.Builder, idx int, annotationMap map[annotLineKey]string) {
 	if m.annot.annotating && !m.annot.fileAnnotating && idx == m.nav.diffCursor {
 		line := " " + m.renderer.AnnotationInline(m.annotPrefix()) + m.annot.input.View()
 		// strip textinput's unstyled trailing padding so extendLineBg can re-pad with DiffBg
@@ -667,7 +748,7 @@ func (m Model) renderAnnotationOrInput(b *strings.Builder, idx int, annotationMa
 	}
 	dl := m.file.lines[idx]
 	if dl.ChangeType != diff.ChangeDivider {
-		key := m.annotationKey(m.diffLineNum(dl), string(dl.ChangeType))
+		key := annotLineKey{line: m.diffLineNum(dl), changeType: dl.ChangeType}
 		if comment, ok := annotationMap[key]; ok {
 			cursor := " "
 			if idx == m.nav.diffCursor && m.annot.cursorOnAnnotation && m.layout.focus == paneDiff {
@@ -745,4 +826,150 @@ func (m Model) diffContentWidth() int {
 	}
 	// multi-file or single-file with TOC: diff pane width minus borders (4) minus tree width, minus bar (1), minus right padding (1)
 	return max(10, m.layout.width-m.layout.treeWidth-4-2)
+}
+
+// annotLineKey identifies a line annotation for render-path lookups. Comparable on
+// purpose: lineRenderFlags builds one per line on every render, including renders that
+// are entirely cache hits, so the string form (annotationKey's Sprintf) allocated per
+// line for any file carrying at least one annotation.
+type annotLineKey struct {
+	line       int
+	changeType diff.ChangeType
+}
+
+// globalRenderKey is the comparable fingerprint of non-per-line render state.
+// It is compared by value, so every field must stay comparable.
+type globalRenderKey struct {
+	// contentWidth is the resolved diffContentWidth(), not the raw layout.width and
+	// treeWidth it is computed from. Every width consumer in the render path
+	// (applyHorizontalScroll, plainHorizontalCut, extendLineBg, wrapWidth,
+	// annotationVisualRows) goes through diffContentWidth, and that branches on
+	// treePaneHidden() = treeHidden || (singleFile && mdTOC == nil). Keying the raw
+	// inputs missed those three: with treeWidth already 0 while the pane is shown —
+	// reachable after a single-file diff becomes multi-file without treeWidth being
+	// recomputed — pressing `t` moves no key field yet changes the width every line is
+	// cut and padded to. Keying the resolved value cannot drift from what is consumed,
+	// and matches how annotCacheKey already keys on the resolved wrapW.
+	contentWidth int
+	scrollX      int
+	// layout.focus is deliberately NOT here. Every focus read inside the cached loop is the
+	// `focus == paneDiff` term of isCursorLine and of the annotCursor condition, both captured
+	// per line by lineRenderFlags, and both can only differ on the cursor line — so a focus
+	// change dirties one line, not the file. Having it here made Tab and every click into the
+	// tree drop the whole cache and pay a cold rebuild. The one remaining read, in
+	// renderFileAnnotationHeader, is outside the loop and never cached.
+	// layout.viewport.Width is likewise absent: nothing in the render path reads it at all.
+	wrap        bool
+	lineNumbers bool
+	showBlame   bool
+	wordDiff    bool
+	noColors    bool
+	annotating  bool
+	// searchTerm, not just the per-line match bool: highlightSearchMatches locates the
+	// highlighted byte range from the term, so two different terms matching the same set
+	// of lines still paint differently.
+	searchTerm       string
+	fileAnnotating   bool
+	singleColLineNum bool
+	lineNumWidth     int
+	blameAuthorLen   int
+	blameMinute      int64
+	loadSeq          uint64
+	tabSpaces        string
+	annotPrefix      string
+	annotFilePrefix  string
+	fileName         string
+}
+
+// lineRenderFlags is the per-line state a cached block was rendered under.
+// hasComment distinguishes "no annotation" from "annotation with an empty body",
+// which render differently.
+type lineRenderFlags struct {
+	cursor      bool
+	searchMatch bool
+	annotCursor bool
+	hasComment  bool
+	liveInput   bool
+	comment     string
+}
+
+// diffRenderCache memoizes each diff line's rendered block (the line plus any
+// annotation rows below it). renderDiff has a value receiver, so the cache is
+// held behind a pointer: every Model copy shares one instance, which is what
+// lets a render populated by one copy serve the next.
+//
+// Sharing across copies is safe because entries are keyed by the state they were
+// rendered under — identical inputs produce identical bytes, so a block written
+// by a Model copy that was later discarded is still correct for any copy whose
+// key matches.
+type diffRenderCache struct {
+	key     globalRenderKey
+	blocks  []string
+	flags   []lineRenderFlags
+	filled  []bool
+	lastLen int // byte length of the previous assembled render, used to pre-size the builder
+}
+
+// rebase drops everything when the global state or the line count changed, so a
+// stale generation is never consulted.
+func (c *diffRenderCache) rebase(key globalRenderKey, lines int) {
+	if c.key == key && len(c.blocks) == lines {
+		return
+	}
+	c.key = key
+	c.blocks = make([]string, lines)
+	c.flags = make([]lineRenderFlags, lines)
+	c.filled = make([]bool, lines)
+}
+
+// get returns the cached block for a line when it was rendered under the same
+// per-line state. The live annotation input row is never served from cache.
+func (c *diffRenderCache) get(idx int, flags lineRenderFlags) (string, bool) {
+	if flags.liveInput || idx < 0 || idx >= len(c.blocks) || !c.filled[idx] {
+		return "", false
+	}
+	if c.flags[idx] != flags {
+		return "", false
+	}
+	return c.blocks[idx], true
+}
+
+// put stores a rendered block. The live annotation input row is never stored.
+func (c *diffRenderCache) put(idx int, flags lineRenderFlags, block string) {
+	if flags.liveInput || idx < 0 || idx >= len(c.blocks) {
+		return
+	}
+	c.blocks[idx] = block
+	c.flags[idx] = flags
+	c.filled[idx] = true
+}
+
+// invalidateRenderCaches clears both render memos: the annotation visual-row
+// slices and the per-line diff render blocks. callers: handleFileLoaded (per-file
+// annotation set changes), applyTheme (resolver colors change), cancelThemeSelect
+// (preview theme rebuilt the resolver), and handleBlameLoaded (blame data feeds
+// the gutter). Width and the other comparable render inputs self-invalidate via
+// the respective cache keys, so no call is needed on resize.
+//
+// This is the invalidation chokepoint for anything the caches read that a key cannot
+// capture. Four render inputs are not comparable and so cannot live in
+// globalRenderKey: the style resolver, file.blameData, file.highlighted and
+// file.intraRanges. A change to any of them is reflected only by calling this. The
+// last two are also covered today by loadSeq/fileName and the wordDiff key field
+// because of where they happen to be mutated, which is not something to rely on —
+// any new path that rebuilds the resolver, loads blame, re-highlights, or recomputes
+// intra-line ranges MUST call this.
+func (m *Model) invalidateRenderCaches() {
+	clear(m.annot.rowCache)
+	m.renderCache.clear()
+}
+
+// clear drops every cached block, keeping the allocated slices.
+func (c *diffRenderCache) clear() {
+	clear(c.blocks)
+	clear(c.filled)
+	clear(c.flags)
+	// the estimate belongs to content that is now gone; keeping it would pre-size the
+	// builder for a 50k-line diff while rendering the 20-line file that replaced it
+	c.lastLen = 0
 }

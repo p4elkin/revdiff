@@ -604,6 +604,12 @@ type Model struct {
 	loadUntrackedRenames func([]string) ([]diff.FileEntry, error) // pairs untracked renames against their deleted origin; nil for non-git
 	blameNow             time.Time                                // snapshot of time.Now() set once per render pass for blame age
 
+	// renderCache memoizes per-line rendered blocks for renderDiff. Held behind a
+	// pointer because renderDiff has a value receiver: every Model copy shares one
+	// instance, which is what lets a block rendered by one copy serve the next.
+	// NewModel initializes this; direct Model{} construction is unsupported.
+	renderCache *diffRenderCache
+
 	discarded        bool // true when user chose to discard annotations and quit
 	inConfirmDiscard bool // true when showing discard confirmation prompt
 
@@ -730,6 +736,7 @@ type ModelConfig struct {
 	Ref              string
 	Staged           bool
 	TreeWidthRatio   int
+	NoTree           bool     // start with the tree/TOC pane hidden
 	TabWidth         int      // number of spaces per tab character
 	NoColors         bool     // disable all colors including syntax highlighting
 	MouseTracking    bool     // enable mouse tracking for clicks and wheel events
@@ -896,7 +903,8 @@ func NewModel(cfg ModelConfig) (Model, error) {
 			outputPath:         cfg.OutputPath,
 		},
 		layout: layoutState{
-			focus: paneTree,
+			focus:      paneTree,
+			treeHidden: cfg.NoTree,
 		},
 		modes: modeState{
 			wrap:           cfg.Wrap,
@@ -921,6 +929,7 @@ func NewModel(cfg ModelConfig) (Model, error) {
 		reload:               reloadState{applicable: cfg.ReloadApplicable},
 		compact:              compactState{applicable: cfg.CompactApplicable},
 		annot:                annotationState{rowCache: make(map[annotCacheKey][]string)},
+		renderCache:          &diffRenderCache{},
 		loadUntracked:        cfg.LoadUntracked,
 		loadUntrackedRenames: cfg.LoadUntrackedRenames,
 		activeThemeName:      cfg.ActiveThemeName,
@@ -979,11 +988,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleWheelDebounce(msg)
 	}
 
-	// forward other messages to textinput when annotating (e.g. cursor blink)
+	// forward other messages to textinput when annotating (e.g. paste completion).
+	// re-render only when the input text actually changed: renderDiff is O(diff lines)
+	// and repainting for a message that left the value untouched is pure waste.
 	if m.annot.annotating {
+		before := m.annot.input.Value()
 		var cmd tea.Cmd
 		m.annot.input, cmd = m.annot.input.Update(msg)
-		m.layout.viewport.SetContent(m.renderDiff()) // re-render so cursor blink updates are visible
+		if m.annot.input.Value() != before {
+			m.layout.viewport.SetContent(m.renderDiff())
+		}
 		return m, cmd
 	}
 

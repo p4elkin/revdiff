@@ -3,6 +3,7 @@ package ui
 import (
 	"testing"
 
+	bubblecursor "github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -259,6 +260,32 @@ func TestNewModel_OptionalDefaults(t *testing.T) {
 	t.Run("TreeWidthRatio in range is kept", func(t *testing.T) {
 		m := testNewModel(t, renderer, annotation.NewStore(), noopHighlighter(), ModelConfig{TreeWidthRatio: 5})
 		assert.Equal(t, 5, m.cfg.treeWidthRatio)
+	})
+}
+
+func TestModel_NoTreeFromConfig(t *testing.T) {
+	renderer := &mocks.RendererMock{
+		ChangedFilesFunc: func(string, bool) ([]diff.FileEntry, error) { return nil, nil },
+		FileDiffFunc:     func(diff.FileDiffRequest) ([]diff.DiffLine, error) { return nil, nil },
+	}
+	store := annotation.NewStore()
+
+	t.Run("NoTree seeds treeHidden and treePaneHidden", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{NoTree: true, TreeWidthRatio: 2})
+		assert.True(t, m.layout.treeHidden)
+		assert.True(t, m.treePaneHidden())
+	})
+
+	t.Run("t key reveals the pane after starting hidden", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{NoTree: true, TreeWidthRatio: 2})
+		require.True(t, m.layout.treeHidden)
+		m.toggleTreePane()
+		assert.False(t, m.layout.treeHidden)
+	})
+
+	t.Run("NoTree unset keeps tree visible by default", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{TreeWidthRatio: 2})
+		assert.False(t, m.layout.treeHidden)
 	})
 }
 
@@ -1704,4 +1731,35 @@ func TestHandleKey_NonKeyMessagesPreserveChordState(t *testing.T) {
 			assert.Equal(t, "Pending: ctrl+w, esc to cancel", after.keys.hint, "chord hint must survive non-key messages")
 		})
 	}
+}
+
+func TestModel_AnnotatingNoOpMessageDoesNotRerenderDiff(t *testing.T) {
+	// pins the cost regression: every message forwarded to the annotation input used to
+	// force SetContent(renderDiff()), which is O(diff lines). the cursor blink alone fired
+	// it twice a second on an idle session.
+	lines := []diff.DiffLine{
+		{NewNum: 1, Content: "original one", ChangeType: diff.ChangeContext},
+		{NewNum: 2, Content: "original two", ChangeType: diff.ChangeContext},
+	}
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	res, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = res.(Model)
+	res, _ = m.Update(fileLoadedMsg{file: "a.go", lines: lines})
+	m = res.(Model)
+	m.layout.focus = paneDiff
+	m.nav.diffCursor = 0
+	m.startAnnotation()
+	m.layout.viewport.SetContent(m.renderDiff())
+
+	// mutating line content in place is a test-only shortcut: production replaces the whole
+	// slice in handleFileLoaded, which bumps loadSeq and invalidates the caches itself. Do the
+	// invalidation by hand so the probe below measures the blink, not a stale cached block.
+	m.file.lines[1].Content = "sentinel-after-render"
+	m.invalidateRenderCaches()
+	require.Contains(t, m.renderDiff(), "sentinel-after-render", "a fresh render would pick the change up")
+
+	res, _ = m.Update(bubblecursor.BlinkMsg{})
+	m = res.(Model)
+	assert.NotContains(t, m.layout.viewport.View(), "sentinel-after-render",
+		"blink left the input value untouched, so the diff must not be re-rendered")
 }

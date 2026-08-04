@@ -87,12 +87,10 @@ func TestDefault_ctrlKeysMatchBubbletea(t *testing.T) {
 	// ctrl+d and ctrl+u: bubbletea represents these as KeyMsg with specific types
 	ctrlD := tea.KeyMsg{Type: tea.KeyCtrlD}
 	ctrlU := tea.KeyMsg{Type: tea.KeyCtrlU}
-	ctrlP := tea.KeyMsg{Type: tea.KeyCtrlP}
 
 	km := Default()
 	assert.Equal(t, ActionHalfPageDown, km.Resolve(ctrlD.String()))
 	assert.Equal(t, ActionHalfPageUp, km.Resolve(ctrlU.String()))
-	assert.Equal(t, ActionJumpFile, km.Resolve(ctrlP.String()))
 }
 
 func TestActionJumpFile_RegistrationHelpAndDump(t *testing.T) {
@@ -119,6 +117,14 @@ func TestActionJumpFile_RegistrationHelpAndDump(t *testing.T) {
 	assert.Contains(t, dumped.String(), "map ctrl+p jump_file")
 }
 
+// P is claimed by ActionTogglePreview in this fork, so jump_file's default
+// moved to ctrl+p despite host terminals (agterm session_palette, tmux
+// copy-mode) sometimes claiming that chord before revdiff sees the key.
+func TestActionJumpFile_DefaultBinding(t *testing.T) {
+	km := Default()
+	assert.Equal(t, ActionJumpFile, km.Resolve("ctrl+p"))
+}
+
 func TestActionJumpFile_CustomConfiguration(t *testing.T) {
 	path := t.TempDir() + "/keybindings"
 	require.NoError(t, os.WriteFile(path, []byte("unmap ctrl+p\nmap alt+f jump_file\n"), 0o600))
@@ -127,6 +133,7 @@ func TestActionJumpFile_CustomConfiguration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, km.Resolve("ctrl+p"))
 	assert.Equal(t, ActionJumpFile, km.Resolve("alt+f"))
+	assert.Equal(t, ActionTogglePreview, km.Resolve("P"), "unmapping ctrl+p must not disturb P's own binding")
 }
 
 func TestResolve(t *testing.T) {

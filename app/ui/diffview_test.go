@@ -1,8 +1,13 @@
 package ui
 
 import (
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -14,6 +19,7 @@ import (
 	"github.com/umputun/revdiff/app/annotation"
 	"github.com/umputun/revdiff/app/diff"
 	"github.com/umputun/revdiff/app/ui/mocks"
+	"github.com/umputun/revdiff/app/ui/overlay"
 	"github.com/umputun/revdiff/app/ui/style"
 	"github.com/umputun/revdiff/app/ui/worddiff"
 )
@@ -314,6 +320,10 @@ func TestModel_RenderDiffLineHighlighted(t *testing.T) {
 	result, _ := m.Update(fileLoadedMsg{file: "a.go", lines: lines})
 	m = result.(Model)
 	m.file.highlighted = []string{"hl-context", "hl-add", "hl-remove"}
+	// the load above already rendered and cached with no highlighting; file.highlighted is one
+	// of the render inputs that cannot live in globalRenderKey, so assigning it owes an
+	// invalidation exactly as handleFileLoaded and refreshDiff do
+	m.invalidateRenderCaches()
 	m.layout.focus = paneDiff
 	output := m.renderDiff()
 
@@ -1291,4 +1301,546 @@ func TestModel_RenderWrappedAnnotation_MultiLine(t *testing.T) {
 		assert.Contains(t, out, "alpha", "first logical line content present")
 		assert.Contains(t, out, "bravo", "second logical line content present")
 	})
+}
+
+// benchDiffLines builds a realistic mixed diff: context, added, and removed lines
+// in roughly the proportions a review diff has, with source-like content.
+func benchDiffLines(n int) []diff.DiffLine {
+	lines := make([]diff.DiffLine, n)
+	bodies := []string{
+		"func (s *Store) Get(key string) (Value, error) {",
+		"\tif v, ok := s.cache[key]; ok { return v, nil }",
+		"\treturn Value{}, fmt.Errorf(\"lookup %q: %w\", key, ErrMissing)",
+		"",
+		"// resolve walks the chain until a terminal node is reached",
+	}
+	oldNum, newNum := 1, 1
+	for i := range lines {
+		content := bodies[i%len(bodies)]
+		switch i % 7 {
+		case 3:
+			lines[i] = diff.DiffLine{OldNum: oldNum, Content: content, ChangeType: diff.ChangeRemove}
+			oldNum++
+		case 4:
+			lines[i] = diff.DiffLine{NewNum: newNum, Content: content, ChangeType: diff.ChangeAdd}
+			newNum++
+		default:
+			lines[i] = diff.DiffLine{OldNum: oldNum, NewNum: newNum, Content: content, ChangeType: diff.ChangeContext}
+			oldNum++
+			newNum++
+		}
+	}
+	return lines
+}
+
+// benchModel builds a Model with the production color palette and pre-computed
+// highlight strings, loaded with an n-line diff and sized to a typical terminal.
+func benchModel(b *testing.B, n int) Model {
+	b.Helper()
+	lines := benchDiffLines(n)
+	res := style.NewResolver(style.Colors{
+		Accent: "#D5895F", Border: "#585858", Normal: "#d0d0d0", Muted: "#585858",
+		SelectedFg: "#ffffaf", SelectedBg: "#D5895F", Annotation: "#ffd700", CursorFg: "#bbbb44",
+		AddFg: "#87d787", AddBg: "#123800", RemoveFg: "#ff8787", RemoveBg: "#4D1100",
+		ModifyFg: "#f5c542", ModifyBg: "#3D2E00", StatusFg: "#202020", StatusBg: "#C5794F",
+		SearchFg: "#1a1a1a", SearchBg: "#4a4a00",
+	})
+	renderer := &mocks.RendererMock{
+		ChangedFilesFunc: func(string, bool) ([]diff.FileEntry, error) {
+			return []diff.FileEntry{{Path: "large.go"}}, nil
+		},
+		FileDiffFunc: func(diff.FileDiffRequest) ([]diff.DiffLine, error) { return lines, nil },
+	}
+	m, err := NewModel(ModelConfig{
+		Renderer: renderer, Store: annotation.NewStore(), Highlighter: noopHighlighter(),
+		StyleResolver: res, StyleRenderer: style.NewRenderer(res), SGR: style.SGR{},
+		WordDiffer: worddiff.New(), Overlay: overlay.NewManager(), Themes: fakeThemeCatalog{},
+		TreeWidthRatio: 3, AnnotationMarker: "\U0001f4ac",
+		NewFileTree: testFileTreeFactory(), ParseTOC: testParseTOCFactory(),
+	})
+	require.NoError(b, err)
+
+	res2, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 44})
+	m = res2.(Model)
+	res2, _ = m.Update(filesLoadedMsg{entries: []diff.FileEntry{{Path: "large.go"}}})
+	m = res2.(Model)
+	// seq must match the load the file list just issued, or handleFileLoaded drops it as stale
+	res2, _ = m.Update(fileLoadedMsg{file: "large.go", seq: m.file.loadSeq, lines: lines})
+	m = res2.(Model)
+	require.True(b, m.ready && m.filesLoaded, "View must render the real layout, not a loading placeholder")
+	require.Len(b, m.file.lines, n, "renderDiff must walk the loaded diff, not the empty-file shortcut")
+
+	// syntax highlighting is pre-computed per file load in production; mirror that
+	// so renderDiff walks the highlighted path rather than the plain one.
+	highlighted := make([]string, len(lines))
+	for i, dl := range lines {
+		highlighted[i] = "\033[38;5;114m" + dl.Content + "\033[39m"
+	}
+	m.file.highlighted = highlighted
+	// handleFileLoaded already rendered and filled the cache while the highlighter returned
+	// nothing; without this the benchmark measures cached unhighlighted blocks
+	m.invalidateRenderCaches()
+	m.layout.focus = paneDiff
+	m.nav.diffCursor = len(lines) / 2
+	m.layout.viewport.SetContent(m.renderDiff())
+	m.layout.viewport.SetYOffset(m.nav.diffCursor)
+	return m
+}
+
+var benchDiffSizes = []int{500, 2_000, 10_000, 50_000}
+
+// BenchmarkModel_RenderDiff measures the full-diff re-render that every keystroke
+// during annotation triggers (annotate.go handleAnnotateKey).
+func BenchmarkModel_RenderDiff(b *testing.B) {
+	for _, n := range benchDiffSizes {
+		b.Run(fmt.Sprintf("lines=%d", n), func(b *testing.B) {
+			m := benchModel(b, n)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				sink = m.renderDiff()
+			}
+		})
+	}
+}
+
+// BenchmarkModel_View measures the per-frame cost that does NOT include a
+// full re-render: viewport slicing plus lipgloss pane assembly. Compare against
+// BenchmarkModel_RenderDiff to see how much of a keystroke is the re-render.
+func BenchmarkModel_View(b *testing.B) {
+	for _, n := range benchDiffSizes {
+		b.Run(fmt.Sprintf("lines=%d", n), func(b *testing.B) {
+			m := benchModel(b, n)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				sink = m.View()
+			}
+		})
+	}
+}
+
+// sink prevents the compiler from eliminating benchmark render calls.
+var sink string
+
+var updateGolden = flag.Bool("update-golden", false, "rewrite testdata goldens from current output")
+
+// goldenModel builds a deterministic model for the render golden. The content mixes change types,
+// tabs, wide runes and lines long enough to force horizontal scroll and wrapping, so the golden
+// exercises the gutter, styling, cut and pad paths rather than only the happy one.
+func goldenModel(t *testing.T) Model {
+	t.Helper()
+	lines := []diff.DiffLine{
+		{OldNum: 1, NewNum: 1, Content: "package store", ChangeType: diff.ChangeContext},
+		{OldNum: 2, NewNum: 2, Content: "", ChangeType: diff.ChangeContext},
+		{Content: "⋯ 12 lines ⋯", ChangeType: diff.ChangeDivider},
+		{OldNum: 15, Content: "\tif v, ok := s.cache[key]; ok {", ChangeType: diff.ChangeRemove},
+		{NewNum: 15, Content: "\tif v, ok := s.cache[key]; ok && !v.stale {", ChangeType: diff.ChangeAdd},
+		{OldNum: 16, NewNum: 16, Content: "\t\treturn v, nil", ChangeType: diff.ChangeContext},
+		{NewNum: 17, Content: "\t// ленивая инвалидация — 日本語 mixed width", ChangeType: diff.ChangeAdd},
+		{OldNum: 17, NewNum: 18, Content: strings.Repeat("long tail content that overflows the pane width ", 6), ChangeType: diff.ChangeContext},
+		{OldNum: 18, Content: "\treturn Value{}, ErrMissing", ChangeType: diff.ChangeRemove},
+		{NewNum: 19, Content: "\treturn Value{}, fmt.Errorf(\"lookup %q: %w\", key, ErrMissing)", ChangeType: diff.ChangeAdd},
+		{OldNum: 19, NewNum: 20, Content: "}", ChangeType: diff.ChangeContext},
+	}
+	res := style.NewResolver(style.Colors{
+		Accent: "#D5895F", Border: "#585858", Normal: "#d0d0d0", Muted: "#585858",
+		SelectedFg: "#ffffaf", SelectedBg: "#D5895F", Annotation: "#ffd700", CursorFg: "#bbbb44",
+		AddFg: "#87d787", AddBg: "#123800", RemoveFg: "#ff8787", RemoveBg: "#4D1100",
+		ModifyFg: "#f5c542", ModifyBg: "#3D2E00", StatusFg: "#202020", StatusBg: "#C5794F",
+		SearchFg: "#1a1a1a", SearchBg: "#4a4a00", DiffBg: "#1c1c1c",
+	})
+	renderer := &mocks.RendererMock{
+		ChangedFilesFunc: func(string, bool) ([]diff.FileEntry, error) {
+			return []diff.FileEntry{{Path: "store.go"}}, nil
+		},
+		FileDiffFunc: func(diff.FileDiffRequest) ([]diff.DiffLine, error) { return lines, nil },
+	}
+	m, err := NewModel(ModelConfig{
+		Renderer: renderer, Store: annotation.NewStore(), Highlighter: noopHighlighter(),
+		StyleResolver: res, StyleRenderer: style.NewRenderer(res), SGR: style.SGR{},
+		WordDiffer: worddiff.New(), Overlay: overlay.NewManager(), Themes: fakeThemeCatalog{},
+		TreeWidthRatio: 3, AnnotationMarker: "\U0001f4ac",
+		NewFileTree: testFileTreeFactory(), ParseTOC: testParseTOCFactory(),
+	})
+	require.NoError(t, err)
+
+	res2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = res2.(Model)
+	res2, _ = m.Update(filesLoadedMsg{entries: []diff.FileEntry{{Path: "store.go"}}})
+	m = res2.(Model)
+	res2, _ = m.Update(fileLoadedMsg{file: "store.go", seq: m.file.loadSeq, lines: lines})
+	m = res2.(Model)
+	require.Len(t, m.file.lines, len(lines))
+
+	highlighted := make([]string, len(lines))
+	for i, dl := range lines {
+		highlighted[i] = "\033[38;5;114m" + dl.Content + "\033[39m"
+	}
+	m.file.highlighted = highlighted
+	m.file.lineNumWidth = 2
+	m.layout.focus = paneDiff
+	m.nav.diffCursor = 0
+	return m
+}
+
+// goldenStates enumerates the render states the golden covers. Each mutator receives a fresh
+// model from goldenModel, so states never leak into each other.
+func goldenStates() []struct {
+	name  string
+	apply func(t *testing.T, m *Model)
+} {
+	return []struct {
+		name  string
+		apply func(t *testing.T, m *Model)
+	}{
+		{"baseline-cursor-first", func(t *testing.T, m *Model) {}},
+		{"cursor-mid", func(t *testing.T, m *Model) { m.nav.diffCursor = 5 }},
+		{"cursor-last", func(t *testing.T, m *Model) { m.nav.diffCursor = len(m.file.lines) - 1 }},
+		{"cursor-on-divider", func(t *testing.T, m *Model) { m.nav.diffCursor = 2 }},
+		{"tree-pane-focused", func(t *testing.T, m *Model) { m.layout.focus = paneTree }},
+		{"line-numbers", func(t *testing.T, m *Model) { m.modes.lineNumbers = true }},
+		{"wrap", func(t *testing.T, m *Model) { m.modes.wrap = true }},
+		{"wrap-and-line-numbers", func(t *testing.T, m *Model) { m.modes.wrap = true; m.modes.lineNumbers = true }},
+		{"blame", func(t *testing.T, m *Model) {
+			m.modes.showBlame = true
+			m.file.blameAuthorLen = 6
+			// relative, not absolute: RelativeAge buckets by whole hours under 24h, so a
+			// hardcoded instant bakes the hour-of-generation into the golden and goes red at
+			// the next bucket boundary. an offset from now always renders "3h".
+			blameAt := time.Now().Add(-3*time.Hour - 30*time.Minute)
+			m.file.blameData = map[int]diff.BlameLine{
+				1: {Author: "eugene", Time: blameAt}, 15: {Author: "paskal", Time: blameAt},
+				16: {Author: "eugene", Time: blameAt}, 20: {Author: "quetz", Time: blameAt},
+			}
+		}},
+		{"scrolled-right", func(t *testing.T, m *Model) { m.layout.scrollX = 24 }},
+		{"narrow-pane", func(t *testing.T, m *Model) { m.layout.width = 46; m.layout.treeWidth = 12 }},
+		{"tree-hidden", func(t *testing.T, m *Model) {
+			// isolates contentWidth via the treePaneHidden branch: width and treeWidth are
+			// untouched, but diffContentWidth switches from width-treeWidth-6 to width-4
+			m.layout.treeHidden = true
+		}},
+		{"search-matches", func(t *testing.T, m *Model) {
+			m.search.term = "return"
+			m.search.matches = []int{5, 8, 9}
+		}},
+		{"search-other-term", func(t *testing.T, m *Model) {
+			// same match set as search-matches, different term: the only shape that catches a
+			// term missing from globalRenderKey, since searchMatch stays true on every row
+			m.search.term = "eturn"
+			m.search.matches = []int{5, 8, 9}
+		}},
+		{"word-diff", func(t *testing.T, m *Model) {
+			m.modes.wordDiff = true
+			m.file.intraRanges = make([][]worddiff.Range, len(m.file.lines))
+			m.file.intraRanges[3] = []worddiff.Range{{Start: 20, End: 23}}
+			m.file.intraRanges[4] = []worddiff.Range{{Start: 20, End: 34}}
+		}},
+		{"empty-body-annotation", func(t *testing.T, m *Model) {
+			// reachable via --annotations; must still reserve and paint a prefix-only row
+			m.store.Add(annotation.Annotation{File: "store.go", Line: 16, Type: " ", Comment: ""})
+		}},
+		{"annotations", func(t *testing.T, m *Model) {
+			m.store.Add(annotation.Annotation{File: "store.go", Line: 15, Type: "+", Comment: "use errors.Is here"})
+			m.store.Add(annotation.Annotation{File: "store.go", Line: 20, Type: " ", Comment: "multi\nline\nannotation body"})
+		}},
+		{"annotation-cursor", func(t *testing.T, m *Model) {
+			m.store.Add(annotation.Annotation{File: "store.go", Line: 15, Type: "+", Comment: "use errors.Is here"})
+			m.nav.diffCursor = 4
+			m.annot.cursorOnAnnotation = true
+		}},
+		{"file-annotation", func(t *testing.T, m *Model) {
+			m.store.Add(annotation.Annotation{File: "store.go", Line: 0, Comment: "file-level note"})
+			m.nav.diffCursor = -1
+		}},
+		{"live-input", func(t *testing.T, m *Model) {
+			m.nav.diffCursor = 4
+			m.startAnnotation()
+			m.annot.input.SetValue("typed so far")
+		}},
+		{"live-file-input", func(t *testing.T, m *Model) {
+			m.startFileAnnotation()
+			m.annot.input.SetValue("file note in progress")
+		}},
+		{"collapsed", func(t *testing.T, m *Model) { m.modes.collapsed.enabled = true }},
+		{"no-colors", func(t *testing.T, m *Model) { m.cfg.noColors = true }},
+	}
+}
+
+// renderGolden renders every state and returns one labeled document.
+func renderGolden(t *testing.T) string {
+	t.Helper()
+	var b strings.Builder
+	for _, st := range goldenStates() {
+		m := goldenModel(t)
+		st.apply(t, &m)
+		b.WriteString("===== " + st.name + " =====\n")
+		b.WriteString(m.renderDiff())
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// TestModel_RenderDiffGolden pins renderDiff's exact bytes across the render states that the
+// per-line cache has to reproduce. It is an equivalence harness, not a description of correct
+// output: regenerate with -update-golden only after confirming a diff is an intended change.
+func TestModel_RenderDiffGolden(t *testing.T) {
+	got := renderGolden(t)
+	path := filepath.Join("testdata", "renderdiff.golden")
+
+	if *updateGolden {
+		require.NoError(t, os.MkdirAll("testdata", 0o750))
+		require.NoError(t, os.WriteFile(path, []byte(got), 0o600))
+		t.Log("golden updated:", path)
+		return
+	}
+
+	want, err := os.ReadFile(path) //nolint:gosec // fixed test path
+	require.NoError(t, err, "golden missing — regenerate with: go test ./app/ui/ -run RenderDiffGolden -update-golden")
+	assert.Equal(t, string(want), got, "renderDiff output changed; if intended, regenerate with -update-golden")
+}
+
+// TestModel_RenderDiffCacheMatchesColdRender catches stale cached blocks, which the golden
+// structurally cannot: the golden always renders on a fresh model, so it only sees a wrong
+// render, never a leftover one. Here each state is reached on a model whose cache was filled
+// under a different state, so a render input missing from globalRenderKey shows up as a block
+// from the previous state.
+//
+// Its reach is exactly goldenStates: a field is covered only when two states differ in it AND
+// still hit the cache. A state pair that changes something already in the key just misses and
+// proves nothing. searchTerm was missing from the key and this test passed anyway, because the
+// only search state made every pair flip searchMatch. Adding a field to the key means adding a
+// state that isolates it.
+func TestModel_RenderDiffCacheMatchesColdRender(t *testing.T) {
+	states := goldenStates()
+	for _, prev := range states {
+		for _, next := range states {
+			if prev.name == next.name {
+				continue
+			}
+			t.Run(prev.name+"_then_"+next.name, func(t *testing.T) {
+				cold := goldenModel(t)
+				next.apply(t, &cold)
+				want := cold.renderDiff()
+
+				warmer := goldenModel(t)
+				prev.apply(t, &warmer)
+				warmer.renderDiff() // fills the cache with blocks rendered under prev
+
+				// carry only the dirty cache into a model that is otherwise clean, so the two
+				// states' mutations never stack — this is a stale cache, not a merged state
+				got := goldenModel(t)
+				got.renderCache = warmer.renderCache
+				next.apply(t, &got)
+				assert.Equal(t, want, got.renderDiff(), "cached render differs from a cold one")
+			})
+		}
+	}
+}
+
+func TestDiffRenderCache(t *testing.T) {
+	flags := func(cursor bool) lineRenderFlags { return lineRenderFlags{cursor: cursor} }
+	key := func(w int) globalRenderKey { return globalRenderKey{contentWidth: w} }
+
+	t.Run("serves a block rendered under identical flags", func(t *testing.T) {
+		c := &diffRenderCache{}
+		c.rebase(key(80), 3)
+		c.put(1, flags(false), "block")
+		got, ok := c.get(1, flags(false))
+		assert.True(t, ok)
+		assert.Equal(t, "block", got)
+	})
+
+	t.Run("misses when per-line flags differ", func(t *testing.T) {
+		c := &diffRenderCache{}
+		c.rebase(key(80), 3)
+		c.put(1, flags(false), "block")
+		_, ok := c.get(1, flags(true))
+		assert.False(t, ok)
+	})
+
+	t.Run("rebase drops entries when the global key changes", func(t *testing.T) {
+		c := &diffRenderCache{}
+		c.rebase(key(80), 3)
+		c.put(1, flags(false), "block")
+		c.rebase(key(120), 3)
+		_, ok := c.get(1, flags(false))
+		assert.False(t, ok)
+	})
+
+	t.Run("rebase drops entries when the line count changes", func(t *testing.T) {
+		c := &diffRenderCache{}
+		c.rebase(key(80), 3)
+		c.put(1, flags(false), "block")
+		c.rebase(key(80), 9)
+		_, ok := c.get(1, flags(false))
+		assert.False(t, ok)
+		assert.Len(t, c.blocks, 9)
+	})
+
+	t.Run("live input row is never stored or served", func(t *testing.T) {
+		c := &diffRenderCache{}
+		c.rebase(key(80), 3)
+		live := lineRenderFlags{liveInput: true}
+		c.put(1, live, "typed")
+		_, ok := c.get(1, live)
+		assert.False(t, ok, "must not serve the live input row")
+		assert.False(t, c.filled[1], "must not store the live input row")
+	})
+
+	t.Run("out of range indices are ignored", func(t *testing.T) {
+		c := &diffRenderCache{}
+		c.rebase(key(80), 2)
+		assert.NotPanics(t, func() { c.put(5, flags(false), "x"); c.put(-1, flags(false), "x") })
+		_, ok := c.get(5, flags(false))
+		assert.False(t, ok)
+		_, ok = c.get(-1, flags(false))
+		assert.False(t, ok)
+	})
+
+	t.Run("clear resets lastLen so a small file does not pre-size from a large one", func(t *testing.T) {
+		c := &diffRenderCache{}
+		c.rebase(key(80), 3)
+		c.put(1, flags(false), "block")
+		c.lastLen = 5_000_000
+		c.clear()
+		assert.Zero(t, c.lastLen, "estimate belongs to content that is gone")
+		_, ok := c.get(1, flags(false))
+		assert.False(t, ok)
+	})
+
+	t.Run("rebase keeps lastLen so the rebuilt render is still pre-sized", func(t *testing.T) {
+		// the render that follows a key change misses on every line and is the expensive
+		// one; zeroing the estimate here would skip Grow on exactly that render
+		c := &diffRenderCache{}
+		c.rebase(key(80), 3)
+		c.lastLen = 4096
+		c.rebase(key(120), 3)
+		assert.Equal(t, 4096, c.lastLen)
+	})
+}
+
+// BenchmarkModel_AnnotatedKeystroke covers the workflow the cache exists for and that the
+// other benchmarks miss: a file that already carries annotations, where every render still
+// has to resolve each line against the annotation map.
+func BenchmarkModel_AnnotatedKeystroke(b *testing.B) {
+	for _, n := range benchDiffSizes {
+		b.Run(fmt.Sprintf("lines=%d", n), func(b *testing.B) {
+			m := benchModel(b, n)
+			for i := 4; i < n; i += n/4 + 1 {
+				m.store.Add(annotation.Annotation{File: "large.go", Line: i, Type: " ", Comment: "note"})
+			}
+			m.invalidateRenderCaches()
+			m.startAnnotation()
+			key := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				res, _ := m.Update(key)
+				m = res.(Model)
+				sink = m.View()
+			}
+		})
+	}
+}
+
+func TestModel_InvalidateRenderCaches(t *testing.T) {
+	m := testModel(nil, nil)
+	m.file.name = "a.go"
+	m.layout.width = 120
+	m.layout.treeWidth = 20
+
+	m.annotationVisualRows("\U0001f4ac ", "one")
+	m.annotationVisualRows("\U0001f4ac ", "two")
+	require.Len(t, m.annot.rowCache, 2)
+
+	m.file.lines = []diff.DiffLine{{NewNum: 1, Content: "ctx", ChangeType: diff.ChangeContext}}
+	m.renderCache.rebase(globalRenderKey{contentWidth: 120}, 1)
+	m.renderCache.put(0, lineRenderFlags{}, "cached block")
+	m.renderCache.lastLen = 4096
+
+	m.invalidateRenderCaches()
+	assert.Empty(t, m.annot.rowCache)
+	_, ok := m.renderCache.get(0, lineRenderFlags{})
+	assert.False(t, ok, "diff render blocks must be dropped too, not just annotation rows")
+	assert.Zero(t, m.renderCache.lastLen, "size estimate belongs to content that is gone")
+
+	// cache must be usable after invalidation (not nil-mapped into a no-op)
+	m.annotationVisualRows("\U0001f4ac ", "after")
+	assert.Len(t, m.annot.rowCache, 1)
+}
+
+// TestModel_HandleFileLoaded_InvalidatesRenderCaches pins the file-load
+// invalidation hook. handleFileLoaded must call invalidateRenderCaches so neither
+// per-file annotation rows nor cached diff blocks leak across files.
+func TestModel_HandleFileLoaded_InvalidatesRenderCaches(t *testing.T) {
+	m := testModel([]string{"a.go", "b.go"}, nil)
+	m.tree = testNewFileTree([]string{"a.go", "b.go"})
+	m.file.name = "a.go"
+	m.layout.width = 120
+	m.layout.treeWidth = 20
+
+	// populate the cache from the "current file" state
+	m.annotationVisualRows("\U0001f4ac ", "one")
+	m.annotationVisualRows("\U0001f4ac ", "two")
+	require.Len(t, m.annot.rowCache, 2)
+	m.renderCache.rebase(globalRenderKey{contentWidth: 120}, 1)
+	m.renderCache.put(0, lineRenderFlags{}, "block from a.go")
+
+	lines := []diff.DiffLine{{NewNum: 1, Content: "package main", ChangeType: diff.ChangeContext}}
+	result, _ := m.Update(fileLoadedMsg{file: "b.go", lines: lines})
+	model := result.(Model)
+
+	assert.Empty(t, model.annot.rowCache, "annotation rows must be cleared after file load")
+	// handleFileLoaded re-renders after invalidating, so the cache is legitimately warm
+	// again for b.go; what must not survive is a block belonging to a.go
+	block, _ := model.renderCache.get(0, lineRenderFlags{})
+	assert.NotEqual(t, "block from a.go", block, "a block from the previous file must not survive the switch")
+}
+
+// TestModel_ApplyTheme_InvalidatesRenderCaches pins the theme-apply
+// invalidation hook. both memos bake in resolver styling and the resolver is not
+// comparable so it cannot live in globalRenderKey, making this call the only thing
+// standing between a theme change and stale colors.
+func TestModel_ApplyTheme_InvalidatesRenderCaches(t *testing.T) {
+	renderer := &mocks.RendererMock{
+		ChangedFilesFunc: func(string, bool) ([]diff.FileEntry, error) { return nil, nil },
+		FileDiffFunc:     func(diff.FileDiffRequest) ([]diff.DiffLine, error) { return nil, nil },
+	}
+	highlighter := &mocks.SyntaxHighlighterMock{
+		HighlightLinesFunc: func(string, []diff.DiffLine) []string { return nil },
+		SetStyleFunc:       func(string) bool { return true },
+		StyleNameFunc:      func() string { return "orig-style" },
+	}
+	m := testNewModel(t, renderer, annotation.NewStore(), highlighter, ModelConfig{
+		TreeWidthRatio: 3, Overlay: overlay.NewManager(),
+	})
+	m.file.name = "a.go"
+	m.layout.width = 120
+	m.layout.treeWidth = 20
+
+	m.annotationVisualRows("\U0001f4ac ", "one")
+	m.annotationVisualRows("\U0001f4ac ", "two")
+	require.Len(t, m.annot.rowCache, 2)
+	m.renderCache.rebase(globalRenderKey{contentWidth: 120}, 1)
+	m.renderCache.put(0, lineRenderFlags{}, "block under the old theme")
+
+	m.applyTheme(ThemeSpec{
+		Colors: style.Colors{
+			Accent: "#bd93f9", Border: "#6272a4", Normal: "#f8f8f2", Muted: "#6272a4",
+			SelectedFg: "#f8f8f2", SelectedBg: "#44475a", Annotation: "#f1fa8c",
+			CursorFg: "#282a36", CursorBg: "#f8f8f2",
+			AddFg: "#50fa7b", AddBg: "#2a4a2a", RemoveFg: "#ff5555", RemoveBg: "#4a2a2a",
+			ModifyFg: "#ffb86c", ModifyBg: "#3a3a2a",
+			TreeBg: "#21222c", DiffBg: "#282a36",
+			StatusFg: "#f8f8f2", StatusBg: "#44475a",
+			SearchFg: "#282a36", SearchBg: "#f1fa8c",
+		},
+		ChromaStyle: "dracula",
+	})
+
+	assert.Empty(t, m.annot.rowCache, "annotation rows must be cleared after applyTheme")
+	_, ok := m.renderCache.get(0, lineRenderFlags{})
+	assert.False(t, ok, "diff blocks bake in resolver colors and must not survive a theme change")
 }

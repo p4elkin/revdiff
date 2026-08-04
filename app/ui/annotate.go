@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -42,6 +43,11 @@ var hunkKeywordRe = regexp.MustCompile(`(?i)\bhunk\b`)
 func (m *Model) newAnnotationInput(placeholder string, prefixWidth int) (textinput.Model, tea.Cmd) {
 	ti := textinput.New()
 	ti.Placeholder = placeholder
+	// static cursor, set before Focus so no blink command is scheduled. the input is painted
+	// inside renderDiff, so a blink could only become visible by re-rendering every diff line
+	// (~7us per line) twice a second for a session that is otherwise idle. a static cursor is
+	// what the user already sees between blinks on a large diff.
+	ti.Cursor.SetMode(cursor.CursorStatic)
 	cmd := ti.Focus()
 	ti.CharLimit = annotCharLimit
 	ti.Width = max(10, m.diffContentWidth()-prefixWidth)
@@ -450,7 +456,7 @@ func (m Model) annotationPrefixBody(key string) (prefix, body string) {
 // painter iterates these rows directly. results are memoized on rowCache;
 // invalidation is the caller's responsibility (handleFileLoaded, applyTheme,
 // cancelThemeSelect). pointer receiver is mandatory: the method writes to
-// m.annot.rowCache and the consistency with invalidateAnnotationRows protects
+// m.annot.rowCache and the consistency with invalidateRenderCaches protects
 // against future LRU/slice replacements that would silently no-op on a value
 // receiver.
 func (m *Model) annotationVisualRows(prefix, body string) []string {
@@ -496,14 +502,6 @@ func (m Model) composeAnnotationRows(prefix, body string, wrapW int) []string {
 		}
 	}
 	return rows
-}
-
-// invalidateAnnotationRows clears the cached visual-row slices. callers:
-// handleFileLoaded (per-file annotation set changes), applyTheme (resolver
-// colors change), and cancelThemeSelect (preview theme rebuilt the resolver).
-// width changes self-invalidate via the cache key, so no call needed on resize.
-func (m *Model) invalidateAnnotationRows() {
-	clear(m.annot.rowCache)
 }
 
 // wrappedAnnotationLineCount returns the number of visual rows an annotation occupies.
