@@ -128,11 +128,11 @@ NoTree: opts.NoTree,
 - Modify: `plugins/codex/skills/revdiff/references/config.md` (table, next to the
   `--no-status-bar` row at line 26 — keep in sync with the Claude copy per CLAUDE.md)
 
-- [ ] add a `--no-tree` row to `README.md`'s options table, matching the existing row style (`--no-status-bar` / `--no-tree` phrasing, `REVDIFF_NO_TREE`, default `false`)
-- [ ] add the matching `<tr>` row to `site/docs.html`'s options table
-- [ ] add the matching `|` row to `.claude-plugin/skills/revdiff/references/config.md`
-- [ ] add the matching `|` row to `plugins/codex/skills/revdiff/references/config.md`
-- [ ] no test to run for this task (docs-only); visually diff the four rows against the `--no-status-bar` rows for format consistency
+- [x] add a `--no-tree` row to `README.md`'s options table, matching the existing row style (`--no-status-bar` / `--no-tree` phrasing, `REVDIFF_NO_TREE`, default `false`)
+- [x] add the matching `<tr>` row to `site/docs.html`'s options table
+- [x] add the matching `|` row to `.claude-plugin/skills/revdiff/references/config.md`
+- [x] add the matching `|` row to `plugins/codex/skills/revdiff/references/config.md`
+- [x] no test to run for this task (docs-only); visually diff the four rows against the `--no-status-bar` rows for format consistency
 
 ### Task 4: Verify acceptance criteria
 - [ ] verify `--no-tree` / `REVDIFF_NO_TREE` / `no-tree` ini key all set `opts.NoTree`

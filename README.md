@@ -357,6 +357,7 @@ Positional arguments support several forms:
 | `--tab-width` | Number of spaces per tab character, env: `REVDIFF_TAB_WIDTH` | `4` |
 | `--no-colors` | Disable all colors including syntax highlighting, env: `REVDIFF_NO_COLORS` | `false` |
 | `--no-status-bar` | Hide the status bar, env: `REVDIFF_NO_STATUS_BAR` | `false` |
+| `--no-tree` | Start with the file tree / TOC pane hidden, env: `REVDIFF_NO_TREE` | `false` |
 | `--wrap` | Enable line wrapping in diff view, env: `REVDIFF_WRAP` | `false` |
 | `--wrap-indent` | Indent wrap continuation rows by N columns so they hang under the first row's content (helps when reviewing markdown lists where unindented continuation can be misread as a new bullet), env: `REVDIFF_WRAP_INDENT` | `0` |
 | `--collapsed` | Start in collapsed diff mode, env: `REVDIFF_COLLAPSED` | `false` |
