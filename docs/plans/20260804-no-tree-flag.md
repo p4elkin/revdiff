@@ -93,11 +93,11 @@ NoTree: opts.NoTree,
 - Modify: `app/config_test.go` (`TestParseArgs_Defaults`, `TestParseArgs_Flags`,
   `TestParseArgs_EnvVars`)
 
-- [ ] add `NoTree bool` with tag `` `long:"no-tree" ini-name:"no-tree" env:"REVDIFF_NO_TREE" description:"start with the file tree / TOC pane hidden"` `` in `app/config.go`, positioned next to `TreeWidth`
-- [ ] in `TestParseArgs_Defaults`, add `assert.False(t, opts.NoTree)`
-- [ ] in `TestParseArgs_Flags`, add `--no-tree` to the args slice and `assert.True(t, opts.NoTree)`
-- [ ] in `TestParseArgs_EnvVars`, add `t.Setenv("REVDIFF_NO_TREE", "true")` and `assert.True(t, opts.NoTree)`
-- [ ] run `go test ./app/... -run TestParseArgs` — must pass before task 2
+- [x] add `NoTree bool` with tag `` `long:"no-tree" ini-name:"no-tree" env:"REVDIFF_NO_TREE" description:"start with the file tree / TOC pane hidden"` `` in `app/config.go`, positioned next to `TreeWidth`
+- [x] in `TestParseArgs_Defaults`, add `assert.False(t, opts.NoTree)`
+- [x] in `TestParseArgs_Flags`, add `--no-tree` to the args slice and `assert.True(t, opts.NoTree)`
+- [x] in `TestParseArgs_EnvVars`, add `t.Setenv("REVDIFF_NO_TREE", "true")` and `assert.True(t, opts.NoTree)`
+- [x] run `go test ./app/... -run TestParseArgs` — must pass before task 2
 
 ### Task 2: Wire `NoTree` into `ui.ModelConfig` and seed `layout.treeHidden`
 

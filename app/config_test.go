@@ -21,6 +21,7 @@ func TestParseArgs_Defaults(t *testing.T) {
 	opts, err := parseArgs(noConfigArgs(t))
 	require.NoError(t, err)
 	assert.Equal(t, 2, opts.TreeWidth)
+	assert.False(t, opts.NoTree)
 	assert.Equal(t, 4, opts.TabWidth)
 	assert.Equal(t, "catppuccin-macchiato", opts.ChromaStyle)
 	assert.Equal(t, "💬", opts.AnnotationMarker)
@@ -609,10 +610,11 @@ func TestParseArgs_PostFlushCommand(t *testing.T) {
 }
 
 func TestParseArgs_Flags(t *testing.T) {
-	opts, err := parseArgs([]string{"--staged", "--tree-width=5", "--tab-width=8", "--no-colors", "--chroma-style=dracula", "HEAD~3"})
+	opts, err := parseArgs([]string{"--staged", "--tree-width=5", "--no-tree", "--tab-width=8", "--no-colors", "--chroma-style=dracula", "HEAD~3"})
 	require.NoError(t, err)
 	assert.True(t, opts.Staged)
 	assert.Equal(t, 5, opts.TreeWidth)
+	assert.True(t, opts.NoTree)
 	assert.Equal(t, 8, opts.TabWidth)
 	assert.True(t, opts.NoColors)
 	assert.Equal(t, "dracula", opts.ChromaStyle)
@@ -706,10 +708,12 @@ func TestParseArgs_ColorFlags(t *testing.T) {
 func TestParseArgs_EnvVars(t *testing.T) {
 	t.Setenv("REVDIFF_TREE_WIDTH", "7")
 	t.Setenv("REVDIFF_COLOR_ACCENT", "#ff0000")
+	t.Setenv("REVDIFF_NO_TREE", "true")
 	opts, err := parseArgs(noConfigArgs(t))
 	require.NoError(t, err)
 	assert.Equal(t, 7, opts.TreeWidth)
 	assert.Equal(t, "#ff0000", opts.Colors.Accent)
+	assert.True(t, opts.NoTree)
 }
 
 func TestParseArgs_CLIOverridesEnv(t *testing.T) {
