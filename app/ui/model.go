@@ -293,23 +293,24 @@ const (
 // metadata (adds/removes, blame, line numbering) into a single coherent
 // object, making the synchronization invariant explicit.
 type loadedFileState struct {
-	name             string                 // currently displayed file path
-	oldName          string                 // rename origin of the displayed file, empty for non-renames
-	lines            []diff.DiffLine        // parsed diff lines
-	highlighted      []string               // pre-computed highlighted content, parallel to lines
-	intraRanges      [][]worddiff.Range     // per-line intra-line word-diff ranges, parallel to lines
-	adds             int                    // cached count of added lines
-	removes          int                    // cached count of removed lines
-	blameData        map[int]diff.BlameLine // blame info keyed by 1-based new line number
-	blameAuthorLen   int                    // max author display width for blame gutter
-	lineNumWidth     int                    // digit width for line number columns
-	singleColLineNum bool                   // true for full-context files: one line-number column
-	loadSeq          uint64                 // monotonic counter to identify the latest load request
-	requestedPath    string                 // path of the outstanding request, empty after it completes
-	canceledLoadSeq  uint64                 // same-sequence request canceled by returning to the displayed file
-	canceledLoadPath string                 // path rejected for canceledLoadSeq
-	mdTOC            TOCComponent           // markdown table-of-contents (nil when not applicable)
-	singleFile       bool                   // true when diff contains exactly one file
+	name                string                 // currently displayed file path
+	oldName             string                 // rename origin of the displayed file, empty for non-renames
+	lines               []diff.DiffLine        // parsed diff lines
+	highlighted         []string               // pre-computed highlighted content, parallel to lines
+	intraRanges         [][]worddiff.Range     // per-line intra-line word-diff ranges, parallel to lines
+	adds                int                    // cached count of added lines
+	removes             int                    // cached count of removed lines
+	blameData           map[int]diff.BlameLine // blame info keyed by 1-based new line number
+	blameAuthorLen      int                    // max author display width for blame gutter
+	lineNumWidth        int                    // digit width for line number columns
+	singleColLineNum    bool                   // true for full-context files: one line-number column
+	loadSeq             uint64                 // monotonic counter to identify the latest load request
+	requestedPath       string                 // path of the outstanding request, empty after it completes
+	canceledLoadSeq     uint64                 // same-sequence request canceled by returning to the displayed file
+	canceledLoadPath    string                 // path rejected for canceledLoadSeq
+	mdTOC               TOCComponent           // markdown table-of-contents (nil when not applicable, or when the markdown file has no headings)
+	markdownPreviewable bool                   // true for a full-context markdown file, whatever else the review contains — the real gate for preview mode (mdTOC is narrower: it also needs headings AND a single-file review, so it cannot serve as this gate)
+	singleFile          bool                   // true when diff contains exactly one file
 }
 
 // modelConfigState holds immutable or near-immutable session configuration.
@@ -357,6 +358,7 @@ type modeState struct {
 	compact        bool           // true when diffs are fetched with small context around changes
 	compactContext int            // number of context lines around changes when compact is enabled
 	vimMotion      bool           // true when the --vim-motion preset is active (gates the vim-motion interceptor in handleKey)
+	mdPreview      bool           // true when markdown preview mode is on (read-only rendered view); default off
 }
 
 // navigationState holds cursor and navigation-adjacent state.
@@ -734,6 +736,7 @@ type ModelConfig struct {
 	Ref              string
 	Staged           bool
 	TreeWidthRatio   int
+	NoTree           bool     // start with the tree/TOC pane hidden
 	TabWidth         int      // number of spaces per tab character
 	NoColors         bool     // disable all colors including syntax highlighting
 	MouseTracking    bool     // enable mouse tracking for clicks and wheel events
@@ -900,7 +903,8 @@ func NewModel(cfg ModelConfig) (Model, error) {
 			outputPath:         cfg.OutputPath,
 		},
 		layout: layoutState{
-			focus: paneTree,
+			focus:      paneTree,
+			treeHidden: cfg.NoTree,
 		},
 		modes: modeState{
 			wrap:           cfg.Wrap,
@@ -1046,7 +1050,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// propagate the interceptor's model on fall-through so state cleared inside
 	// the interceptor (e.g., count dropped after an unrelated key like "5q")
 	// is visible to the standard keymap path that runs next.
-	if m.modes.vimMotion {
+	// Markdown preview additionally disables the interceptor outright: its
+	// screen-position motions (G, gg, zz, H/M/L, ...) mutate m.nav.diffCursor
+	// straight from the raw key, bypassing keymap.Resolve/dispatchAction
+	// entirely, so dispatchAction's mdPreviewActionAllowed guard alone cannot
+	// see or block them — see mdpreview.go.
+	if m.modes.vimMotion && !m.modes.mdPreview {
 		model, cmd, handled := m.interceptVimMotion(msg)
 		if handled {
 			return model, cmd
@@ -1069,11 +1078,31 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.dispatchAction(action)
 }
 
-// dispatchAction routes a resolved keymap action through overlay-open, the
-// global action switch, and the pane-specific nav fallback. It is the unified
-// dispatch path shared by keymap-resolved single keys (handleKey) and by
-// chord-resolved actions (handleChordSecond).
+// dispatchAction is the single choke point every keymap-resolved action
+// passes through — handleKey's direct path and handleChordSecond's chord
+// path both call it. Markdown preview renders the whole document through
+// glamour, which reflows text, so a rendered row no longer maps to a source
+// line — every action that would create/edit/delete/navigate to an
+// annotation or move m.nav.diffCursor must be a no-op while previewing. See
+// handleMdPreviewAction and mdPreviewActionAllowed (mdpreview.go) for the
+// fixed allowlist of what stays live and for the two pan actions preview
+// serves itself. The guard is kept in this thin wrapper, rather than inline in
+// dispatchResolvedAction's own switch, purely to keep that already-large
+// function's cyclomatic complexity (gocyclo) unchanged.
 func (m Model) dispatchAction(action keymap.Action) (tea.Model, tea.Cmd) {
+	if m.modes.mdPreview {
+		if model, handled := m.handleMdPreviewAction(action); handled {
+			return model, nil
+		}
+	}
+	return m.dispatchResolvedAction(action)
+}
+
+// dispatchResolvedAction routes a resolved keymap action through
+// overlay-open, the global action switch, and the pane-specific nav
+// fallback. Factored out of dispatchAction so the markdown-preview guard
+// there adds no branches to this switch — see dispatchAction's doc comment.
+func (m Model) dispatchResolvedAction(action keymap.Action) (tea.Model, tea.Cmd) {
 	if model, cmd, ok := m.handleOverlayOpen(action); ok {
 		return model, cmd
 	}
@@ -1103,7 +1132,8 @@ func (m Model) dispatchAction(action keymap.Action) (tea.Model, tea.Cmd) {
 	case keymap.ActionMarkReviewed:
 		return m.handleMarkReviewed()
 	case keymap.ActionToggleCollapsed, keymap.ActionToggleCompact, keymap.ActionToggleWrap, keymap.ActionToggleTree,
-		keymap.ActionToggleLineNums, keymap.ActionToggleBlame, keymap.ActionToggleWordDiff, keymap.ActionToggleUntracked:
+		keymap.ActionToggleLineNums, keymap.ActionToggleBlame, keymap.ActionToggleWordDiff, keymap.ActionToggleUntracked,
+		keymap.ActionTogglePreview:
 		return m.handleViewToggle(action)
 	case keymap.ActionNextHunk, keymap.ActionPrevHunk:
 		return m.handleHunkNav(action == keymap.ActionNextHunk)
@@ -1429,6 +1459,8 @@ func (m Model) handleViewToggle(action keymap.Action) (tea.Model, tea.Cmd) {
 		m.toggleCollapsedMode()
 	case keymap.ActionToggleWrap:
 		m.toggleWrapMode()
+	case keymap.ActionTogglePreview:
+		m.toggleMarkdownPreview()
 	case keymap.ActionToggleTree:
 		m.toggleTreePane()
 	case keymap.ActionToggleLineNums:

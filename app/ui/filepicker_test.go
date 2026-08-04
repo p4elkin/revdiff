@@ -34,7 +34,7 @@ func TestModel_JumpFileOpensPickerAndLoadsSelection(t *testing.T) {
 	pendingHunk := true
 	m.nav.pendingHunkJump = &pendingHunk
 
-	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'P'}})
+	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
 	require.Nil(t, cmd)
 	m = result.(Model)
 	assert.True(t, m.overlay.Active())
@@ -172,10 +172,13 @@ func TestModel_JumpFileRevealsDistantPathInTree(t *testing.T) {
 	assert.NotNil(t, cmd)
 }
 
-// the default jump_file key is printable, and the picker gives printable runes
-// priority over configured actions, so it filters rather than toggling closed.
+// a printable key bound to jump_file (e.g. a user override back to the
+// upstream default) is still subject to the picker's printable-rune
+// priority, so it filters rather than toggling closed even though it
+// resolves to jump_file.
 func TestModel_JumpFileKeyFiltersInsideOpenPicker(t *testing.T) {
 	m := filePickerModel([]string{"a.go", "Parser.go"})
+	m.keymap.Bind("P", keymap.ActionJumpFile)
 	m.openFilePicker()
 	require.True(t, m.overlay.Active())
 
@@ -194,7 +197,7 @@ func TestModel_JumpFileKeyFiltersInsideOpenPicker(t *testing.T) {
 // jump_file to one keep the toggle-close behavior.
 func TestModel_JumpFileModifiedChordTogglesClosesPicker(t *testing.T) {
 	m := filePickerModel([]string{"a.go"})
-	m.keymap.Unbind("P")
+	m.keymap.Unbind("ctrl+p")
 	m.keymap.Bind("alt+f", keymap.ActionJumpFile)
 	m.openFilePicker()
 	require.True(t, m.overlay.Active())

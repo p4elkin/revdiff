@@ -31,14 +31,14 @@ func TestDefault_allExpectedBindings(t *testing.T) {
 		{"left", ActionScrollLeft}, {"right", ActionScrollRight},
 		{"J", ActionScrollDiffDown}, {"K", ActionScrollDiffUp},
 		{"n", ActionNextItem}, {"N", ActionPrevItem}, {"p", ActionPrevItem},
-		{"P", ActionJumpFile},
+		{"ctrl+p", ActionJumpFile},
 		{"]", ActionNextHunk}, {"[", ActionPrevHunk}, {"e", ActionOpenFileInEditor},
 		{"tab", ActionTogglePane}, {"h", ActionFocusTree}, {"l", ActionFocusDiff},
 		{"/", ActionSearch},
 		{"a", ActionConfirm}, {"enter", ActionConfirm},
 		{"A", ActionAnnotateFile}, {"d", ActionDeleteAnnotation}, {"@", ActionAnnotList}, {"ctrl+e", ActionOpenEditor},
 		{"}", ActionNextAnnotation}, {"{", ActionPrevAnnotation}, {"O", ActionFlushOutput},
-		{"v", ActionToggleCollapsed}, {"C", ActionToggleCompact}, {"w", ActionToggleWrap}, {"t", ActionToggleTree},
+		{"v", ActionToggleCollapsed}, {"C", ActionToggleCompact}, {"w", ActionToggleWrap}, {"P", ActionTogglePreview}, {"t", ActionToggleTree},
 		{"L", ActionToggleLineNums}, {"B", ActionToggleBlame}, {"W", ActionToggleWordDiff},
 		{".", ActionToggleHunk}, {" ", ActionMarkReviewed}, {"f", ActionFilter}, {"F", ActionFilterUnreviewed},
 		{"u", ActionToggleUntracked},
@@ -97,7 +97,7 @@ func TestActionJumpFile_RegistrationHelpAndDump(t *testing.T) {
 	assert.True(t, IsValidAction(ActionJumpFile))
 
 	km := Default()
-	assert.Equal(t, ActionJumpFile, km.Resolve("P"))
+	assert.Equal(t, ActionJumpFile, km.Resolve("ctrl+p"))
 	sections := km.HelpSections()
 	found := false
 	for _, section := range sections {
@@ -105,7 +105,7 @@ func TestActionJumpFile_RegistrationHelpAndDump(t *testing.T) {
 			if entry.Action == ActionJumpFile {
 				assert.Equal(t, "File/Hunk", section.Name)
 				assert.Equal(t, "jump to file", entry.Description)
-				assert.Equal(t, "P", entry.Keys)
+				assert.Equal(t, "ctrl+p", entry.Keys)
 				found = true
 			}
 		}
@@ -114,24 +114,26 @@ func TestActionJumpFile_RegistrationHelpAndDump(t *testing.T) {
 
 	var dumped strings.Builder
 	require.NoError(t, km.Dump(&dumped))
-	assert.Contains(t, dumped.String(), "map P jump_file")
+	assert.Contains(t, dumped.String(), "map ctrl+p jump_file")
 }
 
-// pins the default off ctrl+p: host terminals bind it (agterm session_palette,
-// tmux copy-mode) and swallow it before revdiff sees the key.
-func TestActionJumpFile_NotBoundToCtrlP(t *testing.T) {
+// P is claimed by ActionTogglePreview in this fork, so jump_file's default
+// moved to ctrl+p despite host terminals (agterm session_palette, tmux
+// copy-mode) sometimes claiming that chord before revdiff sees the key.
+func TestActionJumpFile_DefaultBinding(t *testing.T) {
 	km := Default()
-	assert.Empty(t, km.Resolve("ctrl+p"), "ctrl+p must stay unbound so host terminals keep it")
+	assert.Equal(t, ActionJumpFile, km.Resolve("ctrl+p"))
 }
 
 func TestActionJumpFile_CustomConfiguration(t *testing.T) {
 	path := t.TempDir() + "/keybindings"
-	require.NoError(t, os.WriteFile(path, []byte("unmap P\nmap alt+f jump_file\n"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte("unmap ctrl+p\nmap alt+f jump_file\n"), 0o600))
 
 	km, err := Load(path)
 	require.NoError(t, err)
-	assert.Empty(t, km.Resolve("P"))
+	assert.Empty(t, km.Resolve("ctrl+p"))
 	assert.Equal(t, ActionJumpFile, km.Resolve("alt+f"))
+	assert.Equal(t, ActionTogglePreview, km.Resolve("P"), "unmapping ctrl+p must not disturb P's own binding")
 }
 
 func TestResolve(t *testing.T) {
@@ -291,6 +293,29 @@ func TestActionToggleCompact_HelpEntry(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "ActionToggleCompact should have a help entry")
+}
+
+func TestActionTogglePreview_IsValid(t *testing.T) {
+	assert.True(t, IsValidAction(ActionTogglePreview))
+}
+
+func TestActionTogglePreview_DefaultBinding(t *testing.T) {
+	km := Default()
+	assert.Equal(t, ActionTogglePreview, km.Resolve("P"))
+}
+
+func TestActionTogglePreview_HelpEntry(t *testing.T) {
+	entries := defaultDescriptions()
+	var found bool
+	for _, e := range entries {
+		if e.Action == ActionTogglePreview {
+			assert.Equal(t, "toggle markdown preview", e.Description)
+			assert.Equal(t, "View", e.Section)
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "ActionTogglePreview should have a help entry")
 }
 
 func TestActionOpenEditor_IsValid(t *testing.T) {

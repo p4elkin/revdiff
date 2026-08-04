@@ -277,6 +277,10 @@ func (m Model) renderDiff() string {
 
 	m.blameNow = time.Now()
 
+	if m.modes.mdPreview && m.file.markdownPreviewable {
+		return m.renderMarkdownPreview()
+	}
+
 	if m.modes.collapsed.enabled {
 		return m.renderCollapsedDiff()
 	}

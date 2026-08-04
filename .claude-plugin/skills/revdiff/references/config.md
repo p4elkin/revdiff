@@ -24,6 +24,7 @@ Then uncomment and edit the values you want to change.
 | `--tab-width` | `REVDIFF_TAB_WIDTH` | Spaces per tab character | `4` |
 | `--no-colors` | `REVDIFF_NO_COLORS` | Disable all colors including syntax highlighting | `false` |
 | `--no-status-bar` | `REVDIFF_NO_STATUS_BAR` | Hide the status bar | `false` |
+| `--no-tree` | `REVDIFF_NO_TREE` | Start with the file tree / TOC pane hidden | `false` |
 | `--wrap` | `REVDIFF_WRAP` | Enable line wrapping in diff view | `false` |
 | `--wrap-indent` | `REVDIFF_WRAP_INDENT` | Indent wrap continuation rows by N columns so they hang under the first row's content (helps when reviewing markdown lists where unindented continuation can be misread as a new bullet) | `0` |
 | `--collapsed` | `REVDIFF_COLLAPSED` | Start in collapsed diff mode | `false` |

@@ -1581,9 +1581,9 @@ func TestModel_SearchHistory_CtrlPCtrlNParity(t *testing.T) {
 	assert.Empty(t, model.search.input.Value(), "Ctrl+N past newest should clear input")
 }
 
-// P is the default jump_file binding, so an active search prompt must swallow
-// it as a literal rune instead of opening the file picker underneath.
-func TestModel_SearchPrompt_SwallowsJumpFileKey(t *testing.T) {
+// P is the default toggle_preview binding, so an active search prompt must
+// swallow it as a literal rune instead of toggling markdown preview underneath.
+func TestModel_SearchPrompt_SwallowsTogglePreviewKey(t *testing.T) {
 	model := newSearchHistoryModel(t)
 
 	result, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
@@ -1594,7 +1594,7 @@ func TestModel_SearchPrompt_SwallowsJumpFileKey(t *testing.T) {
 
 	assert.Equal(t, "P", model.search.input.Value(), "P must type into the search prompt")
 	assert.True(t, model.search.active)
-	assert.False(t, model.overlay.Active(), "P in search must not open the file picker")
+	assert.False(t, model.modes.mdPreview, "P in search must not toggle markdown preview")
 }
 
 func TestModel_SearchHistory_RecallThenEscThenStartFresh(t *testing.T) {

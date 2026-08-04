@@ -179,6 +179,12 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if msg.Action != tea.MouseActionPress {
 			return m, nil // ignore release and motion while holding
 		}
+		if m.modes.mdPreview {
+			// preview is read-only: a click in either pane only repositions the
+			// source-line cursor (clickDiff / clickTree -> syncDiffToTOCCursor),
+			// which is meaningless once the viewport shows the glamour render.
+			return m, nil
+		}
 		switch zone {
 		case hitTree:
 			return m.clickTree(msg.Y)
@@ -276,6 +282,11 @@ func (m Model) handleWheel(zone hitZone, delta int) (tea.Model, tea.Cmd) {
 			return wheelDebounceMsg{gen: gen}
 		})
 	case hitTree:
+		if m.modes.mdPreview {
+			// preview is read-only: TOC wheel would drive syncDiffToTOCCursor,
+			// reassigning the source cursor. Swallowed, matching the n/N/p keys.
+			return m, nil
+		}
 		// tree/TOC wheel = direct cursor navigation, one entry per notch.
 		// no debounce, no shift-half-page tricks (those are diff-pane things);
 		// the tree is small and cheap so single-step matches j/k semantics.
@@ -438,7 +449,21 @@ func (m *Model) flushWheelPending() {
 // the viewport — is selected. when the entire wrapped span exceeds the viewport
 // height the advance is clamped to viewBottom and the function returns false
 // (no visible alternative exists).
+//
+// markdown preview mode is an unconditional no-op here: cursorVisualRange
+// (below) and visualRowToDiffLine both assume one row per source line, which
+// is meaningless once the viewport shows a whole-document glamour render
+// instead. scroll_diff_down/up (J/K) stays an allowed action while
+// previewing (see mdPreviewActionAllowed in mdpreview.go) precisely because
+// this guard keeps that scroll from ever reassigning m.nav.diffCursor —
+// without it, every deferred wheel/scroll flush (flushWheelPending,
+// handleResize, handleWheelDebounce) would compare a real preview-content
+// YOffset against bogus diff-line-coordinate cursor bounds and "pin" the
+// cursor to whatever unrelated diff line happens to fall at that row.
 func (m *Model) pinDiffCursorTo(newOffset int) bool {
+	if m.modes.mdPreview {
+		return false
+	}
 	if len(m.file.lines) == 0 {
 		return false
 	}
