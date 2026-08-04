@@ -110,13 +110,13 @@ NoTree: opts.NoTree,
 - Modify: `app/ui/model_test.go` (new subtests near the existing `TreeWidthRatio` subtests
   around line 249)
 
-- [ ] add `NoTree bool // start with the tree/TOC pane hidden` to `ModelConfig` in `app/ui/model.go`
-- [ ] in `NewModel`, change `layout: layoutState{focus: paneTree}` to also set `treeHidden: cfg.NoTree`
-- [ ] add `NoTree: opts.NoTree,` in `app/main.go`'s `ui.ModelConfig{}` construction
-- [ ] write test: `ModelConfig{NoTree: true}` produces `m.layout.treeHidden == true` (and `m.treePaneHidden() == true`)
-- [ ] write test: starting with `NoTree: true`, calling `m.toggleTreePane()` (or dispatching `keymap.ActionToggleTree`) flips `treeHidden` back to `false`
-- [ ] write test: `ModelConfig{}` (NoTree unset) keeps `m.layout.treeHidden == false` (default-visible regression guard)
-- [ ] run `go test ./app/ui/... -run TestNewModel` (and any renamed/adjacent test names actually used) — must pass before task 3
+- [x] add `NoTree bool // start with the tree/TOC pane hidden` to `ModelConfig` in `app/ui/model.go`
+- [x] in `NewModel`, change `layout: layoutState{focus: paneTree}` to also set `treeHidden: cfg.NoTree`
+- [x] add `NoTree: opts.NoTree,` in `app/main.go`'s `ui.ModelConfig{}` construction
+- [x] write test: `ModelConfig{NoTree: true}` produces `m.layout.treeHidden == true` (and `m.treePaneHidden() == true`)
+- [x] write test: starting with `NoTree: true`, calling `m.toggleTreePane()` (or dispatching `keymap.ActionToggleTree`) flips `treeHidden` back to `false`
+- [x] write test: `ModelConfig{}` (NoTree unset) keeps `m.layout.treeHidden == false` (default-visible regression guard)
+- [x] run `go test ./app/ui/... -run TestNewModel` (and any renamed/adjacent test names actually used) — must pass before task 3
 
 ### Task 3: Update docs for `--no-tree`
 

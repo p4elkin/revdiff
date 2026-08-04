@@ -734,6 +734,7 @@ type ModelConfig struct {
 	Ref              string
 	Staged           bool
 	TreeWidthRatio   int
+	NoTree           bool     // start with the tree/TOC pane hidden
 	TabWidth         int      // number of spaces per tab character
 	NoColors         bool     // disable all colors including syntax highlighting
 	MouseTracking    bool     // enable mouse tracking for clicks and wheel events
@@ -900,7 +901,8 @@ func NewModel(cfg ModelConfig) (Model, error) {
 			outputPath:         cfg.OutputPath,
 		},
 		layout: layoutState{
-			focus: paneTree,
+			focus:      paneTree,
+			treeHidden: cfg.NoTree,
 		},
 		modes: modeState{
 			wrap:           cfg.Wrap,

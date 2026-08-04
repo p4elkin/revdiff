@@ -263,6 +263,32 @@ func TestNewModel_OptionalDefaults(t *testing.T) {
 	})
 }
 
+func TestModel_NoTreeFromConfig(t *testing.T) {
+	renderer := &mocks.RendererMock{
+		ChangedFilesFunc: func(string, bool) ([]diff.FileEntry, error) { return nil, nil },
+		FileDiffFunc:     func(diff.FileDiffRequest) ([]diff.DiffLine, error) { return nil, nil },
+	}
+	store := annotation.NewStore()
+
+	t.Run("NoTree seeds treeHidden and treePaneHidden", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{NoTree: true, TreeWidthRatio: 2})
+		assert.True(t, m.layout.treeHidden)
+		assert.True(t, m.treePaneHidden())
+	})
+
+	t.Run("t key reveals the pane after starting hidden", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{NoTree: true, TreeWidthRatio: 2})
+		require.True(t, m.layout.treeHidden)
+		m.toggleTreePane()
+		assert.False(t, m.layout.treeHidden)
+	})
+
+	t.Run("NoTree unset keeps tree visible by default", func(t *testing.T) {
+		m := testNewModel(t, renderer, store, noopHighlighter(), ModelConfig{TreeWidthRatio: 2})
+		assert.False(t, m.layout.treeHidden)
+	})
+}
+
 func TestModel_Init(t *testing.T) {
 	m := testModel([]string{"a.go", "b.go"}, nil)
 	cmd := m.Init()
