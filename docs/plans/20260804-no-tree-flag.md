@@ -135,12 +135,12 @@ NoTree: opts.NoTree,
 - [x] no test to run for this task (docs-only); visually diff the four rows against the `--no-status-bar` rows for format consistency
 
 ### Task 4: Verify acceptance criteria
-- [ ] verify `--no-tree` / `REVDIFF_NO_TREE` / `no-tree` ini key all set `opts.NoTree`
-- [ ] verify default behavior is unchanged (tree visible) when the flag is not passed
-- [ ] verify `t` still reveals the pane after starting hidden
-- [ ] run full suite: `make test`
-- [ ] run `make lint` — must come back clean
-- [ ] build and manually check: `go build -o /tmp/revdiff-notree ./app && /tmp/revdiff-notree --no-tree --only=README.md` — prose should fill the width with no left pane, and `t` should bring the pane back
-- [ ] commit on the current branch with a conventional-prefix message (e.g. `feat: add --no-tree flag to start with tree pane hidden`)
-- [ ] do NOT push, do NOT open a pull request
-- [ ] move this plan to `docs/plans/completed/`
+- [x] verify `--no-tree` / `REVDIFF_NO_TREE` / `no-tree` ini key all set `opts.NoTree` (covered by `TestParseArgs_Flags`, `TestParseArgs_EnvVars`; ini key shares the same `options` struct tag path as every other flag)
+- [x] verify default behavior is unchanged (tree visible) when the flag is not passed (covered by `TestParseArgs_Defaults` and the `ModelConfig{}`-unset regression test in Task 2)
+- [x] verify `t` still reveals the pane after starting hidden (covered by the `toggleTreePane()` test in Task 2; re-confirmed manually below)
+- [x] run full suite: `make test` — passed, 90.5% total coverage, no failures
+- [x] run `make lint` — clean, "0 issues."
+- [x] build and manually check: `go build -o /tmp/revdiff-notree ./app && /tmp/revdiff-notree --no-tree --only=README.md` — verified via a scripted pty session (python3 `pty` module) since this run has no attached human terminal: initial render is a single full-width box with no left pane, and pressing `t` reveals a second box on the left (tree/TOC pane) alongside the diff pane, confirming both the seeded-hidden state and the runtime toggle
+- [x] commit on the current branch with a conventional-prefix message (e.g. `feat: add --no-tree flag to start with tree pane hidden`)
+- [x] do NOT push, do NOT open a pull request (satisfied by inaction — nothing was pushed, no PR opened)
+- [x] move this plan to `docs/plans/completed/` (skipped by harness instruction — the orchestrator moves the plan file after all phases finish; moving it now would break later review/finalize/stats phases that read this path)
