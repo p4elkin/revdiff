@@ -1,19 +1,49 @@
 # PATCH.md — Markdown Preview Mode (local patch)
 
-This is a personal patch on a local clone of `umputun/revdiff`, not an upstream contribution
-(see `docs/plans/completed/20260722-markdown-preview-mode.md` for why). This file is the rebase
+This is a personal patch, not a contribution to `umputun/revdiff` (see
+`docs/plans/completed/20260722-markdown-preview-mode.md` for why). This file is the rebase
 playbook: what the patch touches, and how to carry it onto a new upstream release.
 
-Because the patch never goes upstream, it deliberately leaves every upstream-facing document
-alone: `README.md`, `site/index.html`, `site/docs.html`, and the plugin reference docs under
-`.claude-plugin/` and `plugins/` are all untouched. So the `P` key (`toggle_preview`) and the `▤`
-status-bar icon appear in neither the README keybindings table, nor the status-icon table, nor
-`site/docs.html`, nor any plugin `config.md`/`usage.md`. That is on purpose, not an oversight —
-those files describe the released `revdiff` binary that users install from brew, which has no
-preview mode. Editing them would put the fork's own features into documents shipped to people
-running a build without them, and would add a conflict site to every future rebase. The `P`
-binding is discoverable at runtime through the in-app help overlay (`?`) and `--dump-keys`,
-both of which read the real keymap and so list it automatically in this build.
+Two different things both get called "master" in this repo, and this file means only the first
+one whenever it says "upstream":
+
+- **upstream** — `origin` = `umputun/revdiff` on GitHub, the real open-source project. This is
+  what `brew`/`go install` ship. The patch NEVER goes here, in any form, ever.
+- **the fork** — `fork` = `p4elkin/revdiff` on GitHub, the personal fork this patch lives in.
+  The local `master` branch tracks `origin/master` (so it can be kept in sync and PR'd from),
+  but it is also where fork-only feature branches (including `md-preview`) get merged together
+  before being pushed to `fork/master` — see "Integrating into the fork's master" below. That
+  push is a normal, expected use of this patch, not an exception to the no-upstream rule.
+
+Because the patch never goes to `origin`, it deliberately leaves every doc that describes the
+released, brew-installed binary alone: `README.md`, `site/index.html`, `site/docs.html`, and
+the plugin reference docs under `.claude-plugin/` and `plugins/`. So the `P` key
+(`toggle_preview`), the `▤` status-bar icon, and the `--preview` flag appear in neither the
+README keybindings/options tables, nor `site/docs.html`, nor any plugin `config.md`/`usage.md`.
+That is on purpose, not an oversight: editing them would describe a feature to people running
+the real upstream binary, which does not have it — true whether those docs live on `md-preview`
+or get merged all the way to `fork/master`, since `fork/master` is still not what those docs are
+about. The `P` binding and `--preview` flag are discoverable at runtime instead, through the
+in-app help overlay (`?`), `--dump-keys`, and `--help`/`--dump-config`, all of which read the
+real keymap/options and so list them automatically in this build.
+
+## Integrating into the fork's master
+
+`md-preview` rebases onto upstream tags directly (see "Rebase procedure" below) and is not
+itself pushed anywhere upstream. Separately, feature work meant for the fork as a whole —
+whether upstream-portable (like `--no-tree`) or preview-only (like `--preview`) — gets merged
+into the local `master` branch and pushed to `fork/master`:
+
+```sh
+git checkout master
+git fetch origin              # master tracks origin/master; re-sync if it has moved
+git merge --no-ff md-preview  # or a feature branch, if the feature isn't on md-preview yet
+make test && make lint
+git push fork master
+```
+
+This is how `fork/master` ends up ahead of `origin/master`: it carries every fork-only feature,
+preview included, published to the user's own fork, never to `origin`.
 
 ## Base
 
@@ -88,12 +118,14 @@ That is 12 hunks across 5 files. The plan's Task 4 text counts by checklist item
 diff hunk (e.g. `keymap.go`'s enum + validActions edit is one checklist item but two hunks), so
 its site count differs — use the itemized list above as the actual hunk map.
 
-**`--preview` flag (start in markdown preview mode, added later, local-only like everything
-else in this file):**
+**`--preview` flag (start in markdown preview mode, added later):**
 
 Same reasoning as the `P` binding and `▤` icon above — this is a preview-only option, so it is
-NOT added to `README.md`/`site/docs.html`/plugin `config.md` (which describe the released
-binary, no preview mode). Discoverable via `--help` and `--dump-config` in this build.
+NOT added to `README.md`/`site/docs.html`/plugin `config.md` (which describe the released,
+upstream binary, no preview mode). It IS expected to reach `fork/master` via the merge described
+in "Integrating into the fork's master" — that section, not this one, is what decides where a
+feature ends up; this section only says why the docs stay untouched. Discoverable via `--help`
+and `--dump-config` in this build.
 
 - `app/config.go` — `Preview bool` next to `Collapsed`, tag
   `` `long:"preview" ini-name:"preview" env:"REVDIFF_PREVIEW"` ``, description "start in
