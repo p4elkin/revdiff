@@ -468,13 +468,23 @@ Any failure returns the first render. A fence with no collisions never renders t
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] verify both defects from Overview are fixed on the real fixtures
-- [ ] verify a fence that renders cleanly today is byte-identical after the change
-- [ ] verify every failure path degrades to today's output
-- [ ] run full test suite: `make test`
-- [ ] run `make lint` - must report 0 issues
-- [ ] run `make build`
-- [ ] verify test coverage for `app/ui` has not dropped
+- [x] verify both defects from Overview are fixed on the real fixtures — confirmed via
+      `TestRenderMarkdownDocument_CollisionFixture_RendersWithZeroCollisions` (PASS) and
+      `TestRenderMarkdownDocument_BleedFixture_LabelReachesArtIntact` (PASS)
+- [x] verify a fence that renders cleanly today is byte-identical after the change — confirmed
+      via `TestRenderMermaidSource_NoCollision_MatchesDirectRenderDiagram`,
+      `TestRenderMermaidSource_Graph_NothingToNormalize_ByteIdenticalToDirectRenderDiagram`, and
+      `TestRenderMermaidSource_SequenceDiagram_ByteIdenticalToDirectRenderDiagram` (all PASS)
+- [x] verify every failure path degrades to today's output — confirmed via
+      `TestMermaidFlipDirectionToLR` (LR/RL/BT/missing-header/no-direction-keyword/empty-source
+      all decline) and `TestMermaidRetryLRIfColliding` (no-collision skip, unflippable header,
+      missing header, flipped-render error, blank flipped render, equal-or-more collisions all
+      keep the first render) — all subtests PASS
+- [x] run full test suite: `make test` — PASS, exit 0, `app/ui` coverage 95.9% of statements
+- [x] run `make lint` - must report 0 issues — `0 issues.`
+- [x] run `make build` — succeeded, `.bin/revdiff` produced (21M)
+- [x] verify test coverage for `app/ui` has not dropped — baseline at pre-plan commit `ba6e258`
+      (via a disposable worktree) is 95.9%; current is 95.9% — unchanged, not dropped
 
 ### Task 10: [Final] Update documentation
 
