@@ -86,7 +86,7 @@ func TestMermaidEdgeLabel_CutAtBRTag(t *testing.T) {
 
 func TestMermaidEdgeLabel_CutAtLiteralBackslashN(t *testing.T) {
 	got := mermaidEdgeLabel(`first part\nsecond part`, 32)
-	assert.Equal(t, "first·part", got,
+	assert.Equal(t, "first"+mermaidNBSP+"part", got,
 		"the cut must run before mermaidSafeText deletes the backslash, or the \\n marker is destroyed before it can be found")
 }
 
@@ -100,20 +100,27 @@ func TestMermaidEdgeLabel_CutAtFirstBrace(t *testing.T) {
 	assert.Equal(t, "resolve", got)
 }
 
-func TestMermaidEdgeLabel_SpacesBecomeMiddleDot(t *testing.T) {
+func TestMermaidEdgeLabel_SpacesBecomeNoBreakSpace(t *testing.T) {
 	got := mermaidEdgeLabel("owns 1 n", 32)
-	assert.Equal(t, "owns·1·n", got,
-		"every remaining space must become a middle dot, or the arrow bleeds through it (position-dependent)")
+	assert.Equal(t, "owns"+mermaidNBSP+"1"+mermaidNBSP+"n", got,
+		"every remaining space must become a no-break space, or the arrow bleeds through it (position-dependent)")
 }
 
-func TestMermaidEdgeLabel_RunOfMiddleDotsCollapsesToOne(t *testing.T) {
-	// a raw label that already contains a literal middle dot surrounded by
-	// spaces (real corpus text — see TestStateTranspiler_SixVerbatimCorpusLabels_ShortenedForms)
-	// turns both of those surrounding spaces into "·" too, which without the
-	// collapse would read as three dots in a row where the author wrote one.
+func TestMermaidEdgeLabel_LiteralMiddleDotInLabel_SurvivesBetweenNoBreakSpaces(t *testing.T) {
+	// "open · C1 (Request)" is real corpus text (see
+	// TestStateTranspiler_SixVerbatimCorpusLabels_ShortenedForms) whose raw
+	// label already carries a literal middle dot surrounded by spaces. Under
+	// the OLD "·" substitution this collided with the substitution character
+	// itself: both surrounding spaces became "·" too, producing a run of
+	// three that had to be collapsed back down to one, losing the author's
+	// own separator in the process. The no-break space is a DIFFERENT
+	// character from a literal middle dot, so that collision cannot happen
+	// any more: the two substituted spaces become no-break spaces and the
+	// author's own dot passes through mermaidSafeText untouched (it is not
+	// whitespace), landing exactly where the raw text put it.
 	got := mermaidEdgeLabel("open · C1 (Request)", 32)
-	assert.Equal(t, "open·C1", got,
-		"a run of two or more middle dots must collapse to a single one, not read as a triple-dot artifact")
+	assert.Equal(t, "open"+mermaidNBSP+"·"+mermaidNBSP+"C1", got,
+		"a literal middle dot in the raw label is not whitespace and must never be touched by the space substitution")
 }
 
 func TestMermaidEdgeLabel_ParenAtStart_FallsBackToTruncationInsteadOfEmpty(t *testing.T) {
@@ -141,19 +148,19 @@ func TestMermaidEdgeLabel_ByteCapBindsBeforeRuneCap_NonASCII(t *testing.T) {
 }
 
 func TestMermaidEdgeLabel_ByteCappedMultiWordLabel_KeepsTheEllipsis(t *testing.T) {
-	// Regression pin. mermaidEdgeLabel turns every space into a 2-byte "·",
-	// so the BYTE cap — not the rune cap — is what binds for essentially
-	// every multi-word edge label. An earlier version of
+	// Regression pin. mermaidEdgeLabel turns every space into a 2-byte
+	// no-break space, so the BYTE cap — not the rune cap — is what binds for
+	// essentially every multi-word edge label. An earlier version of
 	// mermaidTruncateRunesAndBytes could only ever return a bare prefix on
 	// that path, so a cut label looked complete: two different transitions
-	// out of the same state both displayed as "reviewer·resolv" with nothing
-	// marking the truncation.
+	// out of the same state both displayed as "reviewer<nbsp>resolv" with
+	// nothing marking the truncation.
 	got := mermaidEdgeLabel("reviewer resolves request-changes", mermaidLabelMinRunes)
 	assert.True(t, strings.HasSuffix(got, "..."),
 		"a byte-capped edge label must still carry the ellipsis, or truncation is invisible: %q", got)
 	assert.LessOrEqual(t, len(got), mermaidLabelMinRunes, "the byte cap must still hold")
 	assert.LessOrEqual(t, len([]rune(got)), mermaidLabelMinRunes, "the rune cap must still hold")
-	assert.Equal(t, "reviewer·res...", got)
+	assert.Equal(t, "reviewer"+mermaidNBSP+"res...", got)
 }
 
 func TestMermaidTruncateRunesAndBytes_NoRoomForEllipsis_FallsBackToBarePrefix(t *testing.T) {
@@ -169,9 +176,9 @@ func TestMermaidEdgeLabel_AngleBracketInLabel_NotCutAsAParenthetical(t *testing.
 	// AFTER sanitizing silently truncated every label containing either
 	// character. The cut must run on the raw text, where no parenthesis
 	// exists.
-	assert.Equal(t, "count·(·max", mermaidEdgeLabel("count < max", 32))
-	assert.Equal(t, "uses·arr(i)", mermaidEdgeLabel("uses arr[i]", 32))
-	assert.Equal(t, "emits·(event)", mermaidEdgeLabel("emits <event>", 32))
+	assert.Equal(t, "count"+mermaidNBSP+"("+mermaidNBSP+"max", mermaidEdgeLabel("count < max", 32))
+	assert.Equal(t, "uses"+mermaidNBSP+"arr(i)", mermaidEdgeLabel("uses arr[i]", 32))
+	assert.Equal(t, "emits"+mermaidNBSP+"(event)", mermaidEdgeLabel("emits <event>", 32))
 }
 
 func TestMermaidEdgeLabel_AngleBracketWithCardinality_KeepsTheSuffix(t *testing.T) {
@@ -179,7 +186,7 @@ func TestMermaidEdgeLabel_AngleBracketWithCardinality_KeepsTheSuffix(t *testing.
 	// the whole thing here. With the cut running after sanitizing, a '<' in
 	// the word took the cardinality down with it.
 	got := mermaidEdgeLabel(classJoinLabelParts("count < max", classComposeCardinality("1", "n")), 32)
-	assert.Equal(t, "count·(·max·1·n", got)
+	assert.Equal(t, "count"+mermaidNBSP+"("+mermaidNBSP+"max"+mermaidNBSP+"1"+mermaidNBSP+"n", got)
 }
 
 func TestMermaidEdgeLabel_AllCutAway_YieldsNoLabelNotEmptyString(t *testing.T) {
@@ -1438,14 +1445,13 @@ func TestStateTranspiler_SixVerbatimCorpusLabels_ShortenedForms(t *testing.T) {
 	//
 	// Row 3 ("open · C1 (Request)") is the one label in this set that
 	// ALREADY carries a literal middle dot in its raw corpus text. The
-	// cut-at-paren step leaves "open · C1"; the space-to-middle-dot step then
-	// converts BOTH spaces surrounding that pre-existing dot too, which on
-	// its own would yield three consecutive dots rather than the one the
-	// author wrote. mermaidEdgeLabel now collapses any run of two or more
-	// "·" into one (see mermaidDotRun), so this shortens to "open·C1" —
-	// matching the plan's own worked example — via the shared
-	// mermaidEdgeLabel, not a stateDiagram-specific rule this task
-	// introduces.
+	// cut-at-paren step leaves "open · C1"; the space-to-no-break-space step
+	// then converts the two spaces AROUND that dot into no-break spaces,
+	// leaving the dot itself untouched (it is not whitespace) — see
+	// TestMermaidEdgeLabel_LiteralMiddleDotInLabel_SurvivesBetweenNoBreakSpaces
+	// for why this no longer needs a collapse the way the old "·"
+	// substitution did, via the shared mermaidEdgeLabel, not a
+	// stateDiagram-specific rule this task introduces.
 	tests := []struct {
 		name  string
 		input string
@@ -1453,7 +1459,7 @@ func TestStateTranspiler_SixVerbatimCorpusLabels_ShortenedForms(t *testing.T) {
 	}{
 		{"publication-request.md: submit", "submit (pins version, starts workflow)", "submit"},
 		{"architecture-proposal.md: resolve", "resolve {outcome}  (act without claiming)", "resolve"},
-		{"workflow-policy-brain-sketch.md: open · C1", "open · C1 (Request)", "open·C1"},
+		{"workflow-policy-brain-sketch.md: open · C1", "open · C1 (Request)", "open" + mermaidNBSP + "·" + mermaidNBSP + "C1"},
 		{"live-copy.md: reattach", "reattach (rebase / keep-base)", "reattach"},
 		{"workflow-rest-layered/architecture.md: decision==approve", "decision==approve<br/>AND publicationDate in future", "decision==approve"},
 		{"four-eyes-api-interactions.md: resolve", "resolve (approve/reject/abort)", "resolve"},
@@ -1716,8 +1722,26 @@ func TestRenderMermaidSource_ClassDiagram_CardinalityEdgeLabel_NoArrowBleed(t *t
 
 	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
 	require.NoError(t, err)
-	assert.Contains(t, got, "owns·1·n", "the composed cardinality label must appear as one contiguous, unbroken run")
+	assert.Contains(t, got, "owns"+mermaidNBSP+"1"+mermaidNBSP+"n", "the composed cardinality label must appear as one contiguous, unbroken run")
 	assert.NotContains(t, got, "owns│1", "a box-drawing vertical must never bleed through the middle of the label")
+}
+
+func TestRenderMermaidSource_StateDiagram_MultiWordEdgeLabel_ReachesArtWithSpacesIntact(t *testing.T) {
+	// This is the plan's own Overview worked example: "read as fallback"
+	// rendered as "read─as─fallback" before the no-break-space substitution,
+	// because a plain space on the label's own arrow line is transparent to
+	// mergeDrawings and lets the arrow's "─" show through. Pinned here
+	// against the REAL vendored renderer's output, not just the label string
+	// mermaidEdgeLabel builds.
+	src := "stateDiagram-v2\n" +
+		"    A --> B: read as fallback\n"
+
+	got, err := renderMermaidSource(src, mermaidUnconstrainedWidth)
+	require.NoError(t, err)
+	assert.Contains(t, got, "read"+mermaidNBSP+"as"+mermaidNBSP+"fallback",
+		"the label's spaces must survive as no-break spaces in the rendered art")
+	assert.NotContains(t, got, "read─as─fallback",
+		"a dash bleeding through the label's spaces means the no-break-space substitution did not reach the real renderer")
 }
 
 func TestRenderMermaidSource_AdversarialSources_NeverPanic(t *testing.T) {
@@ -2200,7 +2224,7 @@ func TestTranspileClassDiagram_QuotedCardinalityRangeOnLeftOperand_NoGarbageNode
 	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
 	require.True(t, ok)
 
-	assert.Equal(t, "flowchart TD\nn0[Customer]\nn1[Order]\nn0 -->|0/1·1+| n1\n", got,
+	assert.Equal(t, "flowchart TD\nn0[Customer]\nn1[Order]\nn0 -->|0/1"+mermaidNBSP+"1+| n1\n", got,
 		"exactly two real nodes, not four boxes split out of the cardinality text")
 }
 
@@ -2250,7 +2274,7 @@ func TestClassTranspiler_ExplicitLabelWithParenthetical_KeepsCardinalitySuffix(t
 
 	require.Len(t, b.edges, 1)
 	assert.Equal(t, "resolve 1 n", b.edges[0].label)
-	assert.Contains(t, b.source(), "n0 -->|resolve·1·n| n1")
+	assert.Contains(t, b.source(), "n0 -->|resolve"+mermaidNBSP+"1"+mermaidNBSP+"n| n1")
 }
 
 func TestClassComposeCardinality_AsymmetricSides(t *testing.T) {
