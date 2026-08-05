@@ -240,19 +240,19 @@ Any failure returns the first render. A fence with no collisions never renders t
 
 **Model:** sonnet
 
-- [ ] create `app/ui/mdpreview_nbsp.go` with a `mermaidNBSP` constant (U+00A0) and a function
+- [x] create `app/ui/mdpreview_nbsp.go` with a `mermaidNBSP` constant (U+00A0) and a function
       that replaces every space in an edge label with it, then collapses any run of two or
       more into one
-- [ ] document in the doc comment why the substitution exists: `mergeDrawings` in
+- [x] document in the doc comment why the substitution exists: `mergeDrawings` in
       `vendor/.../cmd/draw.go` treats `" "` as transparent, so a space lets the arrow line or a
       crossing edge show through
-- [ ] document why a run can appear at all (a source label already containing the substitution
+- [x] document why a run can appear at all (a source label already containing the substitution
       character has its neighbouring spaces converted too) and why collapsing is safe
-- [ ] write tests for the substitution: single space, several spaces, leading and trailing
+- [x] write tests for the substitution: single space, several spaces, leading and trailing
       spaces, a label with no spaces at all, the empty string
-- [ ] write tests for the run collapse, including a label that already contains a literal
+- [x] write tests for the run collapse, including a label that already contains a literal
       no-break space
-- [ ] run `go test ./app/ui -run TestMermaidNBSP` - must pass before task 2
+- [x] run `go test ./app/ui -run TestMermaidNBSP` - must pass before task 2
 
 ### Task 2: Use no-break spaces on the transpiled path
 
