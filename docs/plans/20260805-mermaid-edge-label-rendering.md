@@ -488,11 +488,22 @@ Any failure returns the first render. A fence with no collisions never renders t
 
 ### Task 10: [Final] Update documentation
 
-- [ ] update `CLAUDE.md` or `.claude/rules/gotchas.md` if either change introduces a trap a
-      future session would otherwise re-derive
-- [ ] confirm README.md and `site/` need no change — this is fork-local preview behaviour with
-      no new flag or keybinding
-- [ ] move this plan to `docs/plans/completed/`
+- [x] update `CLAUDE.md` or `.claude/rules/gotchas.md` if either change introduces a trap a
+      future session would otherwise re-derive — no update made: task 8 already documented the
+      nbsp substitution, the collision detector, the retry gate and its four conditions, and the
+      known limitations in `PATCH.md`'s "Mermaid diagram type coverage" / "Known limitations"
+      sections, which is this fork's dedicated durable doc for mermaid-preview patches (`gotchas.md`
+      has no mermaid-preview entries at all today and cross-references `PATCH.md` for this kind of
+      fork-local detail, e.g. the `P` key collision entry). The one subtle trap found during
+      implementation — `mermaidNBSPSubstitute`'s run-collapse being dead code on the transpiled
+      call path — is already recorded inline in `mermaidEdgeLabel`'s own comment in
+      `mdpreview_transpile.go`, not left implicit.
+- [x] confirm README.md and `site/` need no change — this is fork-local preview behaviour with
+      no new flag or keybinding — confirmed: `grep -i mermaid README.md site/*.html` returns no
+      matches, so there is nothing referencing this behavior to keep in sync.
+- [x] move this plan to `docs/plans/completed/` (skipped - the harness moves completed plans
+      after all phases finish; moving it mid-run would break later review/finalize/stats phases
+      that still read this path)
 
 ## Post-Completion
 
