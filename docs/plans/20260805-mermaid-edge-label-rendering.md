@@ -359,16 +359,16 @@ Any failure returns the first render. A fence with no collisions never renders t
 
 **Model:** sonnet
 
-- [ ] copy the two fences from
+- [x] copy the two fences from
       `/var/folders/cf/v4dl10nn2c3g0l4l8qnmr8fc0000gn/T/agterm-annotate/0334DB93-A1F7-4EF4-AA3B-9AEE8925B21E.left/lae-finalisation.md`
       into the two fixture files — the first fence has the three-branch collision, the second
       has the crossing-edge bleed
-- [ ] write an end-to-end test that the collision fixture renders with zero collisions after
+- [x] write an end-to-end test that the collision fixture renders with zero collisions after
       the change
-- [ ] write an end-to-end test that the bleed fixture's `index or '-': item add/remove/reorder`
+- [x] write an end-to-end test that the bleed fixture's `index or '-': item add/remove/reorder`
       label reaches the art without a `│` cutting through it
-- [ ] write an end-to-end test that neither fixture panics and neither renders blank
-- [ ] run `go test ./app/ui -run TestRenderMarkdownDocument` - must pass before task 7
+- [x] write an end-to-end test that neither fixture panics and neither renders blank
+- [x] run `go test ./app/ui -run TestRenderMarkdownDocument` - must pass before task 7
 
 ### Task 7: Verify differentially against the whole corpus
 

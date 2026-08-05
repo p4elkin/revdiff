@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -316,6 +318,67 @@ func TestRenderMarkdownDocument_TwoDiagrams_LandInOrderOnOwnPlaceholders(t *test
 	require.GreaterOrEqual(t, iA, 0, "first diagram art must be present")
 	require.GreaterOrEqual(t, iB, 0, "second diagram art must be present")
 	assert.Less(t, iA, iB, "each diagram's art must land on its own placeholder, in document order")
+}
+
+// readMermaidFixture loads one of the two real-world fences under
+// testdata/mermaid/ — collision-three-branches.mmd and bleed-crossing-edge.mmd,
+// copied verbatim from the user document that motivated both the collision
+// detector (task 4) and the no-break-space substitution (tasks 2-3). The
+// source document itself is a temp file outside the repo and is never
+// referenced from a test, only from this plan's task 6 note; the fixtures
+// here are the durable copy.
+func readMermaidFixture(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join("testdata", "mermaid", name)
+	b, err := os.ReadFile(path) //nolint:gosec // fixed test path
+	require.NoError(t, err)
+	return strings.TrimRight(string(b), "\n")
+}
+
+func TestRenderMarkdownDocument_CollisionFixture_RendersWithZeroCollisions(t *testing.T) {
+	source := readMermaidFixture(t, "collision-three-branches.mmd")
+	doc := "```mermaid\n" + source + "\n```\n"
+
+	got := renderMarkdownDocument(mdLines(doc), 120, false)
+	stripped := xansi.Strip(got)
+
+	toRender := source
+	if transpiled, ok := transpileMermaid(source, 120); ok {
+		toRender = transpiled
+	}
+	collisions := mermaidCollisionCount(toRender, stripped)
+	assert.Equal(t, 0, collisions,
+		"the three-branch fixture must render with zero label collisions after the LR retry\nart:\n%s", stripped)
+}
+
+func TestRenderMarkdownDocument_BleedFixture_LabelReachesArtIntact(t *testing.T) {
+	source := readMermaidFixture(t, "bleed-crossing-edge.mmd")
+	doc := "```mermaid\n" + source + "\n```\n"
+
+	got := renderMarkdownDocument(mdLines(doc), 120, false)
+	stripped := xansi.Strip(got)
+
+	wantLabel := mermaidNBSPSubstitute("index or '-': item add/remove/reorder")
+	assert.Contains(t, stripped, wantLabel,
+		"the crossing-edge label must reach the art with its spaces intact, no character cutting through it")
+	assert.NotContains(t, stripped, "item│add/remove/reorder",
+		"the crossing edge's │ must not bleed through the label")
+}
+
+func TestRenderMarkdownDocument_Fixtures_NoPanicNoBlankRender(t *testing.T) {
+	for _, name := range []string{"collision-three-branches.mmd", "bleed-crossing-edge.mmd"} {
+		t.Run(name, func(t *testing.T) {
+			source := readMermaidFixture(t, name)
+			doc := "```mermaid\n" + source + "\n```\n"
+
+			var got string
+			assert.NotPanics(t, func() {
+				got = renderMarkdownDocument(mdLines(doc), 120, false)
+			})
+			stripped := xansi.Strip(got)
+			assert.NotEmpty(t, strings.TrimSpace(stripped), "fixture must not render blank")
+		})
+	}
 }
 
 func TestRenderMarkdownPreview_NoColors_ProducesNoANSI(t *testing.T) {
