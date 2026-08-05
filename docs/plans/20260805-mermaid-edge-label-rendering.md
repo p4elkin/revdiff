@@ -265,16 +265,16 @@ Any failure returns the first render. A fence with no collisions never renders t
 **Model:** sonnet
 **Wave:** labels
 
-- [ ] replace the `·` substitution and the `mermaidDotRun` collapse in `mermaidEdgeLabel` with
+- [x] replace the `·` substitution and the `mermaidDotRun` collapse in `mermaidEdgeLabel` with
       a call to the task 1 helper
-- [ ] remove `mermaidDotRun` if it has no remaining caller, and update `mermaidEdgeLabel`'s doc
+- [x] remove `mermaidDotRun` if it has no remaining caller, and update `mermaidEdgeLabel`'s doc
       comment where it explains the middle dot
-- [ ] update the existing tests that assert `·` literals to assert the no-break space instead
-- [ ] verify the byte-cap tests still hold unchanged — U+00A0 and `·` are both 2 bytes, so a
+- [x] update the existing tests that assert `·` literals to assert the no-break space instead
+- [x] verify the byte-cap tests still hold unchanged — U+00A0 and `·` are both 2 bytes, so a
       changed expectation here means something else moved and must be understood, not adjusted
-- [ ] write a test that a class or state diagram edge label with spaces reaches the art with
+- [x] write a test that a class or state diagram edge label with spaces reaches the art with
       its spaces intact
-- [ ] run `go test ./app/ui -run 'TestMermaidEdgeLabel|TestMermaid|TestTranspile'` - must pass
+- [x] run `go test ./app/ui -run 'TestMermaidEdgeLabel|TestMermaid|TestTranspile'` - must pass
       before the next task
 
 ### Task 3: Use no-break spaces on the plain flowchart path
@@ -287,18 +287,18 @@ Any failure returns the first render. A fence with no collisions never renders t
 **Model:** sonnet
 **Wave:** labels
 
-- [ ] rename `unquoteFlowchartEdgeLabel` to reflect that it now normalizes rather than only
+- [x] rename `unquoteFlowchartEdgeLabel` to reflect that it now normalizes rather than only
       unquotes, and restructure it so the substitution runs on every path with a label — not
       only when the label was quoted
-- [ ] keep the existing bail-outs intact for the cases that must stay untouched: a segment with
+- [x] keep the existing bail-outs intact for the cases that must stay untouched: a segment with
       no label at all, and a label carrying an inner quote
-- [ ] update the doc comment to record that this is the single chokepoint for both edge-label
+- [x] update the doc comment to record that this is the single chokepoint for both edge-label
       spellings, because `normalizeFlowchartLine` normalizes links before nodes
-- [ ] write tests covering both spellings: the inline `A -- read as fallback --> B` form and the
+- [x] write tests covering both spellings: the inline `A -- read as fallback --> B` form and the
       piped `A -->|"read as fallback"| B` form, each reaching the renderer with spaces intact
-- [ ] write tests for the unchanged cases: bare arrow with no label, a label with an inner quote,
+- [x] write tests for the unchanged cases: bare arrow with no label, a label with an inner quote,
       a label with no spaces
-- [ ] run `go test ./app/ui -run TestFlowchart` - must pass before task 4
+- [x] run `go test ./app/ui -run TestFlowchart` - must pass before task 4
 
 ### Task 4: Add the collision detector
 
