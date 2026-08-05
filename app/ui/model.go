@@ -736,11 +736,11 @@ type ModelConfig struct {
 	Ref              string
 	Staged           bool
 	TreeWidthRatio   int
-	NoTree           bool     // start with the tree/TOC pane hidden
 	TabWidth         int      // number of spaces per tab character
 	NoColors         bool     // disable all colors including syntax highlighting
 	MouseTracking    bool     // enable mouse tracking for clicks and wheel events
 	NoStatusBar      bool     // hide the status bar
+	NoTree           bool     // hide the file tree pane
 	NoConfirmDiscard bool     // skip confirmation prompt when discarding annotations
 	NoConfirmReload  bool     // skip confirmation prompt when dropping annotations on reload
 	Wrap             bool     // enable line wrapping
@@ -868,6 +868,14 @@ func NewModel(cfg ModelConfig) (Model, error) {
 	cls := resolveCommitLogSource(cfg.CommitLog, cfg.Renderer)
 	reviewCfg := cloneReviewInfoConfig(cfg.ReviewInfo)
 
+	// starting with the tree hidden has to move focus to the diff, the same way
+	// toggleTreePane does when it hides the pane. Leaving focus on the tree would
+	// point the cursor keys at a pane that is not on screen.
+	startFocus := paneTree
+	if cfg.NoTree {
+		startFocus = paneDiff
+	}
+
 	return Model{
 		resolver:      cfg.StyleResolver,
 		renderer:      cfg.StyleRenderer,
@@ -904,7 +912,7 @@ func NewModel(cfg ModelConfig) (Model, error) {
 			outputPath:         cfg.OutputPath,
 		},
 		layout: layoutState{
-			focus:      paneTree,
+			focus:      startFocus,
 			treeHidden: cfg.NoTree,
 		},
 		modes: modeState{

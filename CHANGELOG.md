@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.12.0 - 2026-08-04
+
+### New Features
+
+- optional pane-scoped agterm overlay via `REVDIFF_AGTERM_PANE` #303 @umputun
+- filterable file jump picker (P) #285 @kalifg
+- post-flush command hook #277 @mishamsk
+- preserve cursor position across compact diff toggle #274 @umputun
+- automatic Codex plan review #268 @stevensuna
+- signal-safe annotation save and tmux window mode #266 @umputun
+
+### Improvements
+
+- memoize per-line diff render blocks #299 @umputun
+- stop full-diff re-render on annotation cursor blink #298 @umputun
+- relay revdiff's stderr when an overlay review fails #292 @kylesnowschwartz
+- index visual rows for page navigation #287 @stevensuna
+- harden revdiff timeout fallback in review skills #264 @umputun
+- drop redundant pre-flight tool checks in review skills #291 @kylesnowschwartz
+- document ghostty text selection while mouse capture is on 170263a
+- bump github.com/mattn/go-runewidth from 0.0.24 to 0.0.27 #293 @app/dependabot
+- bump actions/setup-go from 6 to 7 #283 @app/dependabot
+
+### Bug Fixes
+
+- rebind file picker from ctrl+p to P #300 @umputun
+- terminate page-down walk on an annotated last line #288 @umputun
+- resolve --theme auto from tmux client list instead of current client #286 @kylesnowschwartz
+- restore mouse after source editor return #276 @phewitt
+- agterm overlay branch for plan-review launcher #273 @umputun
+- detect terminal background inside tmux for --theme auto #261 @kylesnowschwartz
+- preserve unreviewed tree scroll #259 @mishamsk
+
 ## v1.11.1 - 2026-07-13
 
 ### Improvements

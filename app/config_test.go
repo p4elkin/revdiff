@@ -21,7 +21,6 @@ func TestParseArgs_Defaults(t *testing.T) {
 	opts, err := parseArgs(noConfigArgs(t))
 	require.NoError(t, err)
 	assert.Equal(t, 2, opts.TreeWidth)
-	assert.False(t, opts.NoTree)
 	assert.Equal(t, 4, opts.TabWidth)
 	assert.Equal(t, "catppuccin-macchiato", opts.ChromaStyle)
 	assert.Equal(t, "💬", opts.AnnotationMarker)
@@ -31,6 +30,7 @@ func TestParseArgs_Defaults(t *testing.T) {
 	assert.False(t, opts.NoConfirmDiscard)
 	assert.False(t, opts.NoConfirmReload)
 	assert.False(t, opts.NoMouse)
+	assert.False(t, opts.NoTree)
 	assert.False(t, opts.Wrap)
 	assert.False(t, opts.Collapsed)
 	assert.False(t, opts.Preview)
@@ -122,6 +122,31 @@ func TestParseArgs_NoMouse(t *testing.T) {
 		opts, err := parseArgs([]string{"--config", cfgPath})
 		require.NoError(t, err)
 		assert.True(t, opts.NoMouse)
+	})
+}
+
+func TestParseArgs_NoTree(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		opts, err := parseArgs(append(noConfigArgs(t), "--no-tree"))
+		require.NoError(t, err)
+		assert.True(t, opts.NoTree)
+	})
+
+	t.Run("env", func(t *testing.T) {
+		t.Setenv("REVDIFF_NO_TREE", "true")
+		opts, err := parseArgs(noConfigArgs(t))
+		require.NoError(t, err)
+		assert.True(t, opts.NoTree)
+	})
+
+	t.Run("config file", func(t *testing.T) {
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "config")
+		err := os.WriteFile(cfgPath, []byte("[Application Options]\nno-tree = true\n"), 0o600)
+		require.NoError(t, err)
+		opts, err := parseArgs([]string{"--config", cfgPath})
+		require.NoError(t, err)
+		assert.True(t, opts.NoTree)
 	})
 }
 
@@ -636,11 +661,10 @@ func TestParseArgs_PostFlushCommand(t *testing.T) {
 }
 
 func TestParseArgs_Flags(t *testing.T) {
-	opts, err := parseArgs([]string{"--staged", "--tree-width=5", "--no-tree", "--tab-width=8", "--no-colors", "--chroma-style=dracula", "HEAD~3"})
+	opts, err := parseArgs([]string{"--staged", "--tree-width=5", "--tab-width=8", "--no-colors", "--chroma-style=dracula", "HEAD~3"})
 	require.NoError(t, err)
 	assert.True(t, opts.Staged)
 	assert.Equal(t, 5, opts.TreeWidth)
-	assert.True(t, opts.NoTree)
 	assert.Equal(t, 8, opts.TabWidth)
 	assert.True(t, opts.NoColors)
 	assert.Equal(t, "dracula", opts.ChromaStyle)
@@ -734,12 +758,10 @@ func TestParseArgs_ColorFlags(t *testing.T) {
 func TestParseArgs_EnvVars(t *testing.T) {
 	t.Setenv("REVDIFF_TREE_WIDTH", "7")
 	t.Setenv("REVDIFF_COLOR_ACCENT", "#ff0000")
-	t.Setenv("REVDIFF_NO_TREE", "true")
 	opts, err := parseArgs(noConfigArgs(t))
 	require.NoError(t, err)
 	assert.Equal(t, 7, opts.TreeWidth)
 	assert.Equal(t, "#ff0000", opts.Colors.Accent)
-	assert.True(t, opts.NoTree)
 }
 
 func TestParseArgs_CLIOverridesEnv(t *testing.T) {

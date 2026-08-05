@@ -2,9 +2,12 @@ package ui
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -1081,5 +1084,59 @@ func TestBuildHelpSpec_VimMotionSectionOn(t *testing.T) {
 			"entry %d key string mismatch", i)
 		assert.NotEmpty(t, vimSection.Entries[i].Description,
 			"entry %d must have a description", i)
+	}
+}
+
+func TestModel_HelpOverlayScrollsOnSmallTerminal(t *testing.T) {
+	m := testModel([]string{"a.go"}, nil)
+	m.layout.width, m.layout.height = 100, 40
+	m.overlay.OpenHelp(m.buildHelpSpec())
+	require.True(t, m.overlay.Active())
+
+	top := m.View()
+	require.NotContains(t, top, "discard and quit", "last section must start below the fold at 100x40")
+
+	scrolled := m
+	for range 4 {
+		result, _ := scrolled.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		scrolled = result.(Model)
+	}
+	view := scrolled.View()
+
+	assert.NotEqual(t, top, view, "page-down must scroll the help body")
+	assert.Contains(t, view, "discard and quit", "paging must reach the last section")
+	assert.True(t, scrolled.overlay.Active(), "scroll keys must not close the help overlay")
+}
+
+func TestModel_HelpOverlayNeverExceedsTerminal(t *testing.T) {
+	// a height assertion on m.View() would be unfalsifiable: overlayCenter only
+	// assigns into existing background lines and drops the rest, so the view is
+	// always exactly the terminal height however tall the popup is. Clipping
+	// shows up as missing content instead, which is what #304 reported.
+	sizes := []struct {
+		w, h      int
+		overflows bool
+	}{
+		{100, 40, true},
+		{80, 24, true},
+		{60, 20, true},
+		{200, 60, false},
+	}
+	for _, sz := range sizes {
+		t.Run(fmt.Sprintf("%dx%d", sz.w, sz.h), func(t *testing.T) {
+			m := testModel([]string{"a.go"}, nil)
+			m.modes.vimMotion = true
+			m.layout.width, m.layout.height = sz.w, sz.h
+			m.overlay.OpenHelp(m.buildHelpSpec())
+
+			view := m.View()
+			assert.Contains(t, view, "Navigation", "the popup's first row must not be clipped off the top")
+			if sz.overflows {
+				assert.Contains(t, view, "↑/↓ scroll", "the hint is the popup's last row, so its absence means the bottom was clipped")
+			}
+			for line := range strings.SplitSeq(view, "\n") {
+				assert.LessOrEqual(t, lipgloss.Width(line), sz.w, "no rendered line may exceed the terminal width")
+			}
+		})
 	}
 }

@@ -209,7 +209,7 @@ revdiff enables mouse tracking by default so the scroll wheel and left-click wor
 - **Left-click in the tree** — focuses the tree and selects/loads the clicked entry. Clicking a directory row moves the cursor but does not load a file.
 - **Left-click in the diff** — focuses the diff and moves the cursor to the clicked line. Enables a "click, then `a`" annotation flow.
 - **Left-click in the TOC pane** (single-file markdown) — focuses the TOC and selects the clicked header.
-- **Scroll wheel in overlay popups** (info, annotations, themes) — scrolls the popup content or moves its cursor. Shift+wheel uses a half-page step. In the theme selector, wheel previews each theme live. Help overlay has no scrollable or selectable content so mouse events are ignored.
+- **Scroll wheel in overlay popups** (info, annotations, themes, help) — scrolls the popup content or moves its cursor. Shift+wheel uses a half-page step. In the theme selector, wheel previews each theme live.
 - **Left-click in the annotation popup** — jumps to the clicked annotation (same as pressing `Enter`).
 - **Left-click in the theme popup** — confirms the clicked theme (same as pressing `Enter`). Clicks on the filter row or blank separator are ignored.
 - **Left-click in the file picker** — jumps to the clicked file (same as pressing `Enter`). Clicks on the filter row or blank separator are ignored.
@@ -305,6 +305,20 @@ Comment body lines starting with `## ` (the record-header form) are prefixed wit
 Use `--output` / `-o` flag to write annotations to a file instead of stdout.
 
 Exit status: `0` = no annotations, discarded annotations, or default mode; `10` = annotations were produced with `--exit-code-on-annotations`, `REVDIFF_EXIT_CODE_ON_ANNOTATIONS`, or `exit-code-on-annotations`; `1` = real errors. Agent launchers set `REVDIFF_EXIT_CODE_ON_ANNOTATIONS` and treat `10` as success-with-annotations.
+
+## Asking Questions Instead of Directives
+
+An annotation is normally an instruction to change code. To ask about the code instead, put `??` anywhere in the text, or open with `explain`, `remind`, `describe`, `what is`, `what are`, `how does`, `how do` or `clarify` (case-insensitive). `??` is the language-neutral form and works whatever language you write in.
+
+```
+## renderer.go:142 (+)
+why a pointer here??
+
+## store.go:88 (-)
+explain what this lock protects
+```
+
+The agent answers as a markdown document and reopens it in revdiff via `--only`, with a TOC sidebar. Annotate that document to ask follow-ups and it is refined and reopened; the loop ends when you quit without annotating. Code-change annotations from the same batch are held and applied after the explanation loop finishes. Applies to the Claude and Codex plugins; the Pi package classifies questions the same way but answers them in chat.
 
 ## Preloading Annotations
 
