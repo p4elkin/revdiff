@@ -217,9 +217,9 @@ var mermaidColonRun = regexp.MustCompile(`:{2,}`)
 // (parens, braces, tildes, non-ASCII: all provably inert against the
 // vendored parser). This is the base sanitizer for node/member/title text;
 // mermaidEdgeLabel builds on top of it for the additional edge-only rules
-// (space -> · and truncation), since an edge label is everything a node
-// label is, drawn in a more hazardous position (through an arrow, delimited
-// by literal '|' characters).
+// (the no-break-space substitution and truncation), since an edge label is
+// everything a node label is, drawn in a more hazardous position (through an
+// arrow, delimited by literal '|' characters).
 func mermaidSafeText(s string) string {
 	if idx := strings.Index(s, "%%"); idx != -1 {
 		s = strings.TrimRight(s[:idx], " \t")
@@ -257,18 +257,6 @@ func mermaidSafeText(s string) string {
 // own break pattern (cmd/label.go's htmlBreakPattern).
 var mermaidBRPattern = regexp.MustCompile(`(?i)<br\s*/?>|\\n`)
 
-// mermaidDotRun matches a run of two or more consecutive "·" (middle dot)
-// characters. mermaidEdgeLabel's own space -> "·" substitution can produce
-// exactly this: a raw label that already contains a literal "·" surrounded
-// by spaces (the real corpus label "open · C1 (Request)" is exactly this
-// shape) turns BOTH of those surrounding spaces into "·" too, leaving three
-// dots in a row where the author only ever wrote one separator. A run of two
-// or more dots reads as a visual artifact in the rendered art even though it
-// is not unsafe (a run of "·" cannot bleed an arrow through it any more than
-// a single one can) — collapsing it to one keeps the label's meaning while
-// removing the noise.
-var mermaidDotRun = regexp.MustCompile(`·{2,}`)
-
 // mermaidEdgeLabel turns a raw `: label` (or `-->|label|`) capture into text
 // safe to place inside our own synthesized `-->|label|` edge — see the
 // plan's "Edge label" sanitizing table for the derivation of every step.
@@ -293,8 +281,8 @@ var mermaidDotRun = regexp.MustCompile(`·{2,}`)
 //   - it maps '<' and '[' to '(' too, so a label with no parenthetical at all
 //     grows one during sanitizing. Cutting after that silently truncated every
 //     label containing '<' or '[': "count < max" became "count", "uses arr[i]"
-//     became "uses·arr", and a classDiagram relation lost its cardinality
-//     suffix along with the rest.
+//     lost everything from "arr" onward, and a classDiagram relation lost its
+//     cardinality suffix along with the rest.
 //
 // Cutting first, on the untouched raw text, avoids both traps: only a
 // parenthesis or brace the author actually typed can end a label.
@@ -308,15 +296,24 @@ func mermaidEdgeLabel(raw string, capRunes int) string {
 
 	s = mermaidSafeText(s)
 
-	// Every remaining space becomes a middle dot: the arrow is drawn
-	// through the label's own row, so it bleeds through any space at its
-	// column (position-dependent — see the plan's Probe finding table).
-	s = strings.ReplaceAll(s, " ", "·")
-
-	// Collapse any run this just created (see mermaidDotRun) BEFORE the
-	// rune/byte cap is applied, so the truncation budget is spent on real
-	// content rather than on redundant dots this step itself introduced.
-	s = mermaidDotRun.ReplaceAllString(s, "·")
+	// Every remaining space becomes a no-break space, and any run this
+	// creates collapses to one — see mermaidNBSPSubstitute's doc comment
+	// (mdpreview_nbsp.go) for why the arrow bleeds through an ordinary space
+	// at this position and why a run can appear at all. Applied before the
+	// rune/byte cap below, so the truncation budget is spent on real content
+	// rather than on redundant characters this step itself introduced.
+	//
+	// In THIS pipeline the collapse branch is defensive rather than commonly
+	// exercised: mermaidSafeText's own whitespace normalization (the
+	// Fields/Join step) already reduces any run of whitespace — including a
+	// literal no-break space, since Go's unicode.IsSpace counts U+00A0 as
+	// whitespace — down to a single ASCII space before this line ever runs.
+	// A literal middle dot in a label (e.g. the real corpus text
+	// "open · C1") is NOT whitespace, so mermaidSafeText leaves it alone and
+	// it survives here untouched, sandwiched between two independently
+	// substituted no-break spaces rather than merging into a run with them
+	// — see TestMermaidEdgeLabel_LiteralMiddleDotInLabel_SurvivesBetweenNoBreakSpaces.
+	s = mermaidNBSPSubstitute(s)
 
 	return mermaidTruncateRunesAndBytes(s, capRunes)
 }
@@ -351,10 +348,12 @@ func mermaidCutParenthetical(s string) string {
 //
 // A byte-capped result carries the same "..." ellipsis a rune-capped one
 // does. That is not cosmetic. mermaidEdgeLabel turns every space into a
-// 2-byte "·", so the byte cap binds for essentially every multi-word edge
-// label; without the ellipsis two different transitions out of the same state
-// can both display as a bare prefix ("reviewer·resolv"), reading as complete
-// labels that happen to be identical rather than as two truncated ones.
+// 2-byte no-break space (mermaidNBSPSubstitute), so the byte cap binds for
+// essentially every multi-word edge label; without the ellipsis two different
+// transitions out of the same state can both display as a bare prefix
+// ("reviewer resolv", with the space a no-break space rather than an ASCII
+// one), reading as complete labels that happen to be identical rather than as
+// two truncated ones.
 //
 // The candidate is built as "first n runes + ellipsis" directly, NOT by
 // re-running mermaidTruncate on a prefix. That was the earlier shape and it
@@ -1548,8 +1547,8 @@ func classComposeCardinality(fromCard, toCard string) string {
 // leading/trailing space when one side is empty. The composed result is
 // still raw, unsanitized text — flowchartBuilder.source runs it through
 // mermaidEdgeLabel at emission time (see addEdge's doc comment), which is
-// what turns any remaining space into "·"; this function must never
-// hand-roll that substitution itself.
+// what turns any remaining space into a no-break space; this function must
+// never hand-roll that substitution itself.
 //
 // The word is cut at its own parenthetical FIRST (mermaidCutParenthetical),
 // before the suffix is appended. mermaidEdgeLabel applies the very same cut
