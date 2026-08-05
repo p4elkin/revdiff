@@ -569,8 +569,10 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   apart read as separate words while `collection` and `single composite` four columns apart do
   not. The overwriting shape is flagged when a matched label has leftover letters against it
   that spell part of a different label. A match is otherwise dropped when it overlaps a longer
-  label's span or butts against ordinary node text, so a fence with no real collision never
-  enters the retry.
+  label's span or butts against text unrelated to any label — but that drop is not reliable: see
+  the next entry for the measured case where ordinary node text is caught anyway, because
+  "unrelated to any label" is checked against every OTHER label's text, not against whether the
+  row has an edge label on it at all.
   **Measured across the corpus** (15254 markdown files, 231 distinct fences, pane width 120,
   base `3187fc5` against the finished change, same detector run over both builds' dumps): 15
   fences had a colliding label before this change, 6 after; the retry fires and is kept on 9.
@@ -583,6 +585,65 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   that DOES collide is two full renders every time it is drawn, and preview has no render cache
   by design (see `renderMarkdownPreview`'s doc comment), so a pan keypress across such a
   document pays both.
+- **The collision detector itself is inaccurate in both directions, and this was found and
+  accepted before shipping, across three review rounds that each reproduced it by running the
+  real functions — not discovered later.** It misses real collisions and it invents ones that
+  are not there.
+
+  It misses short labels. `mermaidLabelFragmentMinRunes = 3` treats a leftover overwrite run of
+  two runes or fewer as ordinary node text, not as wreckage, so a short label painted cleanly
+  over another counts zero. A real `flowchart TD` with branch labels `yes`/`no`/`hold` renders
+  the row `│ Is it ready? ├─holdo─┬───┐` — `hold` painted over `no`, leaving only the `o` — and
+  `mermaidCollisionCount` returns 0 for it, so the retry never fires, even though the LR render
+  of that same fence is both collision-free and narrower (30 columns against 43): a strictly
+  better render, silently discarded. Reproduced the same way on `aa`/`bb`/`cc` → `├─ccb─┬──┐`,
+  `aaa`/`bbb`/`ccc` → `├─cccbb┬──┐`, and `aa`/`bb`/`cc`/`dd` → `├─ddb─┬──┐`. A leftover run of 0,
+  1 or 2 runes counts zero every time; one of 3 or more counts one.
+
+  It also misses multi-word labels — exactly the labels the no-break-space half of this change
+  exists for. `mermaidNeighborRun` stops at the first non-word rune, and a multi-word label's own
+  no-break spaces ARE non-word runes, so an overwrite of a multi-word label breaks into runs of
+  0-2 letters on both sides and is indistinguishable from an undamaged draw. `yes` painted over
+  `a b c d` at all five possible offsets (`yes c d`, `ayesc d`, `a yes d`, `a byesd`, `a b yes`)
+  counts zero at every one.
+
+  In the other direction, it invents collisions on rows that carry no edge label at all.
+  `mermaidClassifyHit` calls leftover letters an overwrite whenever they happen to be a substring
+  of some OTHER edge label anywhere in the fence, with no check that the row it is looking at is
+  an edge-label row in the first place. With labels `no` and `nothing to do` present in one
+  fence, the plain art row `│ Queue drained: nothing pending │` counts 1: `no` matches inside
+  `nothing`, and the leftover `thing` happens to be a substring of `nothing to do`. A 10-node
+  diagram with one repeated word reported 9 collisions with zero real ones.
+
+  It is also inconsistent by construction: `mermaidCollisionLimit`'s `min(len(a), len(b), 8)`
+  makes detection sensitivity scale with label length, roughly 8x between the shortest and
+  longest labels measured. Smallest gap still reported CLEAN, measured pair by pair: `a`/`b` at
+  1 column apart, `no`/`yes` at 2, `add`/`del` at 3, `open`/`close` at 4 — against 8 columns for
+  the `collection`/`single composite` pair the cap was built for. Two 2-character branch labels
+  two columns apart in one arrow corridor (`├◄──no──yes──┤`) are reported collision-free.
+
+  Below the reporting bar but worth recording alongside these: `mermaidPipedEdgeLabel`'s
+  character class excludes `"`, so a quote-carrying label such as `|"a" and "b"|` cannot match
+  and is dropped from the label set entirely — if a fence has exactly two labels and one of them
+  is quote-carrying, collision detection is disabled for that whole fence.
+
+  **Blast radius.** A missed collision is not a regression — it leaves today's output exactly as
+  it was before this feature existed. A phantom collision costs one extra vendored render (about
+  9ms, see the corpus note above) and can only ever fire on a fence the detector itself believes
+  collides — a clean fence's bytes never change. Even a wrongly-triggered flip is still bounded by
+  `mermaidFlipFitsPane`: it cannot turn a fence that fit the pane into one that doesn't, the same
+  guard that bounds a correctly-triggered one. What a phantom collision CAN do is win the strict
+  `flippedCount < firstCount` comparison on noise rather than on a real fix, since that comparison
+  is made on counts that can themselves be wrong in either direction.
+
+  **Direction for a real fix.** The detector's premise is "find each label in the art and measure
+  the gap between hits," and that premise is what produces errors in both directions at once: the
+  gap measurement is unreliable for short and multi-word labels, and matching a leftover run
+  against *any* label's text — rather than against evidence that a specific label was actually
+  destroyed — is what lets ordinary node text pass as a collision. Better evidence is that a
+  specific SOURCE label does not appear intact anywhere in the art: that test cannot fire on node
+  text at all, because node text was never a source label to begin with, and it does not depend on
+  how long the label is or how many words it has.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
 - **You must leave preview before changing file.** Preview now works in a multi-file review, but no

@@ -328,6 +328,18 @@ that — there is one match on the row, not two — so without the overwrite rul
 blind to the worse of the two shapes. The wreckage is what identifies it: `sin` and `ite` are
 pieces of `single composite` sitting against a `collection` that no longer has a word boundary.
 
+**Correction, added after ship.** This example generalizes only when the wreckage sits inside a
+single word of the overwritten label. Post-ship review reproduced two failure modes this
+description does not cover: a short overwritten label (2 leftover runes or fewer) never meets
+`mermaidLabelFragmentMinRunes` and reads as clean, and a MULTI-WORD overwritten label has its own
+no-break spaces treated as word boundaries by `mermaidNeighborRun`, which chops the leftover run
+into fragments too short to recognize at every tested offset — the exact case `single composite`
+is meant to represent, once the target label is not this one lucky example. The same review found
+the detector can also invent collisions on plain node text that happens to share a substring with
+some unrelated edge label. See PATCH.md's "Known limitations" for the full, measured writeup;
+none of it was found to require touching the shipped code, since the retry only ever fires on a
+fence the detector already believes collides.
+
 A working prototype of both the detector and the corpus harness is at
 `/private/tmp/claude-501/-Users-sasha-dev-oss-revdiff/3ca44ced-2e51-4dbb-97e0-c4e65cb65f87/scratchpad/corpus_harness.go.txt`.
 Read it before writing task 4 — it is the measured version, not a sketch.
