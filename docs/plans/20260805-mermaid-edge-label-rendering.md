@@ -308,20 +308,22 @@ Any failure returns the first render. A fence with no collisions never renders t
 
 **Model:** opus
 
-- [ ] read the prototype at
+- [x] read the prototype at
       `/private/tmp/claude-501/-Users-sasha-dev-oss-revdiff/3ca44ced-2e51-4dbb-97e0-c4e65cb65f87/scratchpad/corpus_harness.go.txt`
       first — it is the version the corpus numbers came from
-- [ ] create `app/ui/mdpreview_collision.go` with a function taking the fence source and the
+- [x] create `app/ui/mdpreview_collision.go` with a function taking the fence source and the
       rendered art and returning a collision count
-- [ ] implement label extraction, longest-first matching with consumed-column marking, and the
+- [x] implement label extraction, longest-first matching with consumed-column marking, and the
       adjacent-distinct-pair test with the 8-column threshold as a named constant
-- [ ] document why longest-first plus column marking is required (a short label matching inside
+- [x] document why longest-first plus column marking is required (a short label matching inside
       a longer one would count a collision that is not there) and why the threshold is 8
-- [ ] write tests for a real collision, for two labels far apart on one row, for the same label
+- [x] write tests for a real collision, for two labels far apart on one row, for the same label
       appearing twice on a row, for a fence with fewer than two distinct labels, and for empty
       art
-- [ ] write a test using the real colliding fence added in task 6 as the positive case
-- [ ] run `go test ./app/ui -run TestCollision` - must pass before task 5
+- [x] write a test using the real colliding fence added in task 6 as the positive case
+      (embedded as the `collisionThreeBranchFence` literal — task 6 has not run yet, so the
+      fence is copied from the same source document the fixture will come from)
+- [x] run `go test ./app/ui -run TestCollision` - must pass before task 5
 
 ### Task 5: Retry in LR when the first render collides
 
