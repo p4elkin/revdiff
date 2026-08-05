@@ -335,18 +335,18 @@ Any failure returns the first render. A fence with no collisions never renders t
 
 **Model:** sonnet
 
-- [ ] add a direction-flip function that rewrites a `TD` or `TB` header to `LR` and reports
+- [x] add a direction-flip function that rewrites a `TD` or `TB` header to `LR` and reports
       false for any other direction, a missing header, or a malformed one
-- [ ] add the retry decision: given the first render and its collision count, return the LR
+- [x] add the retry decision: given the first render and its collision count, return the LR
       render only when it succeeds, is non-blank, and flags strictly fewer collisions
-- [ ] wire it into `renderMermaidSource` after the existing `RenderDiagram` call, leaving the
+- [x] wire it into `renderMermaidSource` after the existing `RenderDiagram` call, leaving the
       transpile and subgraph-split paths above it untouched
-- [ ] update `renderMermaidSource`'s doc comment to record the retry and its gate
-- [ ] write a test that a fence with no collisions renders byte-identically to a direct
+- [x] update `renderMermaidSource`'s doc comment to record the retry and its gate
+- [x] write a test that a fence with no collisions renders byte-identically to a direct
       `RenderDiagram` call, pinning that the common path is unchanged
-- [ ] write tests for each gate condition failing: an `LR` fence, a fence with no header, a
+- [x] write tests for each gate condition failing: an `LR` fence, a fence with no header, a
       flipped render that is worse, a flipped render that errors
-- [ ] run `go test ./app/ui -run 'TestCollision|TestRenderMermaidSource'` - must pass before
+- [x] run `go test ./app/ui -run 'TestCollision|TestRenderMermaidSource'` - must pass before
       task 6
 
 ### Task 6: Add the real-world fixtures end to end

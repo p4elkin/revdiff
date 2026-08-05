@@ -169,6 +169,91 @@ func mermaidCollisionCount(source, art string) int {
 
 // mermaidRowCollisions counts collisions on a single row of art. patterns must
 // already be ordered longest label first.
+// mermaidHeaderDirectionPattern matches a flowchart/graph header's direction
+// keyword on its own line, capturing the text before and after it separately
+// so mermaidFlipDirectionToLR can swap only the keyword and leave everything
+// else on the line — including a trailing title or accessibility text —
+// untouched.
+var mermaidHeaderDirectionPattern = regexp.MustCompile(`^(\s*(?:flowchart|graph)\s+)(TD|TB|BT|RL|LR)\b(.*)$`)
+
+// mermaidFlipDirectionToLR rewrites a flowchart or graph header's direction
+// keyword to LR and reports true, or reports false and an unusable source
+// when the flip cannot be done safely:
+//
+//   - the diagram's header line (the first line that is not blank and not a
+//     `%%` comment, matching how mermaidDiagramKind finds it) does not match
+//     `flowchart DIRECTION` / `graph DIRECTION` at all — a missing or
+//     malformed header
+//   - the direction present is not TD or TB — LR is already the flip
+//     target, RL and BT are not what the retry is for, and flipping either
+//     could change the diagram in ways beyond fixing a collision
+//
+// This is the only lever renderMermaidSource's retry pulls — see the plan's
+// "Why the flip is to LR and not something cleverer" for why padding and
+// reordering were tried first and rejected.
+func mermaidFlipDirectionToLR(source string) (string, bool) {
+	lines := strings.Split(source, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "%%") {
+			continue
+		}
+		m := mermaidHeaderDirectionPattern.FindStringSubmatch(line)
+		if m == nil {
+			return "", false
+		}
+		direction := m[2]
+		if direction != "TD" && direction != "TB" {
+			return "", false
+		}
+		flipped := make([]string, len(lines))
+		copy(flipped, lines)
+		flipped[i] = m[1] + "LR" + m[3]
+		return strings.Join(flipped, "\n"), true
+	}
+	return "", false
+}
+
+// mermaidRetryLRIfColliding decides whether a second, LR-flipped render
+// should replace the first, and performs that decision. render is the
+// second render call, injected so the decision is testable without the
+// real vendored renderer — production passes mermaidcmd.RenderDiagram.
+//
+// The flip is kept only when ALL of these hold, checked in the order that
+// makes each one a cheap short-circuit before the next:
+//
+//  1. the first render (toRender/rendered) collides at least once — a
+//     fence with no collisions never renders twice
+//  2. toRender has a direction that mermaidFlipDirectionToLR can flip
+//  3. the flipped render succeeds and is non-blank
+//  4. the flipped render collides STRICTLY FEWER times than the first —
+//     a flip that trades one collision for another is not an improvement
+//
+// Any failure of the above returns rendered unchanged, so every failure mode
+// degrades to today's output.
+func mermaidRetryLRIfColliding(toRender, rendered string, render func(string) (string, error)) string {
+	firstCount := mermaidCollisionCount(toRender, rendered)
+	if firstCount == 0 {
+		return rendered
+	}
+
+	flippedSource, ok := mermaidFlipDirectionToLR(toRender)
+	if !ok {
+		return rendered
+	}
+
+	flippedRender, err := render(flippedSource)
+	if err != nil || strings.TrimSpace(flippedRender) == "" {
+		return rendered
+	}
+
+	flippedCount := mermaidCollisionCount(flippedSource, flippedRender)
+	if flippedCount >= firstCount {
+		return rendered
+	}
+	return flippedRender
+}
+
 func mermaidRowCollisions(row string, patterns []*regexp.Regexp) int {
 	runes := []rune(row)
 	if len(runes) == 0 {

@@ -2355,6 +2355,17 @@ func transpileMermaid(source string, paneWidth int) (string, bool) {
 // fence, so it always sees normalized statements. Both halves decline by
 // returning ok == false rather than an error, and either declining lands on
 // the single whole-source render below, unchanged.
+//
+// After that single whole-source render, mermaidRetryLRIfColliding (see
+// mdpreview_collision.go) gets one chance to replace it: if the render put
+// two distinct edge labels on the same row, it re-renders toRender with its
+// direction flipped to TD/TB -> LR and keeps that second render only when it
+// collides strictly less. A fence that renders cleanly the first time, or
+// whose header cannot be flipped, or whose flipped render is no better,
+// reaches its return byte-identical to before the retry existed. The
+// subgraph-stacked path above returns early and is never retried — each
+// stacked block is its own small render, not the row-sharing shape the
+// retry targets.
 func renderMermaidSource(source string, paneWidth int) (string, error) {
 	toRender := source
 	if transpiled, ok := transpileMermaid(source, paneWidth); ok {
@@ -2371,5 +2382,8 @@ func renderMermaidSource(source string, paneWidth int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("render mermaid diagram: %w", err)
 	}
+	rendered = mermaidRetryLRIfColliding(toRender, rendered, func(s string) (string, error) {
+		return mermaidcmd.RenderDiagram(s, nil)
+	})
 	return rendered, nil
 }
