@@ -8,7 +8,7 @@ import (
 // This file holds the shared no-break-space substitution used by every
 // mermaid edge-label call site: mermaidEdgeLabel in mdpreview_transpile.go
 // (the transpiled classDiagram/stateDiagram-v2 path) and
-// unquoteFlowchartEdgeLabel in mdpreview_flowchart.go (the plain flowchart
+// normalizeFlowchartEdgeLabel in mdpreview_flowchart.go (the plain flowchart
 // path). Like mdpreview.go, mdpreview_transpile.go, mdpreview_flowchart.go
 // and mdpreview_subgraph.go it is patch-owned and does not exist upstream —
 // see mdpreview.go's own doc comment for why new logic goes in new files
@@ -51,7 +51,7 @@ var mermaidNBSPRun = regexp.MustCompile(mermaidNBSP + "{2,}")
 // then collapses any run of two or more no-break spaces this created
 // (including a run seeded by a no-break space already present in s) down to
 // one. See the file doc comment above for why both steps are needed. Both
-// mermaidEdgeLabel and unquoteFlowchartEdgeLabel call this as their sole
+// mermaidEdgeLabel and normalizeFlowchartEdgeLabel call this as their sole
 // space-handling step.
 func mermaidNBSPSubstitute(s string) string {
 	s = strings.ReplaceAll(s, " ", mermaidNBSP)

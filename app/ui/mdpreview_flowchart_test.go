@@ -133,18 +133,29 @@ func TestNormalizeFlowchartSource_QuotedEdgeLabel_LosesItsQuotes(t *testing.T) {
 		{
 			"quoted pipe label",
 			`A -->|"listVariants (strict mode)"| B`,
-			"A -->|listVariants (strict mode)| B",
+			"A -->|listVariants" + mermaidNBSP + "(strict" + mermaidNBSP + "mode)| B",
 		},
-		{"bidirectional", `A <-->|"both ways"| B`, "A <-->|both ways| B"},
+		{"bidirectional", `A <-->|"both ways"| B`, "A <-->|both" + mermaidNBSP + "ways| B"},
 		{"link normalized first", `A ==>|"thick"| B`, "A -->|thick| B"},
 		{"space before the label", `A --> |"spaced"| B`, "A --> |spaced| B"},
 		{"two labeled links on one line", `A -->|"one"| B -->|"two"| C`, "A -->|one| B -->|two| C"},
-		// Nothing below may change. The inline `-- label -->` form is unquoted by
-		// flowchartLinkText and must keep behaving as it does; a label carrying
-		// its own quotes is left whole rather than half-eaten; and a node label
-		// is not an edge label, however much punctuation it holds.
-		{"inline labeled form still unquoted", `A -- "with spaces" --> B`, "A -->|with spaces| B"},
-		{"interior quotes only", `A -->|say "hi" now| B`, `A -->|say "hi" now| B`},
+		// The QUOTE handling below may not change: the inline `-- label -->` form
+		// is still unquoted the same way, and a label carrying its own quotes is
+		// still left whole rather than half-eaten. What DOES change is that every
+		// one of these labels now also has its spaces substituted for no-break
+		// spaces (see normalizeFlowchartEdgeLabel) — including the inline form's
+		// label, which the old unquoteFlowchartEdgeLabel left untouched because it
+		// arrived here already unquoted.
+		{
+			"inline labeled form still unquoted",
+			`A -- "with spaces" --> B`,
+			"A -->|with" + mermaidNBSP + "spaces| B",
+		},
+		{
+			"interior quotes only",
+			`A -->|say "hi" now| B`,
+			`A -->|say` + mermaidNBSP + `"hi"` + mermaidNBSP + `now| B`,
+		},
 		{"quoted on both ends, quoted inside", `A -->|"a" and "b"| B`, `A -->|"a" and "b"| B`},
 		{"unquoted label", "A -->|already| B", "A -->|already| B"},
 		{"empty quoted label", `A -->|""| B`, `A -->|""| B`},
@@ -157,6 +168,48 @@ func TestNormalizeFlowchartSource_QuotedEdgeLabel_LosesItsQuotes(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 			assert.Equal(t, got, normalizeFlowchartBody(t, got),
 				"one layer only: a second pass must change nothing")
+		})
+	}
+}
+
+func TestFlowchartEdgeLabel_SpacesBecomeNoBreakSpaces(t *testing.T) {
+	// Both edge-label spellings converge on normalizeFlowchartEdgeLabel by the
+	// time normalizeFlowchartNodes runs (normalizeFlowchartLine normalizes
+	// links before nodes), so a multi-word label written either way must reach
+	// the renderer with no-break spaces instead of the plain spaces
+	// mergeDrawings would let bleed through (see mdpreview_nbsp.go).
+	tests := []struct{ name, input, want string }{
+		{
+			"inline form: A -- read as fallback --> B",
+			"A -- read as fallback --> B",
+			"A -->|read" + mermaidNBSP + "as" + mermaidNBSP + "fallback| B",
+		},
+		{
+			`piped form: A -->|"read as fallback"| B`,
+			`A -->|"read as fallback"| B`,
+			"A -->|read" + mermaidNBSP + "as" + mermaidNBSP + "fallback| B",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeFlowchartBody(t, tc.input))
+		})
+	}
+}
+
+func TestFlowchartEdgeLabel_UnchangedCases(t *testing.T) {
+	// The cases normalizeFlowchartEdgeLabel must hand back exactly as it
+	// received them: no label to touch at all, a label whose own embedded
+	// quote makes unquoting unsafe, and a label with nothing for the
+	// substitution to do.
+	tests := []struct{ name, input string }{
+		{"bare arrow with no label", "A --> B"},
+		{"label with an inner quote", `A -->|"a" and "b"| B`},
+		{"label with no spaces", "A -->|already| B"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.input, normalizeFlowchartBody(t, tc.input))
 		})
 	}
 }
