@@ -116,6 +116,61 @@ Dependencies identified:
 - update plan if implementation deviates from original scope
 - keep plan in sync with actual work done
 
+### Corpus verification result (task 7, run 2026-08-05)
+
+Base `3187fc5` (the tip after task 1, which only added an unused helper) against the finished
+change. 15254 markdown files, 229 distinct mermaid fences, rendered at pane width 120 on both
+builds.
+
+| measure | pre-change | post-change |
+|---|---|---|
+| fences rendered | 229 | 229 |
+| panics | 0 | 0 |
+| timeouts / hangs | 0 | 0 |
+| blank renders | 0 | 0 |
+| render errors (unsupported diagram types) | 23 | 23 |
+| fences with a colliding label | 7 | 0 |
+
+Art differences, all attributed:
+
+| cause | fences |
+|---|---|
+| art byte-identical | 139 |
+| the normalized source changed (space or `·` became a no-break space) | 84 |
+| the LR retry kept a different render | 6 |
+| **unexplained** | **0** |
+
+How the attribution was made airtight rather than eyeballed. `git diff 3187fc5 HEAD -- vendor/`
+is empty, so the renderer is the same code on both sides. Both builds then dumped the
+*normalized* source — the string `renderMermaidSource` actually hands to that renderer — and
+those two dumps were compared rune by rune. Every differing rune is a plain space or a `·` on
+the old side and a no-break space on the new side, with one documented exception below. So a
+fence whose normalized source is unchanged and which is not in the retry's own list must render
+identically, and all 139 do.
+
+The one exception is the fence whose label is written `open · C1`, with a middle dot the author
+typed. The old substitution turned its two spaces into middle dots as well, and the run-collapse
+rule then squashed all three into one, so the label reached the art as `open·C1` and the author's
+own dot was lost. It now reads `open · C1` with no-break spaces around the real dot. This is the
+behaviour change task 2 recorded, and it is an improvement, not a regression.
+
+Two counts came out higher than the pre-implementation estimate of "about 40, and 3". Both
+gaps are in the estimate, not in the change:
+
+- **84 rather than 40.** The estimate counted fences with a multi-word label in the `|label|`
+  spelling *in the raw fence source*. Re-running exactly that count gives 40, so the estimate is
+  reproduced — but it misses two whole spellings that the fix also reaches: the inline
+  `A -- label --> B` form, which only becomes piped during normalization, and class and state
+  diagram labels, which are not piped in the source at all. Across the corpus the substitution
+  replaced 517 plain spaces and 146 middle dots.
+- **6 rather than 3.** The estimate flipped the direction on the raw source, so a class or state
+  diagram was never a candidate: its header reads `stateDiagram-v2`, not `flowchart TD`. It also
+  read labels from the raw source, so a flowchart written entirely in the inline spelling looked
+  like it had fewer than two labels. Of the 6, four are fences the estimate could not have seen
+  (two transpiled state diagrams, two inline-spelling flowcharts) and two are fences it did see.
+  The estimate's third fence needs no retry any more: the no-break space fix alone resolved its
+  collision, so the first render no longer collides and the retry never fires.
+
 ## Solution Overview
 
 Both fixes sit on the existing render path and both degrade to today's output when anything
@@ -378,18 +433,18 @@ Any failure returns the first render. A fence with no collisions never renders t
 
 **Model:** opus
 
-- [ ] port the corpus harness from the scratchpad into a test that is skipped when its
+- [x] port the corpus harness from the scratchpad into a test that is skipped when its
       environment variable is unset, so `make test` is unaffected
-- [ ] render all 229 unique corpus fences on the pre-change build (`git stash` or a worktree at
+- [x] render all 229 unique corpus fences on the pre-change build (`git stash` or a worktree at
       the parent commit) and capture the output
-- [ ] render the same fences on the current build and diff the two sets
-- [ ] account for **every** difference: expected is about 40 fences changed by the space fix and
+- [x] render the same fences on the current build and diff the two sets
+- [x] account for **every** difference: expected is about 40 fences changed by the space fix and
       3 by the LR retry, and **0 unexplained**
-- [ ] confirm 0 panics and 0 hangs on both builds
-- [ ] ⚠️ if any difference cannot be explained, stop and fix the cause — do not proceed with an
+- [x] confirm 0 panics and 0 hangs on both builds
+- [x] ⚠️ if any difference cannot be explained, stop and fix the cause — do not proceed with an
       unexplained diff
-- [ ] record the final counts in this plan file under Progress Tracking
-- [ ] run `go test ./app/ui` - must pass before task 8
+- [x] record the final counts in this plan file under Progress Tracking
+- [x] run `go test ./app/ui` - must pass before task 8
 
 ### Task 8: Update PATCH.md and the manual test plan
 
