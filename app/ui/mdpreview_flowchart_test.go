@@ -85,7 +85,7 @@ func TestNormalizeFlowchartSource_LinkVariants_BecomePlainArrow(t *testing.T) {
 		{"labeled dotted", "A -. maybe .-> B", "A -->|maybe| B"},
 		{"labeled thick", "A == always ==> B", "A -->|always| B"},
 		{"labeled normal", "A -- plain --> B", "A -->|plain| B"},
-		{"labeled quoted", `A -- "with spaces" --> B`, "A -->|with spaces| B"},
+		{"labeled quoted", `A -- "with spaces" --> B`, "A -->|with" + mermaidNBSP + "spaces| B"},
 		{"pipe label untouched", "A -->|already| B", "A -->|already| B"},
 		{"pipe label on an undirected link", "A ---|late| B", "A -->|late| B"},
 		{"bidirectional kept", "A <--> B", "A <--> B"},
@@ -226,7 +226,7 @@ func TestNormalizeFlowchartSource_WellFormedConstructs_NotDisturbed(t *testing.T
 		{"full-line comment", "%% A --- B{not real syntax}"},
 		{"ampersand fan-out", "A --> B & C"},
 		{"node id with a dash", "my-node --> other-node"},
-		{"already normalized edge label", "A -->|does a thing| B[target]"},
+		{"already normalized edge label", "A -->|does" + mermaidNBSP + "a" + mermaidNBSP + "thing| B[target]"},
 		{"quoted label with a colon", `A --> B["GET /api/x: y"]`},
 		// Node ids that merely BEGIN with a dropped directive's keyword, and
 		// nodes named exactly after one. None of these is a directive, so none
@@ -242,7 +242,7 @@ func TestNormalizeFlowchartSource_WellFormedConstructs_NotDisturbed(t *testing.T
 		{"node named exactly click on the right of an arrow", "A --> click"},
 		{"directive keyword inside a node label", "A --> B[style guide]"},
 		{"directive keyword inside a quoted node label", `A --> B["classDef hot fill:#f9f"]`},
-		{"directive keyword inside an edge label", "A -->|classDef hot| B"},
+		{"directive keyword inside an edge label", "A -->|classDef" + mermaidNBSP + "hot| B"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1532,7 +1532,8 @@ func TestTranspileMermaid_Flowchart_WellFormedSourceUnchanged(t *testing.T) {
 	// A fence already written in the subset the vendored parser reads must come
 	// back byte-identical, so the pass cannot disturb the ~40% of corpus fences
 	// that render correctly today.
-	const src = "flowchart LR\n    subgraph S [Group]\n      A --> B[label<br/>more]\n    end\n    B -->|does a thing| C\n"
+	const src = "flowchart LR\n    subgraph S [Group]\n      A --> B[label<br/>more]\n    end\n    B -->|does" +
+		mermaidNBSP + "a" + mermaidNBSP + "thing| C\n"
 	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
 	require.True(t, ok)
 	assert.Equal(t, src, got)
