@@ -126,15 +126,45 @@ func TestCollisionCount_TableDriven(t *testing.T) {
 			want:   0,
 		},
 		{
-			name:   "gap of exactly the threshold is not a collision",
-			source: "flowchart TD\n  A -->|aa| B\n  A -->|bb| C\n",
-			art:    "aa" + strings.Repeat("─", mermaidCollisionGap) + "bb",
+			name: "two long labels the gap cap apart are not a collision",
+			// Both labels are longer than the cap, so the cap is the
+			// threshold and a gap that reaches it is enough separation.
+			source: "flowchart TD\n  A -->|collection| B\n  A -->|single composite| C\n",
+			art:    "collection" + strings.Repeat("─", mermaidCollisionGap) + "single composite",
 			want:   0,
 		},
 		{
-			name:   "gap one below the threshold is a collision",
-			source: "flowchart TD\n  A -->|aa| B\n  A -->|bb| C\n",
-			art:    "aa" + strings.Repeat("─", mermaidCollisionGap-1) + "bb",
+			name:   "two long labels one column inside the gap cap collide",
+			source: "flowchart TD\n  A -->|collection| B\n  A -->|single composite| C\n",
+			art:    "collection" + strings.Repeat("─", mermaidCollisionGap-1) + "single composite",
+			want:   1,
+		},
+		{
+			name: "two short labels further apart than their own length are not a collision",
+			// The shape that made a readable 80-column diagram flip to a
+			// 273-column one: `no` and `yes` five columns apart on a decision
+			// node's output row read as two plainly separate words. The gap is
+			// under the cap, so only the length half of the threshold rejects
+			// this.
+			source: "flowchart TD\n  A -->|no| B\n  A -->|yes| C\n",
+			art:    "│◄─no─────yes──────────┘",
+			want:   0,
+		},
+		{
+			name:   "two short labels flush together are still a collision",
+			source: "flowchart TD\n  A -->|no| B\n  A -->|yes| C\n",
+			art:    "│◄──noyes──────────┘",
+			want:   1,
+		},
+		{
+			name: "one label painted over another counts even though neither survives",
+			// The overwriting shape: `collection` drawn on top of `single
+			// composite` leaves `sin` and `ite` around it, and `single
+			// composite` no longer exists as a word anywhere on the row. The
+			// crowded-labels rule cannot see this — there is only one match on
+			// the row, and its neighbors are letters.
+			source: "flowchart TD\n  A -->|collection| B\n  A -->|single composite| C\n",
+			art:    "│ Shape ├◄───sincollectionite───────┤",
 			want:   1,
 		},
 		{
@@ -340,7 +370,7 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 			called = true
 			return "", nil
 		}
-		got := mermaidRetryLRIfColliding(collidingSource, nonCollidingArt, render)
+		got := mermaidRetryLRIfColliding(collidingSource, nonCollidingArt, mermaidUnconstrainedWidth, render)
 		if got != nonCollidingArt {
 			t.Fatalf("got %q, want first render unchanged", got)
 		}
@@ -355,7 +385,7 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 			called = true
 			return nonCollidingArt, nil
 		}
-		got := mermaidRetryLRIfColliding("flowchart LR\n  A -->|collection| B\n  A -->|single composite| C\n", collidingArt, render)
+		got := mermaidRetryLRIfColliding("flowchart LR\n  A -->|collection| B\n  A -->|single composite| C\n", collidingArt, mermaidUnconstrainedWidth, render)
 		if got != collidingArt {
 			t.Fatalf("got %q, want first render unchanged", got)
 		}
@@ -369,7 +399,7 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 			t.Fatal("second render should not be called with no header to flip")
 			return "", nil
 		}
-		got := mermaidRetryLRIfColliding("  A -->|collection| B\n  A -->|single composite| C\n", collidingArt, render)
+		got := mermaidRetryLRIfColliding("  A -->|collection| B\n  A -->|single composite| C\n", collidingArt, mermaidUnconstrainedWidth, render)
 		if got != collidingArt {
 			t.Fatalf("got %q, want first render unchanged", got)
 		}
@@ -379,7 +409,7 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 		render := func(string) (string, error) {
 			return "", errors.New("boom")
 		}
-		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, render)
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, mermaidUnconstrainedWidth, render)
 		if got != collidingArt {
 			t.Fatalf("got %q, want first render unchanged on flipped-render error", got)
 		}
@@ -389,7 +419,7 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 		render := func(string) (string, error) {
 			return "   \n  ", nil
 		}
-		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, render)
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, mermaidUnconstrainedWidth, render)
 		if got != collidingArt {
 			t.Fatalf("got %q, want first render unchanged on blank flipped render", got)
 		}
@@ -399,7 +429,7 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 		render := func(string) (string, error) {
 			return collidingArt, nil
 		}
-		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, render)
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, mermaidUnconstrainedWidth, render)
 		if got != collidingArt {
 			t.Fatalf("got %q, want first render unchanged when flipped render is no better", got)
 		}
@@ -410,7 +440,7 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 		render := func(string) (string, error) {
 			return worseArt, nil
 		}
-		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, render)
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, mermaidUnconstrainedWidth, render)
 		if got != collidingArt {
 			t.Fatalf("got %q, want first render unchanged when flipped render is worse", got)
 		}
@@ -422,12 +452,48 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 			gotSource = s
 			return nonCollidingArt, nil
 		}
-		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, render)
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, mermaidUnconstrainedWidth, render)
 		if got != nonCollidingArt {
 			t.Fatalf("got %q, want the flipped render", got)
 		}
 		if !strings.Contains(gotSource, "flowchart LR") {
 			t.Fatalf("second render was not called with the flipped LR source, got %q", gotSource)
+		}
+	})
+
+	t.Run("a flip that pushes a fitting diagram off the pane keeps the first render", func(t *testing.T) {
+		paneWidth := len([]rune(collidingArt)) + 1 // the first render fits, the flipped one does not
+		if len([]rune(nonCollidingArt)) <= paneWidth {
+			t.Fatalf("test setup: flipped art must be wider than the pane, got %d for pane %d", len([]rune(nonCollidingArt)), paneWidth)
+		}
+		render := func(string) (string, error) { return nonCollidingArt, nil }
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, paneWidth, render)
+		if got != collidingArt {
+			t.Fatalf("got %q, want first render unchanged when the flip no longer fits the pane", got)
+		}
+	})
+
+	t.Run("a flip is allowed when the first render already overflows the pane", func(t *testing.T) {
+		render := func(string) (string, error) { return nonCollidingArt, nil }
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, len([]rune(collidingArt))-1, render)
+		if got != nonCollidingArt {
+			t.Fatalf("got %q, want the flipped render — the first render did not fit either", got)
+		}
+	})
+
+	t.Run("a flip that still fits the pane is kept", func(t *testing.T) {
+		render := func(string) (string, error) { return nonCollidingArt, nil }
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, len([]rune(nonCollidingArt)), render)
+		if got != nonCollidingArt {
+			t.Fatalf("got %q, want the flipped render — it fits the pane", got)
+		}
+	})
+
+	t.Run("a panic in the flipped render keeps the first render", func(t *testing.T) {
+		render := func(string) (string, error) { panic("vendored renderer exploded") }
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, mermaidUnconstrainedWidth, render)
+		if got != collidingArt {
+			t.Fatalf("got %q, want first render unchanged after a panic in the flipped render", got)
 		}
 	})
 }

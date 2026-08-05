@@ -208,7 +208,12 @@ flowchart TD
 - [ ] `single composite` and `collection` each read as one clean label, not butted together
 - [ ] the diagram renders wider than a narrow `single composite`/`collection` collision would —
       that is the LR retry trading a narrower, broken picture for a wider, readable one, not a
-      regression
+      regression. That fence's top-down render is 207 columns, so it needed panning before the
+      flip too
+- [ ] a diagram whose top-down render already FITS the pane is never flipped, even when two
+      short labels sit close on one row. The Solution Overview diagram in
+      `docs/plans/20260805-mermaid-edge-label-rendering.md` is the case to check: it must stay
+      on one screen rather than turning into a wide render you have to pan
 
 ## 8. What is still not fixed
 

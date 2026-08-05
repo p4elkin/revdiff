@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 // This file holds the edge-label collision detector for rendered mermaid art.
@@ -19,12 +21,24 @@ import (
 // drawTextOnLine in vendor/github.com/AlexanderGrooff/mermaid-ascii/cmd/arrow.go
 // places each edge label at the midpoint of its own arrow line with no check
 // for cells another label already occupies. A decision node with three or more
-// labeled out-edges therefore puts two labels on the same output row, butted up
-// against each other, and the reader cannot tell which arrow either belongs to:
+// labeled out-edges therefore puts two labels on the same output row, and there
+// are two shapes to that, both of which this file counts.
+//
+// The crowded shape — both labels survive, crammed into one corridor, and the
+// reader cannot tell which arrow either belongs to:
 //
 //	│   What kind of property is it?   ├◄───collection────single composite──────┤
 //
-// `collection` and `single composite` there belong to two different arrows.
+// The overwriting shape — the layers land on the same columns, so mergeDrawings
+// paints one label over the other and NEITHER survives as a word:
+//
+//	│   What kind of property is it?   ├◄───sincollectionite───────┤
+//
+// That second row is `collection` painted over `single composite`; `sin` and
+// `ite` are all that is left of the label underneath. It is the worse of the
+// two — the crowded shape is at least readable if you know what you are looking
+// at — so a detector that only knew the crowded shape was blind to the case
+// this whole retry exists for.
 //
 // The complete fix is in drawTextOnLine itself — reserve occupied cells and
 // nudge the label along its line — which would mean forking mermaid-ascii and
@@ -40,18 +54,29 @@ import (
 // A flipped render that trades one collision for another is not an improvement
 // and must lose the comparison.
 
-// mermaidCollisionGap is how many columns must separate two DISTINCT edge
-// labels on one row before they are read as belonging to different parts of
-// the picture rather than as two labels crammed into one corridor.
+// mermaidCollisionGap caps how many columns two DISTINCT edge labels on one
+// row may be apart and still read as crammed into one arrow corridor. It is a
+// CAP, not the threshold itself: the threshold for a given pair is the
+// smaller of this and either label's own length (see mermaidCollisionLimit).
 //
-// The number separates the two real cases seen in rendered art. Two labels
-// that collided on one arrow corridor sit flush against each other or with a
-// connector rune or two between them — a gap of 0 to about 4. Two labels that
-// merely happen to share a row in different regions of a wide diagram are
-// separated by a node box, which is never narrower than its own padding plus
-// borders. On the measured corpus 8 flags every real collision with no false
-// positive, and the LR render of each flagged fence comes back at zero.
+// Length has to enter the threshold because "too close to tell apart" is
+// relative to how big the words are. `collection` and `single composite` four
+// columns apart read as one run of text — the gap is far smaller than either
+// word. `no` and `yes` five columns apart read as two plainly separate words —
+// the gap is larger than both. A fixed threshold cannot separate those two,
+// and a fixed 8 called the second one a collision, which sent a perfectly
+// readable 80-column diagram off to a 273-column LR retry.
+//
+// The cap still matters on top of that: two long labels in different regions
+// of a wide diagram may share a row with a node box between them, and without
+// the cap their own length would make even that gap "close".
 const mermaidCollisionGap = 8
+
+// mermaidLabelFragmentMinRunes is the shortest run of leftover letters that is
+// allowed to count as the wreckage of an overwritten label (see
+// mermaidRunIsLabelFragment). One or two letters match inside almost any word
+// by chance, so a shorter run is treated as ordinary node text.
+const mermaidLabelFragmentMinRunes = 3
 
 // mermaidPipedEdgeLabel captures the text inside an `-->|label|` edge-label
 // suffix, with the surrounding quotes of a `-->|"label"|` optional.
@@ -127,6 +152,15 @@ func mermaidLabelPattern(label string) (*regexp.Regexp, error) {
 	return pattern, nil
 }
 
+// mermaidLabelMatcher pairs one edge label with the pattern that finds it in
+// rendered art. They travel together because the overwrite rule needs the
+// label TEXT of the other labels, not only their patterns — see
+// mermaidRunIsLabelFragment.
+type mermaidLabelMatcher struct {
+	label   string
+	pattern *regexp.Regexp
+}
+
 // mermaidLabelHit is one label's placement on one row of rendered art, in rune
 // columns. index identifies WHICH label matched, so two hits of the same label
 // on one row can be told apart from two different labels sitting side by side.
@@ -136,32 +170,33 @@ type mermaidLabelHit struct {
 	index int
 }
 
-// mermaidCollisionCount reports how many times two distinct edge labels from
-// source land within mermaidCollisionGap columns of each other on one row of
-// art.
+// mermaidCollisionCount reports how many edge labels the art places where the
+// reader cannot tell which arrow they belong to. Both shapes described in the
+// file doc comment count: two surviving labels crammed into one corridor, and
+// one label painted over another so only wreckage is left.
 //
-// Zero means the art places every label where the reader can tell which arrow
-// it belongs to — or that there was nothing to collide: fewer than two distinct
-// labels, or empty art. A fence that counts zero is left exactly as rendered.
+// Zero means every label is readable — or that there was nothing to collide:
+// fewer than two distinct labels, or empty art. A fence that counts zero is
+// left exactly as rendered.
 //
 // Two hits of the SAME label on one row are not a collision. A label repeated
 // on two arrows is drawn twice on purpose, and reading either occurrence gives
 // the reader the right word; what makes a collision unreadable is two different
-// words butted together with no way to split them.
+// words with no way to split them.
 //
 // The scan is per row, and within a row it is longest label first with the
 // columns of each accepted hit marked as consumed (see mermaidEdgeLabels for
-// why that ordering is load-bearing). A match that overlaps a claimed span,
-// or that butts against surrounding node text, is not a hit at all — see
-// mermaidRowCollisions. Hits are then sorted by column and each adjacent pair
-// tested.
+// why that ordering is load-bearing). A match that overlaps a claimed span, or
+// that butts against surrounding node text, is not a hit at all — see
+// mermaidRowCollisions. Surviving hits are then sorted by column and each
+// adjacent pair tested.
 func mermaidCollisionCount(source, art string) int {
 	labels := mermaidEdgeLabels(source)
 	if len(labels) < 2 {
 		return 0
 	}
 
-	patterns := make([]*regexp.Regexp, 0, len(labels))
+	matchers := make([]mermaidLabelMatcher, 0, len(labels))
 	for _, label := range labels {
 		pattern, err := mermaidLabelPattern(label)
 		if err != nil {
@@ -170,17 +205,31 @@ func mermaidCollisionCount(source, art string) int {
 			// keeps a hypothetical bad label from hiding real collisions.
 			continue
 		}
-		patterns = append(patterns, pattern)
+		matchers = append(matchers, mermaidLabelMatcher{label: label, pattern: pattern})
 	}
-	if len(patterns) < 2 {
+	if len(matchers) < 2 {
 		return 0
 	}
 
 	total := 0
 	for row := range strings.SplitSeq(art, "\n") {
-		total += mermaidRowCollisions(row, patterns)
+		total += mermaidRowCollisions(row, matchers)
 	}
 	return total
+}
+
+// mermaidArtWidth is the width of rendered art in display cells: its widest
+// row, with trailing spaces stripped first. The vendored renderer pads every
+// row out to the drawing's full extent, and that padding is not content the
+// reader has to pan to see.
+func mermaidArtWidth(art string) int {
+	widest := 0
+	for row := range strings.SplitSeq(art, "\n") {
+		if n := xansi.StringWidth(strings.TrimRight(row, " ")); n > widest {
+			widest = n
+		}
+	}
+	return widest
 }
 
 // mermaidHeaderDirectionPattern matches a flowchart/graph header's direction
@@ -258,6 +307,8 @@ func mermaidFlipHeaderLine(line string) (string, bool) {
 // should replace the first, and performs that decision. render is the
 // second render call, injected so the decision is testable without the
 // real vendored renderer — production passes mermaidcmd.RenderDiagram.
+// paneWidth is the diff pane's current width, or mermaidUnconstrainedWidth
+// when there is no constraint to respect.
 //
 // The flip is kept only when ALL of these hold, checked in the order that
 // makes each one a cheap short-circuit before the next:
@@ -271,12 +322,26 @@ func mermaidFlipHeaderLine(line string) (string, bool) {
 //  2. the first render (toRender/rendered) collides at least once — a
 //     fence with no collisions never renders twice
 //  3. the flipped render succeeds and is non-blank
-//  4. the flipped render collides STRICTLY FEWER times than the first —
+//  4. the flip does not push a diagram that fitted the pane off the side of
+//     it — see mermaidFlipFitsPane
+//  5. the flipped render collides STRICTLY FEWER times than the first —
 //     a flip that trades one collision for another is not an improvement
 //
 // Any failure of the above returns rendered unchanged, so every failure mode
-// degrades to today's output.
-func mermaidRetryLRIfColliding(toRender, rendered string, render func(string) (string, error)) string {
+// degrades to today's output. A panic inside the injected render is caught
+// here for the same reason: the whole point of the retry is to improve on a
+// render we already have in hand, and letting the panic out would lose it to
+// renderMermaidBlock's outer recover, whose fallback is the fence's verbatim
+// source text. The vendored renderer is known to panic on some sources — see
+// TestNormalizeFlowchartSource_ClassDefWithoutAColon_NoLongerKillsTheFence —
+// and stackFlowchartSubgraphs guards its own extra render the same way.
+func mermaidRetryLRIfColliding(toRender, rendered string, paneWidth int, render func(string) (string, error)) (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = rendered
+		}
+	}()
+
 	flippedSource, ok := mermaidFlipDirectionToLR(toRender)
 	if !ok {
 		return rendered
@@ -292,6 +357,10 @@ func mermaidRetryLRIfColliding(toRender, rendered string, render func(string) (s
 		return rendered
 	}
 
+	if !mermaidFlipFitsPane(rendered, flippedRender, paneWidth) {
+		return rendered
+	}
+
 	flippedCount := mermaidCollisionCount(flippedSource, flippedRender)
 	if flippedCount >= firstCount {
 		return rendered
@@ -299,7 +368,32 @@ func mermaidRetryLRIfColliding(toRender, rendered string, render func(string) (s
 	return flippedRender
 }
 
-// mermaidRowCollisions counts collisions on a single row of art. patterns must
+// mermaidFlipFitsPane reports whether the LR flip is allowed to replace the
+// first render on width grounds. It objects to exactly one trade: a first
+// render that fits the pane being replaced by a flipped render that does not.
+//
+// Flipping to LR makes the art wider, often several times wider — measured on
+// the corpus, one 80-column diagram flipped to 273. When the first render
+// already overflows the pane the reader is panning either way, so a wider
+// flip costs them nothing they were not already paying and the fix is worth
+// it. When the first render fits on one screen, taking that away is a real
+// loss, and it is not worth paying for a collision that is at worst crowded
+// rather than destroyed.
+//
+// No pane width to respect (mermaidUnconstrainedWidth, or any non-positive
+// width) means no width objection — not a pane of width zero that nothing
+// fits.
+func mermaidFlipFitsPane(rendered, flipped string, paneWidth int) bool {
+	if paneWidth <= 0 {
+		return true
+	}
+	if mermaidArtWidth(rendered) > paneWidth {
+		return true
+	}
+	return mermaidArtWidth(flipped) <= paneWidth
+}
+
+// mermaidRowCollisions counts collisions on a single row of art. matchers must
 // already be ordered longest label first.
 //
 // The scan is two passes, and both exist to stop a run of letters that merely
@@ -312,13 +406,14 @@ func mermaidRetryLRIfColliding(toRender, rendered string, render func(string) (s
 //     whose match starts before an already-claimed span and runs into it
 //     would otherwise be taken, reporting one contiguous run of text as two
 //     crammed labels.
-//  2. delimit: a claimed match is then dropped when it butts against a letter
-//     or digit that no claimed match covers. Checking against the claims of
-//     the whole first pass rather than one match at a time is what keeps the
-//     worst collision shape — two labels drawn flush together, each one's
-//     neighbor being the other — while still rejecting `no` inside
-//     `nothing`, whose neighboring `t` belongs to no label at all.
-func mermaidRowCollisions(row string, patterns []*regexp.Regexp) int {
+//  2. classify: a claimed match reads as a word of its own, as the wreckage
+//     of an overwrite, or as a fragment of node text — see
+//     mermaidClassifyHit.
+//
+// The count is then the overwrites found in pass 2 plus, over the surviving
+// hits sorted by column, each adjacent pair of DISTINCT labels closer together
+// than mermaidCollisionLimit allows.
+func mermaidRowCollisions(row string, matchers []mermaidLabelMatcher) int {
 	runes := []rune(row)
 	if len(runes) == 0 {
 		return 0
@@ -341,8 +436,8 @@ func mermaidRowCollisions(row string, patterns []*regexp.Regexp) int {
 
 	claimed := make([]bool, len(runes))
 	var hits []mermaidLabelHit
-	for i, pattern := range patterns {
-		for _, loc := range pattern.FindAllStringIndex(row, -1) {
+	for i, matcher := range matchers {
+		for _, loc := range matcher.pattern.FindAllStringIndex(row, -1) {
 			start, end := byteToRune[loc[0]], byteToRune[loc[1]]
 			if start < 0 || end < 0 || !mermaidSpanFree(claimed, start, end) {
 				continue
@@ -354,28 +449,47 @@ func mermaidRowCollisions(row string, patterns []*regexp.Regexp) int {
 		}
 	}
 
+	count := 0
 	kept := make([]mermaidLabelHit, 0, len(hits))
 	for _, hit := range hits {
-		if mermaidHitDelimited(runes, claimed, hit.start, hit.end) {
+		switch mermaidClassifyHit(runes, claimed, matchers, hit) {
+		case mermaidHitWord:
 			kept = append(kept, hit)
+		case mermaidHitOverwritten:
+			count++
+		case mermaidHitNoise:
 		}
 	}
 	if len(kept) < 2 {
-		return 0
+		return count
 	}
 	sort.SliceStable(kept, func(a, b int) bool { return kept[a].start < kept[b].start })
 
-	count := 0
 	for i := 1; i < len(kept); i++ {
 		prev, cur := kept[i-1], kept[i]
 		if cur.index == prev.index {
 			continue
 		}
-		if cur.start-prev.end < mermaidCollisionGap {
+		if cur.start-prev.end < mermaidCollisionLimit(prev, cur) {
 			count++
 		}
 	}
 	return count
+}
+
+// mermaidCollisionLimit is how few columns apart two surviving labels have to
+// be before they read as one crammed run rather than as two separate words: the
+// smaller of either label's own length and mermaidCollisionGap. See that
+// constant for why length is in the formula at all.
+func mermaidCollisionLimit(prev, cur mermaidLabelHit) int {
+	limit := mermaidCollisionGap
+	if n := prev.end - prev.start; n < limit {
+		limit = n
+	}
+	if n := cur.end - cur.start; n < limit {
+		limit = n
+	}
+	return limit
 }
 
 // mermaidSpanFree reports whether every column of [start, end) is still
@@ -389,19 +503,92 @@ func mermaidSpanFree(claimed []bool, start, end int) bool {
 	return true
 }
 
-// mermaidHitDelimited reports whether a match at [start, end) reads as a word
-// of its own rather than as a fragment of surrounding node text. A letter or
-// digit immediately outside the match disqualifies it, unless that neighbor
-// is covered by some other label's match — see mermaidRowCollisions for why
-// that exception is what still catches two labels drawn flush together.
-func mermaidHitDelimited(runes []rune, claimed []bool, start, end int) bool {
-	if start > 0 && mermaidWordRune(runes[start-1]) && !claimed[start-1] {
+// mermaidHitVerdict is what one claimed match on a row turned out to be.
+type mermaidHitVerdict int
+
+const (
+	// mermaidHitWord is a label drawn as a word of its own: nothing but
+	// connectors, blanks or another label's cells touch it. Only these take
+	// part in the adjacency test.
+	mermaidHitWord mermaidHitVerdict = iota
+	// mermaidHitOverwritten is a label with the leftovers of a DIFFERENT
+	// label stuck to it, which is what one label painted over another looks
+	// like from the outside. A collision in its own right.
+	mermaidHitOverwritten
+	// mermaidHitNoise is a run of node text that happens to spell a label —
+	// `no` inside `nothing`. Not a hit at all.
+	mermaidHitNoise
+)
+
+// mermaidClassifyHit decides which of the three a claimed match is, by looking
+// at the letters immediately outside it that no label claimed:
+//
+//   - nothing outside it (a connector, a blank, the row's end) or only cells
+//     another label's match covers: a word of its own. The second half of that
+//     is what keeps the two-labels-drawn-flush shape, where each label's
+//     neighbor IS the other label.
+//   - leftover letters that spell part of one of the OTHER labels: an
+//     overwrite. `collection` painted over `single composite` leaves
+//     `sincollectionite`, and `sin` and `ite` are pieces of `single composite`
+//     that no match could claim because the label they came from no longer
+//     exists as a word.
+//   - leftover letters belonging to no label: node text, so the match is a
+//     coincidence — the `thing` after `no` in `nothing`.
+func mermaidClassifyHit(runes []rune, claimed []bool, matchers []mermaidLabelMatcher, hit mermaidLabelHit) mermaidHitVerdict {
+	before := mermaidNeighborRun(runes, claimed, hit.start, -1)
+	after := mermaidNeighborRun(runes, claimed, hit.end, 1)
+	if before == "" && after == "" {
+		return mermaidHitWord
+	}
+	if mermaidRunIsLabelFragment(before, matchers, hit.index) || mermaidRunIsLabelFragment(after, matchers, hit.index) {
+		return mermaidHitOverwritten
+	}
+	return mermaidHitNoise
+}
+
+// mermaidNeighborRun returns the unclaimed letters and digits that run away
+// from a match's edge, in reading order. step is -1 for the run ending just
+// before start, +1 for the run beginning at end. An empty result means the
+// match's neighbor on that side is a connector, a blank, the row's end, or a
+// cell some other label's match already claimed.
+func mermaidNeighborRun(runes []rune, claimed []bool, edge, step int) string {
+	first := edge
+	if step < 0 {
+		first = edge - 1
+	}
+	var run []rune
+	for i := first; i >= 0 && i < len(runes); i += step {
+		if !mermaidWordRune(runes[i]) || claimed[i] {
+			break
+		}
+		run = append(run, runes[i])
+	}
+	if step < 0 {
+		for l, r := 0, len(run)-1; l < r; l, r = l+1, r-1 {
+			run[l], run[r] = run[r], run[l]
+		}
+	}
+	return string(run)
+}
+
+// mermaidRunIsLabelFragment reports whether a run of leftover letters is a
+// piece of some label other than the one that just matched — the evidence that
+// the run is the wreckage of an overwritten label rather than ordinary node
+// text. Runs shorter than mermaidLabelFragmentMinRunes never qualify: one or
+// two letters turn up inside almost any word by chance.
+func mermaidRunIsLabelFragment(run string, matchers []mermaidLabelMatcher, self int) bool {
+	if len([]rune(run)) < mermaidLabelFragmentMinRunes {
 		return false
 	}
-	if end < len(runes) && mermaidWordRune(runes[end]) && !claimed[end] {
-		return false
+	for i, matcher := range matchers {
+		if i == self {
+			continue
+		}
+		if strings.Contains(matcher.label, run) {
+			return true
+		}
 	}
-	return true
+	return false
 }
 
 // mermaidWordRune reports whether r can continue a word, which is what makes

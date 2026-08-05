@@ -1945,19 +1945,6 @@ func TestRenderMermaidSource_ManyMemberClass_RendersWithinFortyCells(t *testing.
 	assert.LessOrEqual(t, maxWidth, 40, "a single member-heavy class must stay within 40 cells wide")
 }
 
-// mermaidArtWidth returns the widest rendered line of a box-art render, in
-// display cells — trailing spaces stripped first so padding is not counted as
-// content.
-func mermaidArtWidth(art string) int {
-	widest := 0
-	for l := range strings.SplitSeq(art, "\n") {
-		if n := xansi.StringWidth(strings.TrimRight(l, " ")); n > widest {
-			widest = n
-		}
-	}
-	return widest
-}
-
 // --- honest width behavior on REAL corpus diagrams ---
 //
 // The synthetic fan-in fixtures the cap formula was derived from (see

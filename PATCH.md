@@ -304,10 +304,12 @@ caution, not a safety condition, and it is gone.
     (`mdpreview_nbsp.go`) as its sole space-handling step, after `mermaidSafeText` and before
     the rune/byte cap.
   - `renderMermaidSource` — after the existing `mermaidcmd.RenderDiagram(toRender, nil)` call,
-    the result is passed through `mermaidRetryLRIfColliding(toRender, rendered, func(s string)
-    (string, error) { return mermaidcmd.RenderDiagram(s, nil) })` before the `return rendered,
-    nil`. The transpile and subgraph-split paths above that call are untouched — the retry only
-    ever sees the final whole-source (or per-subgraph) render.
+    the result is passed through `mermaidRetryLRIfColliding(toRender, rendered, paneWidth,
+    func(s string) (string, error) { return mermaidcmd.RenderDiagram(s, nil) })` before the
+    `return rendered, nil`. `paneWidth` is the same value the transpilers already receive, and
+    the retry needs it to refuse a flip that would push a fitting diagram off the pane. The
+    transpile and subgraph-split paths above that call are untouched — the retry only ever sees
+    the final whole-source (or per-subgraph) render.
 - `app/ui/mdpreview_flowchart.go`
   - `unquoteFlowchartEdgeLabel` renamed to `normalizeFlowchartEdgeLabel` and restructured so the
     no-break-space substitution runs on every path that has a label, not only the
@@ -540,36 +542,47 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   transpiled path pays neither of the last two — it already substituted a 2-byte `·`, and
   `mermaidSafeText` had already collapsed its whitespace runs. Measured across the corpus (see
   "Corpus verification result" under Progress Tracking in the plan above): the substitution
-  changed 84 of 229 fences, replacing 517 plain spaces and 146 middle dots.
-- **A decision node with three or more labeled out-edges can still put two labels too close
-  together to tell apart, when the diagram's direction cannot be flipped or the flip doesn't
-  help.** The complete fix is in the vendored `drawTextOnLine` (reserve occupied cells, nudge
-  the label along its line), which would mean forking `mermaid-ascii`. Instead,
-  `renderMermaidSource` renders once, counts collisions with `mermaidCollisionCount`
-  (`mdpreview_collision.go`), and keeps a second render with the direction flipped to `LR` only
-  when ALL of: the source has a header `mermaidFlipDirectionToLR` accepts — `TD`, `TB`, or a
-  bare `flowchart`/`graph` with no direction at all, which the renderer lays out top-down and
-  which the flip fixes by inserting the keyword (`RL`/`BT`/`LR` are left alone, and so is a
-  missing or malformed header); the first render collides at least once; the flipped render
-  succeeds and is non-blank; the flipped render collides STRICTLY FEWER times than the first.
-  The header is tested before the collision count, so the label scan never runs on a source
-  whose `|...|` is not an edge label at all. Any gate failure keeps the first render, so a fence
-  with no collisions never renders twice and every failure path degrades to today's output.
-  Flipping to LR makes the art wider — the repo's own `collision-three-branches.mmd` fixture
-  goes from 207 to 281 columns — which is the accepted trade-off, since preview mode already has
-  horizontal panning while a collided label is unreadable at any width. Measured across the
-  corpus: 7 fences had a colliding label before this change, 0 after; the retry fired and was
-  kept on 6 of the corpus's 229 fences. ⚠️ Those two counts were measured with the first version
-  of the detector, before the overlap and node-text rules above were added; both can only have
-  gone DOWN since — a stricter detector flags fewer fences and therefore retries fewer — so read
-  them as an upper bound rather than a current measurement, and re-run the corpus harness before
-  quoting either number again. A fence already written `LR` that still collides is not
-  helped — there is no further direction to try. The cost of a fence that DOES collide is two
-  full renders every time it is drawn, and preview has no render cache by design (see
-  `renderMarkdownPreview`'s doc comment), so a pan keypress across such a document pays both. The
-  detector is deliberately strict about what counts as a label hit — a match is dropped when it
-  overlaps a longer label's span or butts against surrounding node text — precisely so a fence
-  with no real collision never enters the retry.
+  changed the rendered art of 83 of 231 fences.
+- **A decision node with three or more labeled out-edges can still put two labels where the
+  reader cannot tell them apart, when the diagram's direction cannot be flipped, the flip
+  doesn't help, or the flip would push a diagram that fitted the pane off the side of it.** The
+  complete fix is in the vendored `drawTextOnLine` (reserve occupied cells, nudge the label
+  along its line), which would mean forking `mermaid-ascii`. Instead, `renderMermaidSource`
+  renders once, counts collisions with `mermaidCollisionCount` (`mdpreview_collision.go`), and
+  keeps a second render with the direction flipped to `LR` only when ALL of: the source has a
+  header `mermaidFlipDirectionToLR` accepts — `TD`, `TB`, or a bare `flowchart`/`graph` with no
+  direction at all, which the renderer lays out top-down and which the flip fixes by inserting
+  the keyword (`RL`/`BT`/`LR` are left alone, and so is a missing or malformed header); the
+  first render collides at least once; the flipped render succeeds and is non-blank; the flip
+  does not take a diagram that fitted `paneWidth` and make it not fit (`mermaidFlipFitsPane`);
+  the flipped render collides STRICTLY FEWER times than the first. The header is tested before
+  the collision count, so the label scan never runs on a source whose `|...|` is not an edge
+  label at all. Any gate failure keeps the first render, so a fence with no collisions never
+  renders twice and every failure path degrades to today's output — including a panic in the
+  second render, which `mermaidRetryLRIfColliding` catches itself rather than letting it reach
+  `renderMermaidBlock`'s outer recover, whose fallback is the fence's raw source text.
+  **The detector counts two collision shapes**, and needs both: two surviving labels crowded
+  into one corridor, and one label painted over another so neither survives as a word
+  (`collection` over `single composite` leaves `sincollectionite`). The crowded shape is flagged
+  when two distinct labels on one row are closer than the smaller of either label's own length
+  and 8 columns — a label's own length is in the threshold because `no` and `yes` five columns
+  apart read as separate words while `collection` and `single composite` four columns apart do
+  not. The overwriting shape is flagged when a matched label has leftover letters against it
+  that spell part of a different label. A match is otherwise dropped when it overlaps a longer
+  label's span or butts against ordinary node text, so a fence with no real collision never
+  enters the retry.
+  **Measured across the corpus** (15254 markdown files, 231 distinct fences, pane width 120,
+  base `3187fc5` against the finished change, same detector run over both builds' dumps): 15
+  fences had a colliding label before this change, 6 after; the retry fires and is kept on 9.
+  Of the 6 that still collide, 4 are declined by the width guard (first renders of 103, 100,
+  115 and 59 columns, all fitting the pane, against flips of 150, 121, 328 and 170) and 2 take
+  the subgraph-stacked path, which returns before the retry. Widths on the 9 kept flips run
+  137 → 79, 135 → 111, 121 → 112, 155 → 159, 57 → 86, 151 → 260, 148 → 279, 207 → 281 (the
+  repo's own `collision-three-branches.mmd` fixture) and 136 → 286. A fence already written `LR`
+  that still collides is not helped — there is no further direction to try. The cost of a fence
+  that DOES collide is two full renders every time it is drawn, and preview has no render cache
+  by design (see `renderMarkdownPreview`'s doc comment), so a pan keypress across such a
+  document pays both.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
 - **You must leave preview before changing file.** Preview now works in a multi-file review, but no

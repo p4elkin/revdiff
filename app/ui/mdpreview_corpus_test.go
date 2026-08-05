@@ -60,15 +60,18 @@ import (
 // untouched. That is the check that turns "we looked at the diff" into an
 // argument.
 //
-// Measured on 2026-08-05 against 15254 markdown files (229 distinct fences),
-// base 3187fc5 vs the finished change:
+// Measured on 2026-08-05 against 15254 markdown files (231 distinct fences),
+// base 3187fc5 vs the finished change, after the review fixes to the detector
+// and the retry's width gate:
 //
-//	229 fences, identical art 139, changed by the substitution 84,
-//	changed by the LR retry 6, unexplained 0
+//	231 fences, identical art 139, changed by the substitution 83,
+//	changed by the LR retry 9, unexplained 0
 //	0 panics, 0 timeouts, 0 blank renders, 23 unsupported-diagram-type
 //	errors — all four identical on both builds
-//	collisions (production detector, same detector both sides):
-//	7 fences before, 0 after, none made worse
+//	collisions (production detector, same detector run over both builds'
+//	dumps): 15 fences before, 6 after, none made worse. Of the 6 left, 4
+//	are declined by the width guard and 2 take the subgraph-stacked path,
+//	which is never retried
 const (
 	corpusListEnv = "REVDIFF_MERMAID_CORPUS"
 	corpusDumpEnv = "REVDIFF_MERMAID_CORPUS_DUMP"

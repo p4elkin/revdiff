@@ -116,29 +116,73 @@ Dependencies identified:
 - update plan if implementation deviates from original scope
 - keep plan in sync with actual work done
 
-### Corpus verification result (task 7, run 2026-08-05)
+### Corpus verification result (task 7, re-run 2026-08-05 after the review fixes)
 
 Base `3187fc5` (the tip after task 1, which only added an unused helper) against the finished
-change. 15254 markdown files, 229 distinct mermaid fences, rendered at pane width 120 on both
-builds.
+change **including the review fixes to the detector and the retry gate**. 15254 markdown files,
+231 distinct mermaid fences, rendered at pane width 120 on both builds. The fence count is 231
+rather than the 229 of the first run because the corpus now also contains this repo's own new
+fixture and plan documents.
+
+Every number here was measured after the review fixes landed. The first run's numbers are gone
+rather than annotated: they were taken with the first version of the detector, and that version
+both over-counted (readable adjacency) and under-counted (the overwriting shape), so they cannot
+be repaired by reasoning about direction.
 
 | measure | pre-change | post-change |
 |---|---|---|
-| fences rendered | 229 | 229 |
+| fences rendered | 231 | 231 |
 | panics | 0 | 0 |
 | timeouts / hangs | 0 | 0 |
 | blank renders | 0 | 0 |
 | render errors (unsupported diagram types) | 23 | 23 |
-| fences with a colliding label | 7 | 0 |
+| fences with a colliding label | 15 | 6 |
+
+Both collision counts are measured with the SAME (current) detector, run over the dumped
+normalized source and art of each build, so the difference is the change and not the detector.
 
 Art differences, all attributed:
 
 | cause | fences |
 |---|---|
 | art byte-identical | 139 |
-| the normalized source changed (space or `·` became a no-break space) | 84 |
-| the LR retry kept a different render | 6 |
+| the normalized source changed (space or `·` became a no-break space) | 83 |
+| the LR retry kept a different render | 9 |
 | **unexplained** | **0** |
+
+The retry fires and is kept on 9 fences. Their widths in columns, first render → flipped render:
+
+| first | flipped |
+|---|---|
+| 137 | 79 |
+| 135 | 111 |
+| 121 | 112 |
+| 155 | 159 |
+| 57 | 86 |
+| 151 | 260 |
+| 148 | 279 |
+| 207 | 281 |
+| 136 | 286 |
+
+Three come out narrower and one is within four columns. Of the five that get materially wider,
+four were already past the 120-column pane before the flip, so the reader was panning either
+way; the fifth goes 57 → 86 and still fits. That is the width guard doing its job — see "The
+retry gate" below.
+
+Six fences still carry a collision after the change, and each has a recorded reason:
+
+- four are declined by the width guard, which is the accepted trade rather than a miss: their
+  first renders are 103, 100, 115 and 59 columns and all fit the pane, while their flips are
+  150, 121, 328 and 170
+- two take the subgraph-stacked path, which returns before the retry by design
+
+One fence collides on the post-change build and not on the pre-change one, and it is not a
+regression: it is the same overwritten row on both sides (`sparse FIELD edit inside an item`
+painted over `sparse item MEMBERSHIP change`). On the pre-change build the bleed had corrupted
+the surviving label into `sparse─FIELDredit─inside<an/itemd`, so no label matched and the
+detector could not see the collision that was there. The no-break space fix restores the label,
+which is what makes the collision visible to the detector. That fence is one of the two on the
+stacked path, so nothing retries it.
 
 How the attribution was made airtight rather than eyeballed. `git diff 3187fc5 HEAD -- vendor/`
 is empty, so the renderer is the same code on both sides. Both builds then dumped the
@@ -157,17 +201,16 @@ behaviour change task 2 recorded, and it is an improvement, not a regression.
 Two counts came out higher than the pre-implementation estimate of "about 40, and 3". Both
 gaps are in the estimate, not in the change:
 
-- **84 rather than 40.** The estimate counted fences with a multi-word label in the `|label|`
+- **83 rather than 40.** The estimate counted fences with a multi-word label in the `|label|`
   spelling *in the raw fence source*. Re-running exactly that count gives 40, so the estimate is
   reproduced — but it misses two whole spellings that the fix also reaches: the inline
   `A -- label --> B` form, which only becomes piped during normalization, and class and state
-  diagram labels, which are not piped in the source at all. Across the corpus the substitution
-  replaced 517 plain spaces and 146 middle dots.
-- **6 rather than 3.** The estimate flipped the direction on the raw source, so a class or state
+  diagram labels, which are not piped in the source at all.
+- **9 rather than 3.** The estimate flipped the direction on the raw source, so a class or state
   diagram was never a candidate: its header reads `stateDiagram-v2`, not `flowchart TD`. It also
   read labels from the raw source, so a flowchart written entirely in the inline spelling looked
-  like it had fewer than two labels. Of the 6, four are fences the estimate could not have seen
-  (two transpiled state diagrams, two inline-spelling flowcharts) and two are fences it did see.
+  like it had fewer than two labels. Several of the 9 are fences the estimate could not have seen
+  at all (transpiled state diagrams and inline-spelling flowcharts).
   The estimate's third fence needs no retry any more: the no-break space fix alone resolved its
   collision, so the first render no longer collides and the retry never fires.
 
@@ -182,10 +225,10 @@ flowchart TD
     Transpile --> Split{"Independent subgraphs?"}
     Split -->|"yes"| Stacked["Stack one block per subgraph"]
     Split -->|"no"| Render["Render as the author wrote it"]
-    Render --> Detect{"Two labels share a row?"}
+    Render --> Detect{"Is a label unreadable?"}
     Detect -->|"no"| Done["Return the art"]
     Detect -->|"yes"| Retry["Render again, direction flipped to LR"]
-    Retry --> Better{"Fewer collisions than before?"}
+    Retry --> Better{"Better, and not newly too wide?"}
     Better -->|"yes"| UseLR["Return the LR art"]
     Better -->|"no"| Done
     Stacked --> Done
@@ -211,11 +254,16 @@ to reserve occupied cells and nudge the label along its line. That means forking
 in 229. The retry is the cheap fix that covers the measured cases; the limitation gets written
 down instead.
 
-**Trade-off, stated plainly.** Flipping to LR makes the art wider — measured on the three
-affected fences, 188 to 215 columns on average. So a broken-but-narrow picture becomes a
-correct-but-wider one. That is the right trade here because preview mode has horizontal
-panning (`scroll_left` / `scroll_right` are both in `mdPreviewAllowedActions`), so a wide
-render is reachable, while a collided label is unreadable at any width.
+**Trade-off, stated plainly.** Flipping to LR usually makes the art wider — on the 9 corpus
+fences the retry keeps, the widths go 137 → 79, 135 → 111, 121 → 112, 155 → 159, 57 → 86,
+151 → 260, 148 → 279, 207 → 281 and 136 → 286. So a broken-but-narrow picture can become a
+correct-but-much-wider one, and that trade is only worth taking when the narrow one was not
+fitting on the screen anyway. Preview mode does have horizontal panning (`scroll_left` /
+`scroll_right` are both in `mdPreviewAllowedActions`), so a wide render is reachable — but
+reachable is not free, and a diagram that fitted on one screen and now needs two screens of
+panning is a real loss to the reader. So the gate declines exactly one trade: a first render
+that fits the pane being replaced by a flipped render that does not. When the first render
+already overflows, the flip costs nothing that was not already being paid.
 
 ## Technical Details
 
@@ -250,19 +298,35 @@ One shared helper in a new file, called from exactly two places:
 
 ### The collision detector
 
-Input is the fence source and the rendered art. Output is a count.
+Input is the fence source and the rendered art. Output is a count. There are two collision
+shapes and the detector counts both.
 
 1. Pull every edge label out of the source.
 2. Sort them longest first, so a short label cannot match inside a longer one.
 3. For each row of the art, find each label, marking the columns it consumes so a later
    (shorter) label cannot claim the same cells.
-4. Flag each adjacent pair of hits on one row that are **distinct labels** and separated by
-   fewer than 8 columns.
+4. Classify each match by the letters immediately outside it that no label claimed. Nothing
+   outside it, or only another label's cells, means the label is drawn as a word of its own.
+   Leftover letters that spell part of a **different** label mean this label was painted over
+   that one — the **overwriting shape**, counted straight away. Leftover letters belonging to
+   no label mean the match is node text that happens to spell a label, and it is dropped.
+5. Over the surviving hits, flag each adjacent pair on one row that are **distinct labels** and
+   closer together than the smaller of either label's own length and 8 columns — the
+   **crowded shape**.
 
-The 8-column threshold is what separates "two labels crammed into one corridor" from "two
-labels that happen to be on the same row in different parts of a wide diagram". On the
-measured corpus it flags 3 fences with no false positives; the LR render of all three flags
-zero.
+Why the threshold has a label's own length in it. "Too close to tell apart" is relative to how
+big the words are. `collection` and `single composite` four columns apart read as one run of
+text; `no` and `yes` five columns apart read as two plainly separate words. A fixed 8 columns
+called the second one a collision, which sent a perfectly readable 80-column diagram off to a
+273-column LR render. The 8 stays as a cap on top, so two long labels in different regions of a
+wide diagram with a node box between them are still not "close".
+
+Why the overwriting shape needs its own rule. When two labels land on the same columns the
+vendored layer merge paints one over the other and neither survives as a word:
+`collection` over `single composite` leaves `sincollectionite`. The crowded rule cannot see
+that — there is one match on the row, not two — so without the overwrite rule the detector was
+blind to the worse of the two shapes. The wreckage is what identifies it: `sin` and `ite` are
+pieces of `single composite` sitting against a `collection` that no longer has a word boundary.
 
 A working prototype of both the detector and the corpus harness is at
 `/private/tmp/claude-501/-Users-sasha-dev-oss-revdiff/3ca44ced-2e51-4dbb-97e0-c4e65cb65f87/scratchpad/corpus_harness.go.txt`.
@@ -270,14 +334,19 @@ Read it before writing task 4 — it is the measured version, not a sketch.
 
 ### The retry gate
 
-Flip only when all of these hold, and keep the flipped render only when the last one does:
+Flip only when all of these hold, and keep the flipped render only when the last two do:
 
-- the fence has an explicit direction header and that direction is `TD` or `TB`
+- the fence has a header the flip understands: `TD`, `TB`, or a bare `flowchart` / `graph` with
+  no direction at all, which the renderer lays out top-down anyway
 - the first render flags at least one collision
 - the flipped render succeeds and is non-blank
+- the flip does not take a diagram that fitted the pane and make it not fit
 - the flipped render flags **strictly fewer** collisions than the first
 
-Any failure returns the first render. A fence with no collisions never renders twice.
+Any failure returns the first render. A fence with no collisions never renders twice. A panic
+inside the second render is caught and also returns the first render — the retry exists to
+improve on art we already have, and letting the panic out would lose that art to the outer
+recover in `renderMermaidBlock`, whose fallback is the fence's raw source text.
 
 ## What Goes Where
 
