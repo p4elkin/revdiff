@@ -90,11 +90,12 @@ import (
 // inline labeled link like `A -- foo(1) --> B` would look like a node shape.
 //
 // The node pass handles both label kinds, differently: inside a node label a
-// '|' becomes '/', while an edge label is copied through with only its
-// surrounding quotes dropped (see unquoteFlowchartEdgeLabel). Both live in
-// that one pass because both need the same thing — each arrow consumed whole,
-// its `|label|` suffix included — and a separate quote pass would mask and
-// re-scan every line to find the arrows the node pass already has in hand.
+// '|' becomes '/', while an edge label has its surrounding quotes dropped and
+// its spaces substituted for no-break spaces (see normalizeFlowchartEdgeLabel).
+// Both live in that one pass because both need the same thing — each arrow
+// consumed whole, its `|label|` suffix included — and a separate quote pass
+// would mask and re-scan every line to find the arrows the node pass already
+// has in hand.
 
 // flowchartMaskByte fills every masked byte in flowchartMaskLabels's output.
 // It must not be a space and must not be any character link syntax is built
@@ -382,63 +383,82 @@ func flowchartEdgeAt(line, masked string, i int) (segment string, next int, ok b
 	return line[i:end], end, true
 }
 
-// unquoteFlowchartEdgeLabel drops one layer of surrounding double quotes from
-// one arrow segment as returned by flowchartEdgeAt — either a bare arrow, or
-// an arrow followed by `|label|` — so `A -->|"listVariants (strict mode)"| B`
-// reaches the renderer as `A -->|listVariants (strict mode)| B`.
+// normalizeFlowchartEdgeLabel is the single chokepoint for both edge-label
+// spellings that reach this pass: the inline `A -- label --> B` form and the
+// piped `A -->|"label"| B` form. Both normalize to the same `-->|label|`
+// shape by the time this runs, because normalizeFlowchartLine normalizes
+// links before nodes (see this file's doc comment for why that order is
+// load-bearing) — so flowchartEdgeAt hands every edge label to this one
+// function as the `|...|` suffix of an arrow segment, however the author
+// wrote it.
+//
+// It normalizes that segment in two steps: unquote when the label is
+// quotable, then substitute every space in the label for a no-break space
+// (see mdpreview_nbsp.go for why) — so `A -->|"listVariants (strict mode)"| B`
+// reaches the renderer with its spaces intact instead of bled through by the
+// vendored renderer's layer merge.
 //
 // flowchartLinkText already unquotes a label, but only for the labels IT
-// builds — the ones written in the inline `-- label -->` form. A label written
-// the common way, straight after the arrow, is part of neither
-// flowchartLinkPattern alternative: the arrow matches the bare-link
-// alternative and the `|...|` that follows is copied through untouched. Its
-// quotes then survive into the art, where the renderer draws them.
+// builds — the ones written in the inline `-- label -->` form — and it does
+// not substitute spaces. A label written the common way, straight after the
+// arrow, is part of neither flowchartLinkPattern alternative: the arrow
+// matches the bare-link alternative and the `|...|` that follows is copied
+// through untouched by normalizeFlowchartLinks. Either way, every edge label
+// passes through this function before normalizeFlowchartNodes hands the line
+// back — including a label flowchartLinkText already unquoted, which arrives
+// here past the quotable check and still gets its spaces substituted.
 //
-// The segment is handed back unchanged when there is no label, when the label
-// is not quoted on both ends, or when it carries a quote of its own. That
-// leaves `|"a" and "b"|` alone rather than eating its inner quotes, and it is
-// also what makes the rewrite a fixed point: what it writes back can never be
-// stripped a second time.
+// The segment is handed back unchanged in exactly two cases: when there is
+// no label at all, and when a quoted label carries a quote of its own —
+// `|"a" and "b"|` is left whole rather than half-eaten, since there is no
+// honest way to tell where the label was meant to end. Every other label,
+// quoted-and-clean or never quoted at all, gets substituted — that is the
+// behavior change from this function's previous "unquote or bail" shape,
+// under which a bare unquoted label reached the renderer untouched and bled
+// spaces exactly like a quoted one would have.
 //
 // The closing `|` is required rather than assumed. flowchartEdgeAt only
 // extends the segment past an opening pipe once it has found the closing one,
 // so today the check never fires — but the alternative to checking is a
 // slice-bounds panic that would cost the reader the whole fence's art.
-func unquoteFlowchartEdgeLabel(segment string) string {
+func normalizeFlowchartEdgeLabel(segment string) string {
 	open := strings.IndexByte(segment, '|')
 	if open < 0 || !strings.HasSuffix(segment, "|") {
 		return segment
 	}
 	label := segment[open+1 : len(segment)-1]
-	if len(label) <= 2 || label[0] != '"' || label[len(label)-1] != '"' {
-		return segment
+	if len(label) > 2 && label[0] == '"' && label[len(label)-1] == '"' {
+		inner := label[1 : len(label)-1]
+		if strings.Contains(inner, `"`) {
+			return segment
+		}
+		label = inner
 	}
-	inner := label[1 : len(label)-1]
-	if strings.Contains(inner, `"`) {
-		return segment
-	}
-	return segment[:open+1] + inner + "|"
+	return segment[:open+1] + mermaidNBSPSubstitute(label) + "|"
 }
 
 // normalizeFlowchartNodes rewrites every node shape on line into the
-// square-bracket form, turns any '|' inside a node label into '/', and drops
-// the surrounding quotes from an edge label (see unquoteFlowchartEdgeLabel).
-// An arrow and its `|label|` suffix are otherwise copied through untouched.
+// square-bracket form, turns any '|' inside a node label into '/', and
+// normalizes the edge label that follows an arrow — dropping its surrounding
+// quotes and substituting its spaces for no-break spaces (see
+// normalizeFlowchartEdgeLabel). An arrow itself is otherwise copied through
+// untouched.
 //
 // The walk is a single left-to-right pass with no lookbehind beyond one byte,
 // which is what keeps the rules from fighting: an arrow is consumed whole
 // (label included) before any byte of it can be mistaken for a shape
 // delimiter, and a shape is only recognized when a node id sits directly in
-// front of it. The edge-label unquoting rides on that same "arrow consumed
-// whole" step, which is why it is not a pass of its own — a separate walk
-// would mask and re-scan every line to find the arrows this one already has.
+// front of it. The edge-label normalization rides on that same "arrow
+// consumed whole" step, which is why it is not a pass of its own — a separate
+// walk would mask and re-scan every line to find the arrows this one already
+// has.
 func normalizeFlowchartNodes(line string) string {
 	masked := flowchartMaskLabels(line)
 
 	var out strings.Builder
 	for i := 0; i < len(line); {
 		if segment, next, ok := flowchartEdgeAt(line, masked, i); ok {
-			out.WriteString(unquoteFlowchartEdgeLabel(segment))
+			out.WriteString(normalizeFlowchartEdgeLabel(segment))
 			i = next
 			continue
 		}
