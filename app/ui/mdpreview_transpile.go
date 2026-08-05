@@ -2367,6 +2367,16 @@ func transpileMermaid(source string, paneWidth int) (string, bool) {
 // subgraph-stacked path above returns early and is never retried — each
 // stacked block is its own small render, not the row-sharing shape the
 // retry targets.
+//
+// Whatever art won that retry then gets one last chance to be narrowed:
+// mermaidNarrowIfOverflowing (see mdpreview_wrap.go) re-renders the winning
+// source with its long NODE labels broken over several lines, but only when
+// the art overflows paneWidth, and keeps that render only when it is strictly
+// narrower and no more colliding. A fence whose art fits the pane never pays
+// that second render and reaches its return byte-identical to before the wrap
+// pass existed. The wrap runs after the retry, not before, because the retry
+// is a correctness pass and the wrap a readability one — see mdpreview_wrap.go
+// for that argument in full.
 func renderMermaidSource(source string, paneWidth int) (string, error) {
 	toRender := source
 	if transpiled, ok := transpileMermaid(source, paneWidth); ok {
@@ -2379,12 +2389,11 @@ func renderMermaidSource(source string, paneWidth int) (string, error) {
 		}
 	}
 
-	rendered, err := mermaidcmd.RenderDiagram(toRender, nil)
+	first, err := mermaidcmd.RenderDiagram(toRender, nil)
 	if err != nil {
 		return "", fmt.Errorf("render mermaid diagram: %w", err)
 	}
-	rendered = mermaidRetryLRIfColliding(toRender, rendered, paneWidth, func(s string) (string, error) {
-		return mermaidcmd.RenderDiagram(s, nil)
-	})
-	return rendered, nil
+	render := func(s string) (string, error) { return mermaidcmd.RenderDiagram(s, nil) }
+	rendered := mermaidRetryLRIfColliding(toRender, first, paneWidth, render)
+	return mermaidNarrowIfOverflowing(toRender, first, rendered, paneWidth, render), nil
 }

@@ -83,11 +83,16 @@ preview included, published to the user's own fork, never to `origin`.
   retry gate: counts how many distinct labels land too close together on one row of rendered
   art, and decides whether a second render with the direction flipped to LR is strictly better.
 - `app/ui/mdpreview_collision_test.go` — its tests.
+- `app/ui/mdpreview_wrap.go` — the node-label wrap pass: breaks long node labels over several
+  lines with `<br/>` so a diagram whose art overflows the pane is re-rendered narrower, gated on
+  the art actually overflowing and kept only when it is strictly narrower and no more colliding
+  (see "Long node labels are wrapped" below).
+- `app/ui/mdpreview_wrap_test.go` — its tests.
 - `app/ui/mdpreview_corpus_test.go` — the differential corpus harness used to verify both fixes
   against a large body of real fences; skipped unless `REVDIFF_MERMAID_CORPUS` is set, so it
   never runs in `make test` or CI.
 
-A clean rebase never conflicts on these thirteen files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these fifteen files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -687,6 +692,82 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   specific SOURCE label does not appear intact anywhere in the art: that test cannot fire on node
   text at all, because node text was never a source label to begin with, and it does not depend on
   how long the label is or how many words it has.
+- **Long node labels are wrapped, but only on a fence whose art already overflows the pane.** A
+  box is as wide as its widest label line, so one long label drags the whole drawing past the
+  pane and the reader has to pan to read a diagram that would otherwise fit. The renderer already
+  honours `<br/>` inside a node label (`newGraphLabel` in the vendored `label.go` splits on it),
+  so `mermaidNarrowIfOverflowing` (`mdpreview_wrap.go`) re-renders the source with long node
+  labels broken over several lines. It runs LAST, after the LR retry, and wraps the source in
+  whichever direction that retry kept — the retry is a correctness pass (labels painted over each
+  other cannot be read at any width), the wrap only a readability one (a wide diagram is readable,
+  it just costs panning), so the wrap must never be able to undo a flip.
+
+  **Why the overflow gate.** Unlike the LR retry, which only fires on a fence the detector already
+  believes is broken, wrapping would otherwise change every diagram carrying a long label,
+  including the great majority that render perfectly today. So the art is measured first and a
+  fence that FITS `paneWidth` returns byte-identical, without a second render
+  (`TestRenderMermaidSource_FittingFenceIsByteIdenticalToTheUnwrappedRender`). Past that gate,
+  each rung of `mermaidWrapTargets` — a quarter of the pane, then an eighth, both clamped into
+  16..34 runes — is rendered widest-first, and a rung's render is kept only when it is STRICTLY
+  narrower than the art it replaces and does not collide MORE times (same `mermaidCollisionCount`
+  the retry is gated on). The first rung that fits the pane wins outright, so the fewest labels
+  are broken; if none fits, the narrowest candidate is kept, since the reader still pans across
+  fewer columns. Two rungs is the whole ladder because each costs a render.
+
+  **What is never wrapped**: a label that already contains an author line break (`<br>` in any
+  spelling, a literal `\n`, a real newline) — that is the author's own line breaking; an EDGE
+  label — the renderer does not honour `<br/>` there, it prints the five characters literally, and
+  the walk consumes each arrow together with its `|label|` before any byte can be read as a node
+  shape; a single word, however long — a broken identifier or path reads worse than a wide box;
+  a subgraph header or an `accTitle`/`accDescr`; and any source whose diagram kind is not
+  `graph`/`flowchart`. Breaks are taken on ASCII space and tab only, never on U+00A0, so an edge
+  label that somehow reached the wrapper could not be broken anyway (`strings.Fields` would split
+  on U+00A0, which is why the split uses its own predicate).
+
+  **Measured on `testdata/mermaid/collision-three-branches.mmd`** at pane 160, where the LR retry
+  has already won and so LR is the direction wrapped. The same target buys back very different
+  width in the two directions, which is why the targets are a ladder rather than one number:
+
+  | target | TD width | LR width |
+  |---|---|---|
+  | none | 207 | 281 |
+  | 40 | 157 | 229 |
+  | 34 | 136 | 212 |
+  | 28 | 122 | 188 |
+  | 22 | 106 | 164 |
+  | 20 | 101 | 150 |
+  | 16 | 90 | 135 |
+
+  In production that fixture goes 281 → 150 columns at pane 160 (the second rung, 20, wins; the
+  first rung's 212 is kept as the running best until it does), 25 → 39 rows, 0 collisions before
+  and after. Height roughly doubles, and that is the intended trade: the preview scrolls
+  vertically for free while sideways it moves one column per arrow-key press. The renderer adds a
+  blank row between label lines (`graphLabelLineGap`), so a two-line label costs three rows.
+
+  **Measured across the corpus** (15254 markdown files, 234 distinct fences, pane width 120, base
+  `681f053` against this change, 2026-08-05): **43 of 234 fences change, all 43 narrower, 0
+  wider**; width delta min 2, median 22, max 146, mean 37.8 columns; 14 fences that overflowed
+  the 120-column pane now fit inside it. **0 fences gain a collision** — the number the feature
+  ships or does not ship on. 0 panics, 0 timeouts, 0 blank renders and the same 24
+  unsupported-diagram-type errors on both builds, and no word visible in the base art disappears
+  from the new art on any of the 43. Of the 102 fences that overflow the pane on the base build,
+  44 have no wrappable label at all (short labels, or the author's own `<br/>` already), 14
+  produce no rung narrower than what they had, and 44 keep a wrapped render — 29 of those on the
+  second rung. The collision veto is not dead code: on one fence the first rung narrowed 277 → 198
+  columns while cramming `nothing left: whole-list write` and `index or '-': item add/remove/reorder`
+  into one corridor, and was declined for it.
+
+  **The cost** is up to two extra vendored renders per overflowing fence, every time the fence is
+  drawn — preview has no render cache by design (see `renderMarkdownPreview`'s doc comment), so a
+  pan keypress across such a document pays them again. A fitting fence pays nothing.
+
+  **Limitations.** A wrap cannot fix a diagram whose width comes from its node COUNT rather than
+  its label lengths: 14 corpus fences overflow with labels short enough that no rung is narrower.
+  A fence whose labels are all single long words (an identifier, a path, a URL) is declined
+  outright. The floor of 16 runes is a real floor — on a very narrow pane the art still overflows,
+  and the pass keeps the narrowest candidate rather than promising a fit. And the height cost is
+  unbounded in principle: a diagram with many long labels can grow past a screenful, which is
+  cheap to scroll but does mean the whole diagram is no longer visible at once.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
 - **You must leave preview before changing file.** Preview now works in a multi-file review, but no

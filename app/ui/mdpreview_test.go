@@ -162,8 +162,15 @@ func TestRenderMermaidFences_SkipsDividerLines(t *testing.T) {
 // sanity check below) exceeds every narrow width used in this file's tests,
 // so those tests actually exercise the anti-reflow behavior instead of
 // vacuously passing because the diagram happened to already fit.
-const wideMermaidSrc = "graph TD\n    A[This is a moderately long label for node A] --> " +
-	"B[This is a moderately long label for node B]"
+//
+// Each label is one hyphenated word ON PURPOSE, for the same reason
+// mdPreviewWideDoc's are: these tests are about glamour leaving overflowing art
+// alone, and the node-label wrap pass (mdpreview_wrap.go) would otherwise
+// narrow the art at the deliberately narrow widths they render at. A label
+// with no space to break on is declined by that pass, so the art stays the
+// width these tests need.
+const wideMermaidSrc = "graph TD\n    A[This-is-a-moderately-long-label-for-node-A] --> " +
+	"B[This-is-a-moderately-long-label-for-node-B]"
 
 func TestRenderMarkdownDocument_TableRendersWithAlignedBorders(t *testing.T) {
 	doc := "| a | b |\n|---|---|\n| 1 | 2 |\n"
@@ -1457,15 +1464,21 @@ func TestStatusBar_MdPreviewOn_SuppressesHunkAndLineSegments(t *testing.T) {
 // and the normal diff path must keep its own unclamped behavior.
 
 // mdPreviewWideDoc renders to art 99 cells wide — wider than the 80-column
-// viewport mdPreviewTestModel sets up. "alpha start node" sits at the left
-// edge and "omega far right node" at columns 76..97, so it is cut mid-word at
+// viewport mdPreviewTestModel sets up. "alpha-start-node" sits at the left
+// edge and "omega-far-right-node" at columns 76..97, so it is cut mid-word at
 // offset 0 and only fully readable once panned.
+//
+// Every label is a single hyphenated word ON PURPOSE. This fixture is about
+// panning art that is wider than the pane, and art that is wider than the pane
+// is exactly what the node-label wrap pass (mdpreview_wrap.go) tries to narrow
+// — it declines a label with no space to break on, so the art stays as wide as
+// this fixture needs whatever the pane width is.
 const mdPreviewWideDoc = "# Title\n\n" +
 	"```mermaid\n" +
 	"graph LR\n" +
-	"    A[\"alpha start node\"] --> B[\"beta middle node\"]\n" +
-	"    B --> C[\"gamma later node\"]\n" +
-	"    C --> D[\"omega far right node\"]\n" +
+	"    A[\"alpha-start-node\"] --> B[\"beta-middle-node\"]\n" +
+	"    B --> C[\"gamma-later-node\"]\n" +
+	"    C --> D[\"omega-far-right-node\"]\n" +
 	"```\n\nclosing prose\n"
 
 func TestApplyMdPreviewScroll_OffsetZero_ContentThatFits_ByteIdentical(t *testing.T) {
@@ -1622,16 +1635,16 @@ func TestPanMarkdownPreview_RevealsArtPastThePaneEdge(t *testing.T) {
 	m.toggleMarkdownPreview()
 
 	atZero := m.renderMarkdownPreview()
-	require.Contains(t, atZero, "alpha start node", "fixture sanity: the left-hand box is visible at offset 0")
-	require.NotContains(t, atZero, "omega far right node", "fixture sanity: the right-hand box must start off-pane")
+	require.Contains(t, atZero, "alpha-start-node", "fixture sanity: the left-hand box is visible at offset 0")
+	require.NotContains(t, atZero, "omega-far-right-node", "fixture sanity: the right-hand box must start off-pane")
 
 	for range 50 {
 		m.panMarkdownPreview(1)
 	}
 	panned := m.renderMarkdownPreview()
 
-	assert.Contains(t, panned, "omega far right node", "panning right must bring the far box into view")
-	assert.NotContains(t, panned, "alpha start node", "the left-hand box must have scrolled off the left edge")
+	assert.Contains(t, panned, "omega-far-right-node", "panning right must bring the far box into view")
+	assert.NotContains(t, panned, "alpha-start-node", "the left-hand box must have scrolled off the left edge")
 }
 
 func TestDispatchAction_MdPreviewOn_ArrowKeysPanWithoutTouchingCursorOrStore(t *testing.T) {
