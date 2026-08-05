@@ -156,7 +156,14 @@ func TestNormalizeFlowchartSource_QuotedEdgeLabel_LosesItsQuotes(t *testing.T) {
 			`A -->|say "hi" now| B`,
 			`A -->|say` + mermaidNBSP + `"hi"` + mermaidNBSP + `now| B`,
 		},
-		{"quoted on both ends, quoted inside", `A -->|"a" and "b"| B`, `A -->|"a" and "b"| B`},
+		{
+			// Only the UNQUOTING declines here: both quote layers survive,
+			// but the spaces are still substituted, or the label bleeds the
+			// arrow line through exactly like any other.
+			"quoted on both ends, quoted inside",
+			`A -->|"a" and "b"| B`,
+			`A -->|"a"` + mermaidNBSP + `and` + mermaidNBSP + `"b"| B`,
+		},
 		{"unquoted label", "A -->|already| B", "A -->|already| B"},
 		{"empty quoted label", `A -->|""| B`, `A -->|""| B`},
 		{"node label keeps its quotes", `A -->|"go"| B["target"]`, `A -->|go| B["target"]`},
@@ -199,12 +206,12 @@ func TestFlowchartEdgeLabel_SpacesBecomeNoBreakSpaces(t *testing.T) {
 
 func TestFlowchartEdgeLabel_UnchangedCases(t *testing.T) {
 	// The cases normalizeFlowchartEdgeLabel must hand back exactly as it
-	// received them: no label to touch at all, a label whose own embedded
-	// quote makes unquoting unsafe, and a label with nothing for the
-	// substitution to do.
+	// received them: no label to touch at all, and a label with nothing for
+	// the substitution to do. A label whose own embedded quote makes
+	// unquoting unsafe is NOT one of them — see
+	// TestFlowchartEdgeLabel_InnerQuote_StillSubstituted.
 	tests := []struct{ name, input string }{
 		{"bare arrow with no label", "A --> B"},
-		{"label with an inner quote", `A -->|"a" and "b"| B`},
 		{"label with no spaces", "A -->|already| B"},
 	}
 	for _, tc := range tests {
@@ -212,6 +219,33 @@ func TestFlowchartEdgeLabel_UnchangedCases(t *testing.T) {
 			assert.Equal(t, tc.input, normalizeFlowchartBody(t, tc.input))
 		})
 	}
+}
+
+func TestFlowchartEdgeLabel_InnerQuote_StillSubstituted(t *testing.T) {
+	// The inner-quote case declines the UNQUOTING only. Skipping the
+	// substitution too was the defect: the label kept plain spaces and the
+	// arrow line bled through them, which is the exact thing the no-break
+	// space exists to stop.
+	const input = `flowchart TD
+A["n1"] -->|"q" w e "r"| B["n2"]`
+
+	got := normalizeFlowchartSource(input)
+	assert.Contains(t, got, `|"q"`+mermaidNBSP+`w`+mermaidNBSP+`e`+mermaidNBSP+`"r"|`,
+		"both quote layers survive, but every space is substituted")
+
+	art, err := renderMermaidSource(input, 120)
+	require.NoError(t, err)
+	assert.NotContains(t, art, "w│e", "the arrow line must not bleed through the label")
+}
+
+func TestFlowchartEdgeLabel_SurroundingPaddingTrimmed(t *testing.T) {
+	// Spaces around the label are the author's formatting around the `|`
+	// delimiters, not label text. Substituting them would make them
+	// permanent, invisible padding and widen the column the renderer
+	// reserves for the label.
+	assert.Equal(t,
+		"A -->|spaced"+mermaidNBSP+"out| B",
+		normalizeFlowchartBody(t, "A -->|  spaced  out  | B"))
 }
 
 func TestNormalizeFlowchartSource_WellFormedConstructs_NotDisturbed(t *testing.T) {

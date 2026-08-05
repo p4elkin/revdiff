@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // This file holds the edge-label collision detector for rendered mermaid art.
@@ -60,7 +61,10 @@ const mermaidCollisionGap = 8
 // this runs (see normalizeFlowchartEdgeLabel, which is the single chokepoint
 // for both spellings), and the transpiled class/state paths emit the piped form
 // directly. The detector is only ever handed source that has already been
-// through that normalization.
+// through that normalization, and only for a source whose header
+// mermaidFlipDirectionToLR accepted — mermaidRetryLRIfColliding tests the
+// header before it counts, so a `|...|` that means something else entirely in
+// some other diagram type never reaches this pattern.
 var mermaidPipedEdgeLabel = regexp.MustCompile(`\|"?([^|"\n]+)"?\|`)
 
 // mermaidEdgeLabels pulls every distinct edge label out of a mermaid source,
@@ -91,21 +95,31 @@ func mermaidEdgeLabels(source string) []string {
 	return labels
 }
 
-// mermaidLabelPattern compiles one edge label into a pattern that matches that
-// label as it appears in rendered art.
+// mermaidLabelSpaceClass is what a space inside an edge label is matched by in
+// rendered art: any single rune that is neither a letter nor a digit.
 //
-// Every space-like rune in the label becomes `.` — one wildcard rune — rather
-// than being matched literally, so the same pattern finds the label whichever
-// side of the no-break-space substitution the caller's source sits on, and
-// finds it even when a space HAS bled through. Both matter: the source handed
-// to the detector already carries no-break spaces (mermaidNBSPSubstitute ran
-// during normalization) while a rendered row may carry a no-break space, a
-// plain space, or the `─` or `│` of whatever the vendored layer merge let
-// through at that column. See mdpreview_nbsp.go for the bleed itself.
+// It has to be a class rather than a literal because the same pattern must
+// find the label whichever side of the no-break-space substitution the
+// caller's source sits on, and must find it even when a space HAS bled
+// through: the source handed to the detector already carries no-break spaces
+// (mermaidNBSPSubstitute ran during normalization) while a rendered row may
+// carry a no-break space, a plain space, or the `─` or `│` of whatever the
+// vendored layer merge let through at that column. See mdpreview_nbsp.go for
+// the bleed itself.
+//
+// It excludes letters and digits rather than being a plain `.` wildcard so
+// `a b` cannot match `aXb` — a two-word label would otherwise match a run of
+// unrelated node text that merely happens to have the same letters in the
+// same places.
+const mermaidLabelSpaceClass = `[^\p{L}\p{N}]`
+
+// mermaidLabelPattern compiles one edge label into a pattern that matches that
+// label as it appears in rendered art. Every space-like rune in the label
+// becomes mermaidLabelSpaceClass; everything else is matched literally.
 func mermaidLabelPattern(label string) (*regexp.Regexp, error) {
 	quoted := regexp.QuoteMeta(label)
-	quoted = strings.ReplaceAll(quoted, " ", ".")
-	quoted = strings.ReplaceAll(quoted, mermaidNBSP, ".")
+	quoted = strings.ReplaceAll(quoted, " ", mermaidLabelSpaceClass)
+	quoted = strings.ReplaceAll(quoted, mermaidNBSP, mermaidLabelSpaceClass)
 	pattern, err := regexp.Compile(quoted)
 	if err != nil {
 		return nil, fmt.Errorf("compile edge-label pattern %q: %w", label, err)
@@ -137,8 +151,10 @@ type mermaidLabelHit struct {
 //
 // The scan is per row, and within a row it is longest label first with the
 // columns of each accepted hit marked as consumed (see mermaidEdgeLabels for
-// why that ordering is load-bearing). Hits are then sorted by column and each
-// adjacent pair tested.
+// why that ordering is load-bearing). A match that overlaps a claimed span,
+// or that butts against surrounding node text, is not a hit at all — see
+// mermaidRowCollisions. Hits are then sorted by column and each adjacent pair
+// tested.
 func mermaidCollisionCount(source, art string) int {
 	labels := mermaidEdgeLabels(source)
 	if len(labels) < 2 {
@@ -167,8 +183,6 @@ func mermaidCollisionCount(source, art string) int {
 	return total
 }
 
-// mermaidRowCollisions counts collisions on a single row of art. patterns must
-// already be ordered longest label first.
 // mermaidHeaderDirectionPattern matches a flowchart/graph header's direction
 // keyword on its own line, capturing the text before and after it separately
 // so mermaidFlipDirectionToLR can swap only the keyword and leave everything
@@ -176,17 +190,31 @@ func mermaidCollisionCount(source, art string) int {
 // untouched.
 var mermaidHeaderDirectionPattern = regexp.MustCompile(`^(\s*(?:flowchart|graph)\s+)(TD|TB|BT|RL|LR)\b(.*)$`)
 
-// mermaidFlipDirectionToLR rewrites a flowchart or graph header's direction
-// keyword to LR and reports true, or reports false and an unusable source
-// when the flip cannot be done safely:
+// mermaidHeaderNoDirectionPattern matches a header that names the diagram kind
+// and stops there — `flowchart` or `graph` with nothing after it. The vendored
+// renderer lays such a fence out top-down, exactly like an explicit `TD`, so
+// it collides the same way and is worth the same retry; the flip inserts the
+// keyword the author left out rather than replacing one.
+//
+// Anything else after the kind (a stray word, a malformed direction like
+// `TDX`) does NOT match, because rewriting a header we do not understand is a
+// bigger change than declining to retry.
+var mermaidHeaderNoDirectionPattern = regexp.MustCompile(`^(\s*(?:flowchart|graph))[ \t]*$`)
+
+// mermaidFlipDirectionToLR rewrites a flowchart or graph header so it reads LR
+// and reports true, or reports false and an unusable source when the flip
+// cannot be done safely:
 //
 //   - the diagram's header line (the first line that is not blank and not a
-//     `%%` comment, matching how mermaidDiagramKind finds it) does not match
-//     `flowchart DIRECTION` / `graph DIRECTION` at all — a missing or
-//     malformed header
+//     `%%` comment, matching how mermaidDiagramKind finds it) is neither
+//     `flowchart DIRECTION` / `graph DIRECTION` nor a bare `flowchart` /
+//     `graph` — a missing or malformed header
 //   - the direction present is not TD or TB — LR is already the flip
 //     target, RL and BT are not what the retry is for, and flipping either
 //     could change the diagram in ways beyond fixing a collision
+//
+// A header with no direction keyword at all is flipped by inserting `LR`,
+// since the renderer's own default for it is top-down.
 //
 // This is the only lever renderMermaidSource's retry pulls — see the plan's
 // "Why the flip is to LR and not something cleverer" for why padding and
@@ -198,18 +226,30 @@ func mermaidFlipDirectionToLR(source string) (string, bool) {
 		if trimmed == "" || strings.HasPrefix(trimmed, "%%") {
 			continue
 		}
-		m := mermaidHeaderDirectionPattern.FindStringSubmatch(line)
-		if m == nil {
-			return "", false
-		}
-		direction := m[2]
-		if direction != "TD" && direction != "TB" {
+		header, ok := mermaidFlipHeaderLine(line)
+		if !ok {
 			return "", false
 		}
 		flipped := make([]string, len(lines))
 		copy(flipped, lines)
-		flipped[i] = m[1] + "LR" + m[3]
+		flipped[i] = header
 		return strings.Join(flipped, "\n"), true
+	}
+	return "", false
+}
+
+// mermaidFlipHeaderLine rewrites one header line so it reads LR, or reports
+// false when that line is not a header this retry is allowed to touch. Any
+// trailing content after the direction keyword is carried over untouched.
+func mermaidFlipHeaderLine(line string) (string, bool) {
+	if m := mermaidHeaderDirectionPattern.FindStringSubmatch(line); m != nil {
+		if m[2] != "TD" && m[2] != "TB" {
+			return "", false
+		}
+		return m[1] + "LR" + m[3], true
+	}
+	if m := mermaidHeaderNoDirectionPattern.FindStringSubmatch(line); m != nil {
+		return m[1] + " LR", true
 	}
 	return "", false
 }
@@ -222,9 +262,14 @@ func mermaidFlipDirectionToLR(source string) (string, bool) {
 // The flip is kept only when ALL of these hold, checked in the order that
 // makes each one a cheap short-circuit before the next:
 //
-//  1. the first render (toRender/rendered) collides at least once — a
+//  1. toRender has a header that mermaidFlipDirectionToLR can flip. This is
+//     tested FIRST because it is a single regexp against one line, while the
+//     collision count scans every row of the art against every label — and
+//     because it is what keeps the piped-label scan away from sources where
+//     `|...|` is not an edge label at all (sequenceDiagram, journey, and
+//     anything else that never reaches a flowchart header)
+//  2. the first render (toRender/rendered) collides at least once — a
 //     fence with no collisions never renders twice
-//  2. toRender has a direction that mermaidFlipDirectionToLR can flip
 //  3. the flipped render succeeds and is non-blank
 //  4. the flipped render collides STRICTLY FEWER times than the first —
 //     a flip that trades one collision for another is not an improvement
@@ -232,13 +277,13 @@ func mermaidFlipDirectionToLR(source string) (string, bool) {
 // Any failure of the above returns rendered unchanged, so every failure mode
 // degrades to today's output.
 func mermaidRetryLRIfColliding(toRender, rendered string, render func(string) (string, error)) string {
-	firstCount := mermaidCollisionCount(toRender, rendered)
-	if firstCount == 0 {
+	flippedSource, ok := mermaidFlipDirectionToLR(toRender)
+	if !ok {
 		return rendered
 	}
 
-	flippedSource, ok := mermaidFlipDirectionToLR(toRender)
-	if !ok {
+	firstCount := mermaidCollisionCount(toRender, rendered)
+	if firstCount == 0 {
 		return rendered
 	}
 
@@ -254,6 +299,25 @@ func mermaidRetryLRIfColliding(toRender, rendered string, render func(string) (s
 	return flippedRender
 }
 
+// mermaidRowCollisions counts collisions on a single row of art. patterns must
+// already be ordered longest label first.
+//
+// The scan is two passes, and both exist to stop a run of letters that merely
+// SPELLS a label from being read as one — node-box text shares the art with
+// the labels, and short labels like `no`, `yes` or `open` sit inside ordinary
+// words such as `nothing`, `yesterday` and `reopen`:
+//
+//  1. claim: longest label first, a match is taken only when EVERY column it
+//     covers is still free, not merely its opening column. A shorter label
+//     whose match starts before an already-claimed span and runs into it
+//     would otherwise be taken, reporting one contiguous run of text as two
+//     crammed labels.
+//  2. delimit: a claimed match is then dropped when it butts against a letter
+//     or digit that no claimed match covers. Checking against the claims of
+//     the whole first pass rather than one match at a time is what keeps the
+//     worst collision shape — two labels drawn flush together, each one's
+//     neighbor being the other — while still rejecting `no` inside
+//     `nothing`, whose neighboring `t` belongs to no label at all.
 func mermaidRowCollisions(row string, patterns []*regexp.Regexp) int {
 	runes := []rune(row)
 	if len(runes) == 0 {
@@ -261,9 +325,13 @@ func mermaidRowCollisions(row string, patterns []*regexp.Regexp) int {
 	}
 	// byteToRune maps a byte offset in row to its rune column, so a match
 	// reported in bytes can be compared against the rune-indexed consumed
-	// map. Building it once per row keeps the scan linear in the row length
-	// instead of re-slicing the prefix for every match.
-	byteToRune := make(map[int]int, len(runes)+1)
+	// slice. Offsets inside a multi-byte rune keep the -1 sentinel and are
+	// skipped. Building it once per row keeps the scan linear in the row
+	// length instead of re-slicing the prefix for every match.
+	byteToRune := make([]int, len(row)+1)
+	for i := range byteToRune {
+		byteToRune[i] = -1
+	}
 	col := 0
 	for offset := range row {
 		byteToRune[offset] = col
@@ -271,35 +339,35 @@ func mermaidRowCollisions(row string, patterns []*regexp.Regexp) int {
 	}
 	byteToRune[len(row)] = col
 
-	consumed := make([]bool, len(runes))
+	claimed := make([]bool, len(runes))
 	var hits []mermaidLabelHit
 	for i, pattern := range patterns {
 		for _, loc := range pattern.FindAllStringIndex(row, -1) {
-			start, ok := byteToRune[loc[0]]
-			if !ok {
+			start, end := byteToRune[loc[0]], byteToRune[loc[1]]
+			if start < 0 || end < 0 || !mermaidSpanFree(claimed, start, end) {
 				continue
 			}
-			end, ok := byteToRune[loc[1]]
-			if !ok {
-				continue
-			}
-			if start < len(consumed) && consumed[start] {
-				continue
-			}
-			for k := start; k < end && k < len(consumed); k++ {
-				consumed[k] = true
+			for k := start; k < end && k < len(claimed); k++ {
+				claimed[k] = true
 			}
 			hits = append(hits, mermaidLabelHit{start: start, end: end, index: i})
 		}
 	}
-	if len(hits) < 2 {
+
+	kept := make([]mermaidLabelHit, 0, len(hits))
+	for _, hit := range hits {
+		if mermaidHitDelimited(runes, claimed, hit.start, hit.end) {
+			kept = append(kept, hit)
+		}
+	}
+	if len(kept) < 2 {
 		return 0
 	}
-	sort.SliceStable(hits, func(a, b int) bool { return hits[a].start < hits[b].start })
+	sort.SliceStable(kept, func(a, b int) bool { return kept[a].start < kept[b].start })
 
 	count := 0
-	for i := 1; i < len(hits); i++ {
-		prev, cur := hits[i-1], hits[i]
+	for i := 1; i < len(kept); i++ {
+		prev, cur := kept[i-1], kept[i]
 		if cur.index == prev.index {
 			continue
 		}
@@ -308,4 +376,36 @@ func mermaidRowCollisions(row string, patterns []*regexp.Regexp) int {
 		}
 	}
 	return count
+}
+
+// mermaidSpanFree reports whether every column of [start, end) is still
+// unclaimed by an earlier, longer label's match.
+func mermaidSpanFree(claimed []bool, start, end int) bool {
+	for k := start; k < end && k < len(claimed); k++ {
+		if claimed[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// mermaidHitDelimited reports whether a match at [start, end) reads as a word
+// of its own rather than as a fragment of surrounding node text. A letter or
+// digit immediately outside the match disqualifies it, unless that neighbor
+// is covered by some other label's match — see mermaidRowCollisions for why
+// that exception is what still catches two labels drawn flush together.
+func mermaidHitDelimited(runes []rune, claimed []bool, start, end int) bool {
+	if start > 0 && mermaidWordRune(runes[start-1]) && !claimed[start-1] {
+		return false
+	}
+	if end < len(runes) && mermaidWordRune(runes[end]) && !claimed[end] {
+		return false
+	}
+	return true
+}
+
+// mermaidWordRune reports whether r can continue a word, which is what makes
+// a match of a short label inside a longer run of text a false hit.
+func mermaidWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }

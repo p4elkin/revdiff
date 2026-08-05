@@ -848,7 +848,7 @@ func TestRenderMermaidSource_VariantPlanFence_RendersAsTwoTitledBlocks(t *testin
 
 	// the author wrote every edge label quoted; the renderer draws a label
 	// verbatim, so a surviving quote reaches the screen (see
-	// unquoteFlowchartEdgeLabel). This is the fence that bug was found in.
+	// normalizeFlowchartEdgeLabel). This is the fence that bug was found in.
 	assert.NotContains(t, art, `"listVariants`, "an edge label must reach the art without its quotes")
 	assert.NotContains(t, art, `".slice(`)
 	assert.Contains(t, art, "listVariants", "the label text itself must survive")

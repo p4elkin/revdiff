@@ -41,6 +41,28 @@ import (
 // substitution's purpose is purely "make this cell opaque" — a run of two or
 // more opaque cells in a row reads no differently from one, so collapsing
 // loses no information the reader can see.
+//
+// # Two accepted behavior changes on the flowchart path
+//
+// On the transpiled path mermaidSafeText's own strings.Fields/strings.Join
+// has already reduced every whitespace run to one space before this runs, so
+// the collapse can only ever fire on a literal no-break space. The plain
+// flowchart path has no such prior normalization, so there the collapse is
+// live and an author-written `A -->|a   b| B` loses two columns of deliberate
+// spacing. That is intended: run spacing inside an edge label is not
+// something the vendored renderer preserves usefully anyway (it reserves the
+// label's column width by byte length), and one opaque cell reads the same as
+// three.
+//
+// The second change is width. The vendored renderer sizes an edge label's
+// reserved column with len() and centers it with len(label)/2 — see
+// mapping_edge.go and drawTextOnLine in arrow.go — and U+00A0 is 2 bytes
+// where a space is 1. So a multi-word label on the plain flowchart path now
+// reserves one extra column per space and can be drawn a column left of true
+// center: `A -->|"read as fallback"| B` comes out 23 columns wide against 21
+// for the same label written `read_as_fallback`. The transpiled path is
+// unaffected — it substituted a 2-byte `·` before this change, so its
+// arithmetic did not move.
 const mermaidNBSP = " "
 
 // mermaidNBSPRun matches a run of two or more consecutive no-break spaces,

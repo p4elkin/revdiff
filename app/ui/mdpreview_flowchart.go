@@ -408,14 +408,23 @@ func flowchartEdgeAt(line, masked string, i int) (segment string, next int, ok b
 // back — including a label flowchartLinkText already unquoted, which arrives
 // here past the quotable check and still gets its spaces substituted.
 //
-// The segment is handed back unchanged in exactly two cases: when there is
-// no label at all, and when a quoted label carries a quote of its own —
-// `|"a" and "b"|` is left whole rather than half-eaten, since there is no
-// honest way to tell where the label was meant to end. Every other label,
-// quoted-and-clean or never quoted at all, gets substituted — that is the
+// The segment is handed back unchanged in exactly one case: when there is no
+// label at all. A quoted label that carries a quote of its own declines the
+// UNQUOTING only — `|"a" and "b"|` keeps both quote layers rather than being
+// half-eaten, since there is no honest way to tell where the label was meant
+// to end — and still has its spaces substituted, because the two decisions
+// are independent and a label that keeps its quotes bleeds `─` and `│`
+// through its spaces exactly like any other. Every label, quoted-and-clean,
+// quote-carrying or never quoted at all, gets substituted — that is the
 // behavior change from this function's previous "unquote or bail" shape,
 // under which a bare unquoted label reached the renderer untouched and bled
 // spaces exactly like a quoted one would have.
+//
+// The label is trimmed before substituting. Leading and trailing spaces are
+// the author's formatting around the `|` delimiters, not part of the label,
+// and the vendored parser passes the `|...|` capture through verbatim — so
+// without the trim `A -->|  spaced  out  | B` reaches the art as opaque
+// padding that also widens the column the renderer reserves for the label.
 //
 // The closing `|` is required rather than assumed. flowchartEdgeAt only
 // extends the segment past an opening pipe once it has found the closing one,
@@ -426,13 +435,11 @@ func normalizeFlowchartEdgeLabel(segment string) string {
 	if open < 0 || !strings.HasSuffix(segment, "|") {
 		return segment
 	}
-	label := segment[open+1 : len(segment)-1]
+	label := strings.TrimSpace(segment[open+1 : len(segment)-1])
 	if len(label) > 2 && label[0] == '"' && label[len(label)-1] == '"' {
-		inner := label[1 : len(label)-1]
-		if strings.Contains(inner, `"`) {
-			return segment
+		if inner := label[1 : len(label)-1]; !strings.Contains(inner, `"`) {
+			label = inner
 		}
-		label = inner
 	}
 	return segment[:open+1] + mermaidNBSPSubstitute(label) + "|"
 }

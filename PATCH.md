@@ -384,10 +384,12 @@ What `normalizeFlowchartSource` rewrites, and what each one did before:
   the common way, straight after the arrow, matches neither `flowchartLinkPattern` alternative:
   the arrow matches the bare-link alternative and the `|...|` after it was copied through
   untouched. The rewrite happens in the node pass, on each arrow segment that pass already
-  consumes whole (`unquoteFlowchartEdgeLabel`). Exactly one layer comes off, and only when the
-  label opens and closes with a quote and carries none inside — so `|"a" and "b"|` is left whole
-  rather than half-eaten, and the pass stays a fixed point, because what it writes back can never
-  be stripped a second time.
+  consumes whole (`normalizeFlowchartEdgeLabel`). Exactly one layer comes off, and only when the
+  label opens and closes with a quote and carries none inside — so `|"a" and "b"|` keeps both
+  quote layers rather than being half-eaten, and the pass stays a fixed point, because what it
+  writes back can never be stripped a second time. Declining to unquote does NOT decline the
+  no-break-space substitution: the two decisions are independent, and a label that keeps its
+  quotes bleeds `─` through its spaces exactly like any other.
 - **Styling and layout directives → dropped.** `style`, `classDef`, `class`, `linkStyle`, a
   standalone `direction` (the one written inside a `subgraph`), and the interaction directives
   `click` / `href` / `callback`. Each described how the diagram should look or behave, which the
@@ -528,27 +530,46 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   `docs/plans/20260805-mermaid-edge-label-rendering.md` and `mdpreview_nbsp.go`'s doc comment).
   U+00A0 is not the byte `" "`, so `mergeDrawings` in the vendored renderer treats the cell as
   opaque and keeps it instead of letting the arrow line or a crossing edge bleed through, while
-  terminals still draw it as a blank. Two costs are accepted in exchange: art copied out of the
-  terminal carries no-break spaces rather than plain ones, and a small number of fonts render
-  U+00A0 visibly instead of blank. Measured across the corpus (see "Corpus verification result"
-  under Progress Tracking in the plan above): the substitution changed 84 of 229 fences,
-  replacing 517 plain spaces and 146 middle dots.
+  terminals still draw it as a blank. Four costs are accepted in exchange: art copied out of the
+  terminal carries no-break spaces rather than plain ones; a small number of fonts render U+00A0
+  visibly instead of blank; on the plain-flowchart path a run of spaces inside a label collapses
+  to one, so deliberate spacing is lost; and on that same path the label is one byte per space
+  wider than before, because the vendored renderer reserves an edge label's column width with
+  `len()` and U+00A0 is 2 bytes where a space is 1 (`A -->|"read as fallback"| B` comes out 23
+  columns against 21 for `read_as_fallback`, and is drawn a column left of true centre). The
+  transpiled path pays neither of the last two — it already substituted a 2-byte `·`, and
+  `mermaidSafeText` had already collapsed its whitespace runs. Measured across the corpus (see
+  "Corpus verification result" under Progress Tracking in the plan above): the substitution
+  changed 84 of 229 fences, replacing 517 plain spaces and 146 middle dots.
 - **A decision node with three or more labeled out-edges can still put two labels too close
   together to tell apart, when the diagram's direction cannot be flipped or the flip doesn't
   help.** The complete fix is in the vendored `drawTextOnLine` (reserve occupied cells, nudge
   the label along its line), which would mean forking `mermaid-ascii`. Instead,
   `renderMermaidSource` renders once, counts collisions with `mermaidCollisionCount`
   (`mdpreview_collision.go`), and keeps a second render with the direction flipped to `LR` only
-  when ALL of: the first render collides at least once; the source has an explicit `TD`/`TB`
-  header (`RL`/`BT`/`LR` are left alone — `mermaidFlipDirectionToLR` reports false for anything
-  else, including a missing or malformed header); the flipped render succeeds and is non-blank;
-  the flipped render collides STRICTLY FEWER times than the first. Any gate failure keeps the
-  first render, so a fence with no collisions never renders twice and every failure path
-  degrades to today's output. Flipping to LR makes the art wider (measured on the affected
-  fences, 188 to 215 columns on average), which is the accepted trade-off — preview mode already
-  has horizontal panning. Measured across the corpus: 7 fences had a colliding label before this
-  change, 0 after; the retry fired and was kept on 6 of the corpus's 229 fences. A fence already
-  written `LR` that still collides is not helped — there is no further direction to try.
+  when ALL of: the source has a header `mermaidFlipDirectionToLR` accepts — `TD`, `TB`, or a
+  bare `flowchart`/`graph` with no direction at all, which the renderer lays out top-down and
+  which the flip fixes by inserting the keyword (`RL`/`BT`/`LR` are left alone, and so is a
+  missing or malformed header); the first render collides at least once; the flipped render
+  succeeds and is non-blank; the flipped render collides STRICTLY FEWER times than the first.
+  The header is tested before the collision count, so the label scan never runs on a source
+  whose `|...|` is not an edge label at all. Any gate failure keeps the first render, so a fence
+  with no collisions never renders twice and every failure path degrades to today's output.
+  Flipping to LR makes the art wider — the repo's own `collision-three-branches.mmd` fixture
+  goes from 207 to 281 columns — which is the accepted trade-off, since preview mode already has
+  horizontal panning while a collided label is unreadable at any width. Measured across the
+  corpus: 7 fences had a colliding label before this change, 0 after; the retry fired and was
+  kept on 6 of the corpus's 229 fences. ⚠️ Those two counts were measured with the first version
+  of the detector, before the overlap and node-text rules above were added; both can only have
+  gone DOWN since — a stricter detector flags fewer fences and therefore retries fewer — so read
+  them as an upper bound rather than a current measurement, and re-run the corpus harness before
+  quoting either number again. A fence already written `LR` that still collides is not
+  helped — there is no further direction to try. The cost of a fence that DOES collide is two
+  full renders every time it is drawn, and preview has no render cache by design (see
+  `renderMarkdownPreview`'s doc comment), so a pan keypress across such a document pays both. The
+  detector is deliberately strict about what counts as a label hit — a match is dropped when it
+  overlaps a longer label's span or butts against surrounding node text — precisely so a fence
+  with no real collision never enters the retry.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
 - **You must leave preview before changing file.** Preview now works in a multi-file review, but no

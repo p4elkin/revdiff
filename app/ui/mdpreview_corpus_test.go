@@ -157,6 +157,48 @@ func extractCorpusFences(doc string) []string {
 	return out
 }
 
+// TestExtractCorpusFences is the one test in this file that runs
+// unconditionally: extractCorpusFences is a pure function, and a harness whose
+// scanner has silently stopped finding fences would report a clean corpus run
+// on an empty corpus.
+func TestExtractCorpusFences(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want []string
+	}{
+		{"no fences", "# title\n\nplain prose\n", nil},
+		{"one fence", "a\n\n```mermaid\nflowchart TD\n  A --> B\n```\n\nb\n", []string{"flowchart TD\n  A --> B"}},
+		{
+			"two fences keep document order",
+			"```mermaid\nfirst\n```\ntext\n```mermaid\nsecond\n```\n",
+			[]string{"first", "second"},
+		},
+		{
+			"a non-mermaid fence is not collected and does not swallow the next one",
+			"```go\nfmt.Println()\n```\n\n```mermaid\nflowchart TD\n```\n",
+			[]string{"flowchart TD"},
+		},
+		{"indented fence", "  ```mermaid\n  flowchart TD\n  ```\n", []string{"  flowchart TD"}},
+		{"fence with an info string after the language", "```mermaid title=x\nflowchart TD\n```\n", []string{"flowchart TD"}},
+		{"empty fence", "```mermaid\n```\n", []string{""}},
+		{"unterminated fence is dropped", "```mermaid\nflowchart TD\n  A --> B\n", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractCorpusFences(tt.doc)
+			if len(got) != len(tt.want) {
+				t.Fatalf("extractCorpusFences() = %q, want %q", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("extractCorpusFences()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 // corpusRenderResult is one fence's outcome. Exactly one of art / err is
 // meaningful; panicked and timedOut are the two failure shapes the harness
 // exists to prove are absent.

@@ -138,6 +138,53 @@ func TestCollisionCount_TableDriven(t *testing.T) {
 			want:   1,
 		},
 		{
+			name: "a short label inside node-box text is not a hit",
+			// `no` and `yes` are inside `nothing` and `yesterday`, which is
+			// ordinary node text on the same row. Counting them made a fence
+			// with no real collision pay a second full render.
+			source: "flowchart TD\n  A -->|no| B\n  A -->|yes| C\n",
+			art:    "│ nothing yesterday │",
+			want:   0,
+		},
+		{
+			name:   "a label inside a longer word is not a hit",
+			source: "flowchart TD\n  A -->|open| B\n  A -->|close| C\n",
+			art:    "reopen closet",
+			want:   0,
+		},
+		{
+			name: "a match overlapping a claimed span is not a second hit",
+			// `aaa bbb` starts BEFORE the span `bbb ccc ddd` already claimed
+			// and runs into it. Testing only the opening column let this
+			// through and reported one contiguous run of text as two labels.
+			source: "flowchart TD\n  A -->|bbb ccc ddd| B\n  A -->|aaa bbb| C\n",
+			art:    "aaa bbb ccc ddd",
+			want:   0,
+		},
+		{
+			name: "two labels drawn flush against each other still collide",
+			// The word-boundary rule must not swallow the worst collision
+			// shape: the longer label is matched first, so the shorter one's
+			// letter neighbor is already consumed.
+			source: "flowchart TD\n  A -->|collection| B\n  A -->|single composite| C\n",
+			art:    "──single compositecollection──",
+			want:   1,
+		},
+		{
+			name: "a label carrying regex metacharacters matches literally",
+			// Real corpus labels look like `listVariants (strict mode)`.
+			// QuoteMeta is what keeps the parens from becoming a group.
+			source: "flowchart TD\n  A -->|listVariants (strict mode)| B\n  A -->|other| C\n",
+			art:    "──listVariants (strict mode)─other──",
+			want:   1,
+		},
+		{
+			name:   "a metacharacter label with no literal match does not count",
+			source: "flowchart TD\n  A -->|a.c| B\n  A -->|other| C\n",
+			art:    "──abc─other──",
+			want:   0,
+		},
+		{
 			name: "a bled space still matches the label",
 			// The label carries no-break spaces after normalization but
 			// the art shows the arrow line bleeding through, which is
@@ -241,8 +288,29 @@ func TestMermaidFlipDirectionToLR(t *testing.T) {
 			wantOK: false,
 		},
 		{
-			name:   "header with no direction keyword declines",
+			name:   "trailing content after the direction survives untouched",
+			source: "flowchart TD  %% laid out top-down\n  A --> B",
+			want:   "flowchart LR  %% laid out top-down\n  A --> B",
+			wantOK: true,
+		},
+		{
+			name: "header with no direction keyword gains LR",
+			// The renderer lays a direction-less header out top-down, so it
+			// collides exactly like an explicit TD and deserves the same
+			// retry — the flip inserts the keyword instead of replacing it.
 			source: "flowchart\n  A --> B",
+			want:   "flowchart LR\n  A --> B",
+			wantOK: true,
+		},
+		{
+			name:   "indented direction-less header keeps its indent",
+			source: "  graph\n  A --> B",
+			want:   "  graph LR\n  A --> B",
+			wantOK: true,
+		},
+		{
+			name:   "malformed direction declines rather than being rewritten",
+			source: "flowchart TDX\n  A --> B",
 			wantOK: false,
 		},
 		{

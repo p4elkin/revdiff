@@ -1529,14 +1529,31 @@ func TestTranspileMermaid_Graph_NormalizesInPlace(t *testing.T) {
 }
 
 func TestTranspileMermaid_Flowchart_WellFormedSourceUnchanged(t *testing.T) {
-	// A fence already written in the subset the vendored parser reads must come
-	// back byte-identical, so the pass cannot disturb the ~40% of corpus fences
-	// that render correctly today.
+	// A fence already written in the subset the vendored parser reads comes
+	// back byte-identical — with ONE deliberate exception, asserted below:
+	// an edge label's plain spaces are always substituted for no-break spaces,
+	// including in source the pass otherwise leaves alone. So "unchanged" here
+	// means "unchanged apart from the edge-label substitution", and the fixture
+	// spells its label with mermaidNBSP already to isolate everything else.
 	const src = "flowchart LR\n    subgraph S [Group]\n      A --> B[label<br/>more]\n    end\n    B -->|does" +
 		mermaidNBSP + "a" + mermaidNBSP + "thing| C\n"
 	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
 	require.True(t, ok)
 	assert.Equal(t, src, got)
+}
+
+func TestTranspileMermaid_Flowchart_WellFormedSource_EdgeLabelStillSubstituted(t *testing.T) {
+	// The exception to the test above, pinned rather than left implied: the
+	// same well-formed fence written the way an author actually writes it —
+	// plain spaces in the edge label — comes back with those spaces
+	// substituted and nothing else touched.
+	const src = "flowchart LR\n    subgraph S [Group]\n      A --> B[label<br/>more]\n    end\n" +
+		"    B -->|does a thing| C\n"
+	want := "flowchart LR\n    subgraph S [Group]\n      A --> B[label<br/>more]\n    end\n    B -->|does" +
+		mermaidNBSP + "a" + mermaidNBSP + "thing| C\n"
+	got, ok := transpileMermaid(src, mermaidUnconstrainedWidth)
+	require.True(t, ok)
+	assert.Equal(t, want, got)
 }
 
 func TestTranspileMermaid_ClassDiagram_AllStatementsIgnored_BuilderEmpty_NotHandled(t *testing.T) {

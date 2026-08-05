@@ -349,6 +349,36 @@ func TestRenderMarkdownDocument_CollisionFixture_RendersWithZeroCollisions(t *te
 	collisions := mermaidCollisionCount(toRender, stripped)
 	assert.Equal(t, 0, collisions,
 		"the three-branch fixture must render with zero label collisions after the LR retry\nart:\n%s", stripped)
+
+	// The assertion above uses the same detector the retry is gated on, so on
+	// its own it can only say "the detector is satisfied". This one is
+	// independent of it: the two labels that shared a row in the broken render
+	// must now be readable — either on different rows, or with real space
+	// between them.
+	assertLabelsReadable(t, stripped,
+		mermaidNBSPSubstitute("collection"), mermaidNBSPSubstitute("single composite"))
+}
+
+// assertLabelsReadable checks two edge labels are not crammed into one arrow
+// corridor, without consulting mermaidCollisionCount: it finds every row
+// carrying both labels and requires a visible run of separator between them.
+func assertLabelsReadable(t *testing.T, art, first, second string) {
+	t.Helper()
+	shared := 0
+	for row := range strings.SplitSeq(art, "\n") {
+		i, j := strings.Index(row, first), strings.Index(row, second)
+		if i < 0 || j < 0 {
+			continue
+		}
+		shared++
+		lo, hi := i+len(first), j
+		if j < i {
+			lo, hi = j+len(second), i
+		}
+		assert.GreaterOrEqual(t, hi-lo, mermaidCollisionGap,
+			"%q and %q share a row with only %d columns between them:\n%s", first, second, hi-lo, row)
+	}
+	assert.Equal(t, 0, shared, "the two labels must not share a row at all after the flip:\n%s", art)
 }
 
 func TestRenderMarkdownDocument_BleedFixture_LabelReachesArtIntact(t *testing.T) {
