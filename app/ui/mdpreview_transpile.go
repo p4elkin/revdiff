@@ -2360,8 +2360,8 @@ func transpileMermaid(source string, paneWidth int) (string, bool) {
 // mdpreview_collision.go) gets one chance to replace it: if the render put
 // two distinct edge labels on the same row, it re-renders toRender with its
 // direction flipped to TD/TB -> LR and keeps that second render only when it
-// collides strictly less AND does not push a diagram that fitted paneWidth off
-// the side of it. A fence that renders cleanly the first time, or whose header
+// collides strictly less AND does not blow a diagram that fitted paneWidth up
+// to several times its width. A fence that renders cleanly the first time, or whose header
 // cannot be flipped, or whose flipped render is no better or too wide,
 // reaches its return byte-identical to before the retry existed. The
 // subgraph-stacked path above returns early and is never retried — each

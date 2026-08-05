@@ -322,8 +322,8 @@ func mermaidFlipHeaderLine(line string) (string, bool) {
 //  2. the first render (toRender/rendered) collides at least once — a
 //     fence with no collisions never renders twice
 //  3. the flipped render succeeds and is non-blank
-//  4. the flip does not push a diagram that fitted the pane off the side of
-//     it — see mermaidFlipFitsPane
+//  4. the flip does not blow a diagram that fitted the pane up to several
+//     times its width — see mermaidFlipWidthAcceptable
 //  5. the flipped render collides STRICTLY FEWER times than the first —
 //     a flip that trades one collision for another is not an improvement
 //
@@ -357,7 +357,7 @@ func mermaidRetryLRIfColliding(toRender, rendered string, paneWidth int, render 
 		return rendered
 	}
 
-	if !mermaidFlipFitsPane(rendered, flippedRender, paneWidth) {
+	if !mermaidFlipWidthAcceptable(rendered, flippedRender, paneWidth) {
 		return rendered
 	}
 
@@ -368,29 +368,74 @@ func mermaidRetryLRIfColliding(toRender, rendered string, paneWidth int, render 
 	return flippedRender
 }
 
-// mermaidFlipFitsPane reports whether the LR flip is allowed to replace the
-// first render on width grounds. It objects to exactly one trade: a first
-// render that fits the pane being replaced by a flipped render that does not.
+// mermaidFlipBlowupRatio is how many times wider than the first render the
+// flipped render may be before the width gate declines it. Past this multiple
+// the flip is treated as absurd rather than merely wide.
 //
-// Flipping to LR makes the art wider, often several times wider — measured on
-// the corpus, one 80-column diagram flipped to 273. When the first render
-// already overflows the pane the reader is panning either way, so a wider
-// flip costs them nothing they were not already paying and the fix is worth
-// it. When the first render fits on one screen, taking that away is a real
-// loss, and it is not worth paying for a collision that is at worst crowded
-// rather than destroyed.
+// # Why a ratio and not a fit test
 //
-// No pane width to respect (mermaidUnconstrainedWidth, or any non-positive
-// width) means no width objection — not a pane of width zero that nothing
-// fits.
-func mermaidFlipFitsPane(rendered, flipped string, paneWidth int) bool {
-	if paneWidth <= 0 {
+// The gate used to object to any first render that fitted the pane being
+// replaced by one that did not, and that is too blunt, because it makes "fits
+// the pane" the thing being protected. It is not: the reader can pan
+// (scroll_left / scroll_right are both in mdPreviewAllowedActions), so a wider
+// diagram costs keystrokes, while a diagram whose labels are painted over each
+// other cannot be read at any pane width and cannot be recovered by panning.
+// A wrecked-but-fitting diagram is worse than a correct-but-wider one, so
+// fitting the pane is not on its own worth declining a correct render for.
+//
+// What the gate is actually there for is the case where the detector is WRONG.
+// A phantom collision — two short labels with clear space between them, which
+// mermaidCollisionCount reports as crowded — sends a perfectly readable
+// diagram off to an LR render several times its size for no gain at all. The
+// gate exists to bound the damage in that case, so it should trigger on
+// absurdity and not on mere width.
+//
+// The two measured cases are what set the value. The suppressed fix is a
+// 150-column top-down render against a 238-column flip, a factor of 1.6; the
+// phantom-collision blowup is 71 columns against 330, a factor of 4.6. 3.0
+// sits between them with more than a whole factor of margin on each side —
+// see TestMermaidFlipBlowupRatio_SeparatesTheMeasuredCases, which fails if a
+// later edit moves the constant close to either.
+const mermaidFlipBlowupRatio = 3.0
+
+// mermaidFlipWidthAcceptable reports whether the LR flip is allowed to replace
+// the first render on width grounds, measuring both renders and applying
+// mermaidWidthTradeAcceptable.
+func mermaidFlipWidthAcceptable(rendered, flipped string, paneWidth int) bool {
+	return mermaidWidthTradeAcceptable(mermaidArtWidth(rendered), mermaidArtWidth(flipped), paneWidth)
+}
+
+// mermaidWidthTradeAcceptable is the width rule itself, in columns. It objects
+// to exactly one trade: a first render that fits the pane being replaced by a
+// flipped render that both leaves the pane AND is more than
+// mermaidFlipBlowupRatio times as wide. See that constant for why the ratio is
+// the test rather than the fit.
+//
+// It is separate from mermaidFlipWidthAcceptable because the rule is about two
+// numbers, and the numbers are the part worth pinning: the tests state the
+// measured cases as the column widths they were measured as, rather than as
+// art strings built to have those widths.
+//
+// Two cases raise no objection before the ratio is reached at all. A first
+// render that already overflows the pane means the reader is panning either
+// way, so a wider flip costs them nothing they were not already paying. And a
+// non-positive pane width (mermaidUnconstrainedWidth, or any other) is no
+// constraint to respect — not a pane of width zero that nothing fits.
+//
+// A non-positive first width means blank or missing art, which is no fitting
+// diagram to protect, so it raises no objection either. That also keeps the
+// ratio from being computed against a zero denominator.
+func mermaidWidthTradeAcceptable(firstWidth, flippedWidth, paneWidth int) bool {
+	if paneWidth <= 0 || firstWidth <= 0 {
 		return true
 	}
-	if mermaidArtWidth(rendered) > paneWidth {
+	if firstWidth > paneWidth {
 		return true
 	}
-	return mermaidArtWidth(flipped) <= paneWidth
+	if flippedWidth <= paneWidth {
+		return true
+	}
+	return float64(flippedWidth) <= float64(firstWidth)*mermaidFlipBlowupRatio
 }
 
 // mermaidRowCollisions counts collisions on a single row of art. matchers must

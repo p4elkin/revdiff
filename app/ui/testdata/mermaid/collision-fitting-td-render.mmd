@@ -1,0 +1,9 @@
+flowchart TD
+    Start["Resolve schema for the next path segment"] --> Found{"Property exists in the schema?"}
+    Found -->|"no"| Allow1["Allow — not this method's concern"]
+    Found -->|"yes"| Island["islandHere = already inside an island"]
+    Island --> Shape{"What kind of property is it?"}
+    Shape -->|"plain scalar"| NoVerdict["No verdict — caller applies the field-edit rule"]
+    Shape -->|"single composite"| DescendC["Resolve the item's model, descend one level"]
+    Shape -->|"collection"| Checkpoint["Go to a checkpoint"]
+    DescendC -.->|"recurse"| Start

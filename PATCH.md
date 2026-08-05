@@ -545,7 +545,8 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   changed the rendered art of 83 of 231 fences.
 - **A decision node with three or more labeled out-edges can still put two labels where the
   reader cannot tell them apart, when the diagram's direction cannot be flipped, the flip
-  doesn't help, or the flip would push a diagram that fitted the pane off the side of it.** The
+  doesn't help, or the flip would blow a diagram that fitted the pane up to more than three
+  times its width.** The
   complete fix is in the vendored `drawTextOnLine` (reserve occupied cells, nudge the label
   along its line), which would mean forking `mermaid-ascii`. Instead, `renderMermaidSource`
   renders once, counts collisions with `mermaidCollisionCount` (`mdpreview_collision.go`), and
@@ -554,8 +555,10 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   direction at all, which the renderer lays out top-down and which the flip fixes by inserting
   the keyword (`RL`/`BT`/`LR` are left alone, and so is a missing or malformed header); the
   first render collides at least once; the flipped render succeeds and is non-blank; the flip
-  does not take a diagram that fitted `paneWidth` and make it not fit (`mermaidFlipFitsPane`);
-  the flipped render collides STRICTLY FEWER times than the first. The header is tested before
+  does not blow a diagram that fitted `paneWidth` up to more than `mermaidFlipBlowupRatio`
+  (3.0) times its width (`mermaidFlipWidthAcceptable`, whose rule in columns is
+  `mermaidWidthTradeAcceptable`); the flipped render collides STRICTLY FEWER times than the
+  first. The header is tested before
   the collision count, so the label scan never runs on a source whose `|...|` is not an edge
   label at all. Any gate failure keeps the first render, so a fence with no collisions never
   renders twice and every failure path degrades to today's output — including a panic in the
@@ -573,14 +576,51 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   the next entry for the measured case where ordinary node text is caught anyway, because
   "unrelated to any label" is checked against every OTHER label's text, not against whether the
   row has an edge label on it at all.
-  **Measured across the corpus** (15254 markdown files, 231 distinct fences, pane width 120,
-  base `3187fc5` against the finished change, same detector run over both builds' dumps): 15
-  fences had a colliding label before this change, 6 after; the retry fires and is kept on 9.
-  Of the 6 that still collide, 4 are declined by the width guard (first renders of 103, 100,
-  115 and 59 columns, all fitting the pane, against flips of 150, 121, 328 and 170) and 2 take
-  the subgraph-stacked path, which returns before the retry. Widths on the 9 kept flips run
-  137 → 79, 135 → 111, 121 → 112, 155 → 159, 57 → 86, 151 → 260, 148 → 279, 207 → 281 (the
-  repo's own `collision-three-branches.mmd` fixture) and 136 → 286. A fence already written `LR`
+  **Why the width guard is a ratio and not a fit test.** It used to decline any flip that took
+  a diagram fitting `paneWidth` and made it not fit, and that guarded the wrong thing. The
+  reader can pan (`scroll_left` / `scroll_right` are both on `mdPreviewAllowedActions`), so a
+  wider diagram costs keystrokes, while a diagram whose labels are painted over each other
+  cannot be read at any pane width and panning does not bring it back. The guard exists only to
+  bound the damage when the DETECTOR is wrong — a phantom collision sending a readable diagram
+  off to several times its size for no gain — so it has to trigger on absurdity, not on width.
+  The fit-only form suppressed the feature's headline fix inside a window of pane widths, which
+  is what the ratio replaces it for. Measured on `testdata/mermaid/collision-fitting-td-render.mmd`
+  (the section-1 fence of the author's sample plan) on 2026-08-05:
+
+  | pane width | kept art width | is the label intact? |
+  |---|---|---|
+  | 80, 120 | 238 (flip kept) | yes |
+  | 160, 200 | 150 (first render kept) | NO — the row reads `├◄───collectioningle composite──────────────┤`: `collection` painted over `single composite`, the `s` destroyed |
+  | 240, 300, 400 | 238 (flip kept) | yes |
+
+  At 160 and 200 the top-down render is 150 columns, so it FITS, so the old guard declined the
+  flip and left the wrecked art on screen; below 160 the first render did not fit and above 200
+  the flip did, so both ends were fine and only the middle was broken. That fence widens by
+  238/150 = 1.6x, while the phantom-collision blowup the guard was added for widens by
+  330/71 = 4.6x, so 3.0 separates them with more than a factor of margin on each side
+  (`TestMermaidFlipBlowupRatio_SeparatesTheMeasuredCases` fails if a later edit moves the
+  constant near either).
+  **Measured across the corpus** (15254 markdown files, 233 distinct fences — the list is a live
+  snapshot of the author's disk, 231 when the retry shipped — with the old fit-only gate and the
+  ratio gate run side by side in one binary, same detector over both outputs, on 2026-08-05):
+  at pane width 120, 6 fences still carried a colliding label under the fit-only gate and 3 do
+  under the ratio gate; 3 fences change their kept render, all of them from the first render to
+  the flip: 103 → 150 columns (1.46x, 2 collisions → 0), 100 → 121 (1.21x, 1 → 0) and 59 → 170
+  (2.88x, 1 → 0). Each was checked by eye and each is a real collision, not a phantom: the three
+  first renders carry `├◄ddecision==abortrove`, `├◄──materializeeted` and
+  `an agent acknowledges───────Publish Selected`. No fence in the corpus widens past the ratio
+  as a result of this change — by construction it cannot, since the ratio is the gate. At pane
+  width 160 the same run gives 8 colliding under the fit-only gate against 3 under the ratio
+  gate, with 5 fences changing their kept render (the three above plus 151 → 260 and 142 → 173).
+  The 3 left at either width are 2 that take the subgraph-stacked path, which returns before the
+  retry, and one 115 → 328 fence whose flip collides just as often as its first render, so the
+  strict `flippedCount < firstCount` comparison declines it and the width guard never decides it
+  at all. (An earlier note here counted that fence among "4 declined by the width guard"; that
+  was true of the gate ORDER — the width gate runs first — but only 3 of those 4 were actually
+  held back by width.) Widths on the flips that were already kept before this change, at pane
+  width 120: 137 → 79, 135 → 111, 121 → 112, 155 → 159, 57 → 86, 151 → 260, 148 → 279,
+  207 → 281 (the repo's own `collision-three-branches.mmd` fixture) and 136 → 286.
+  A fence already written `LR`
   that still collides is not helped — there is no further direction to try. The cost of a fence
   that DOES collide is two full renders every time it is drawn, and preview has no render cache
   by design (see `renderMarkdownPreview`'s doc comment), so a pan keypress across such a
@@ -631,8 +671,11 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   it was before this feature existed. A phantom collision costs one extra vendored render (about
   9ms, see the corpus note above) and can only ever fire on a fence the detector itself believes
   collides — a clean fence's bytes never change. Even a wrongly-triggered flip is still bounded by
-  `mermaidFlipFitsPane`: it cannot turn a fence that fit the pane into one that doesn't, the same
-  guard that bounds a correctly-triggered one. What a phantom collision CAN do is win the strict
+  `mermaidFlipWidthAcceptable`: it cannot blow a fence that fit the pane up to more than three
+  times its width, the same guard that bounds a correctly-triggered one. A phantom collision can
+  now cost a fence that fit the pane its fit, up to that ratio — that is the deliberate price of
+  the ratio rule, paid so a real collision inside the same window is fixed rather than left
+  wrecked. What a phantom collision CAN do is win the strict
   `flippedCount < firstCount` comparison on noise rather than on a real fix, since that comparison
   is made on counts that can themselves be wrong in either direction.
 

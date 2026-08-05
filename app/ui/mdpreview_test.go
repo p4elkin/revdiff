@@ -381,6 +381,30 @@ func assertLabelsReadable(t *testing.T, art, first, second string) {
 	assert.Equal(t, 0, shared, "the two labels must not share a row at all after the flip:\n%s", art)
 }
 
+// TestRenderMarkdownDocument_FittingTDFixture_LabelSurvivesAtAPaneItFits is the
+// regression pin for the pane-width window the old fit-only width gate opened.
+// This fixture's top-down render is 150 columns wide, so at a 160-column pane it
+// FITS — and the gate used to read that as "leave it alone", throwing away the LR
+// flip and leaving the reader with `collection` painted over `single composite`
+// (`├◄───collectioningle composite──────┤`, the `s` destroyed). Measured at the
+// time: labels intact at panes 80, 120, 240, 300 and 400, wrecked at 160 and 200.
+// The gate now objects on the width RATIO instead (238/150 is 1.59), so the flip
+// is kept at every one of those pane widths.
+func TestRenderMarkdownDocument_FittingTDFixture_LabelSurvivesAtAPaneItFits(t *testing.T) {
+	source := readMermaidFixture(t, "collision-fitting-td-render.mmd")
+	doc := "```mermaid\n" + source + "\n```\n"
+
+	got := renderMarkdownDocument(mdLines(doc), 160, false)
+	stripped := xansi.Strip(got)
+
+	// The no-break-space substitution runs before the render, so the label
+	// reaches the art with U+00A0 where its space was.
+	assert.Contains(t, stripped, mermaidNBSPSubstitute("single composite"),
+		"the `single composite` label must reach the art intact at a pane the top-down render fits\nart:\n%s", stripped)
+	assert.Contains(t, stripped, "collection",
+		"the `collection` label must reach the art intact too\nart:\n%s", stripped)
+}
+
 func TestRenderMarkdownDocument_BleedFixture_LabelReachesArtIntact(t *testing.T) {
 	source := readMermaidFixture(t, "bleed-crossing-edge.mmd")
 	doc := "```mermaid\n" + source + "\n```\n"
@@ -396,7 +420,7 @@ func TestRenderMarkdownDocument_BleedFixture_LabelReachesArtIntact(t *testing.T)
 }
 
 func TestRenderMarkdownDocument_Fixtures_NoPanicNoBlankRender(t *testing.T) {
-	for _, name := range []string{"collision-three-branches.mmd", "bleed-crossing-edge.mmd"} {
+	for _, name := range []string{"collision-three-branches.mmd", "bleed-crossing-edge.mmd", "collision-fitting-td-render.mmd"} {
 		t.Run(name, func(t *testing.T) {
 			source := readMermaidFixture(t, name)
 			doc := "```mermaid\n" + source + "\n```\n"

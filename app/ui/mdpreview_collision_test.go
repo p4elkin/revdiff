@@ -461,15 +461,29 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 		}
 	})
 
-	t.Run("a flip that pushes a fitting diagram off the pane keeps the first render", func(t *testing.T) {
+	t.Run("a flip that pushes a fitting diagram modestly off the pane is still kept", func(t *testing.T) {
 		paneWidth := len([]rune(collidingArt)) + 1 // the first render fits, the flipped one does not
 		if len([]rune(nonCollidingArt)) <= paneWidth {
 			t.Fatalf("test setup: flipped art must be wider than the pane, got %d for pane %d", len([]rune(nonCollidingArt)), paneWidth)
 		}
 		render := func(string) (string, error) { return nonCollidingArt, nil }
 		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, paneWidth, render)
+		if got != nonCollidingArt {
+			t.Fatalf("got %q, want the flipped render — leaving the pane is not on its own a reason to decline a correct render", got)
+		}
+	})
+
+	t.Run("a flip that blows a fitting diagram up past the ratio keeps the first render", func(t *testing.T) {
+		// Same shape as the case above — the first render fits, the flipped
+		// one does not — but the flipped art is far past
+		// mermaidFlipBlowupRatio times as wide, which is the only width the
+		// gate still objects to.
+		blownUp := nonCollidingArt + strings.Repeat("─", 4*len([]rune(collidingArt)))
+		paneWidth := len([]rune(collidingArt)) + 1
+		render := func(string) (string, error) { return blownUp, nil }
+		got := mermaidRetryLRIfColliding(collidingSource, collidingArt, paneWidth, render)
 		if got != collidingArt {
-			t.Fatalf("got %q, want first render unchanged when the flip no longer fits the pane", got)
+			t.Fatalf("got %q, want first render unchanged when the flip blows up past the ratio", got)
 		}
 	})
 
@@ -496,6 +510,114 @@ func TestMermaidRetryLRIfColliding(t *testing.T) {
 			t.Fatalf("got %q, want first render unchanged after a panic in the flipped render", got)
 		}
 	})
+}
+
+func TestMermaidWidthTradeAcceptable(t *testing.T) {
+	tests := []struct {
+		name         string
+		firstWidth   int
+		flippedWidth int
+		paneWidth    int
+		want         bool
+	}{
+		{
+			// Measured on testdata/mermaid/collision-fitting-td-render.mmd at
+			// a 160-column pane: the top-down render is 150 columns wide and
+			// fits, the LR flip is 238. The old fit-only gate vetoed this and
+			// left the reader looking at `collection` painted over
+			// `single composite`. 238/150 is 1.59, well inside the ratio.
+			name:       "the pane-width window this rule exists for: a 150-column render is replaced by a 238-column flip",
+			firstWidth: 150, flippedWidth: 238, paneWidth: 160, want: true,
+		},
+		{
+			// The corpus case the gate was added for: two short labels five
+			// clear columns apart, called a collision by the detector, sent a
+			// perfectly readable 71-column diagram off to 330 columns.
+			// 330/71 is 4.65, past the ratio, so this stays vetoed.
+			name:       "the blowup this rule still vetoes: a 71-column render is not replaced by a 330-column flip",
+			firstWidth: 71, flippedWidth: 330, paneWidth: 120, want: false,
+		},
+		{
+			name:       "exactly the ratio is not MORE than the ratio, so the flip is kept",
+			firstWidth: 100, flippedWidth: 300, paneWidth: 120, want: true,
+		},
+		{
+			name:       "one column past the ratio is vetoed",
+			firstWidth: 100, flippedWidth: 301, paneWidth: 120, want: false,
+		},
+		{
+			name:       "a first render that already overflows the pane raises no objection, however wide the flip",
+			firstWidth: 130, flippedWidth: 1300, paneWidth: 120, want: true,
+		},
+		{
+			name:       "a flip that still fits the pane is kept even when it is many times wider",
+			firstWidth: 10, flippedWidth: 100, paneWidth: 120, want: true,
+		},
+		{
+			name:       "a zero-width first render has no fitting diagram to protect",
+			firstWidth: 0, flippedWidth: 330, paneWidth: 120, want: true,
+		},
+		{
+			name:       "a negative first width has no fitting diagram to protect either",
+			firstWidth: -1, flippedWidth: 330, paneWidth: 120, want: true,
+		},
+		{
+			name:       "mermaidUnconstrainedWidth means no width objection at all",
+			firstWidth: 71, flippedWidth: 330, paneWidth: mermaidUnconstrainedWidth, want: true,
+		},
+		{
+			name:       "a zero pane is no constraint, not a pane nothing fits",
+			firstWidth: 71, flippedWidth: 330, paneWidth: 0, want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mermaidWidthTradeAcceptable(tt.firstWidth, tt.flippedWidth, tt.paneWidth)
+			if got != tt.want {
+				t.Fatalf("mermaidWidthTradeAcceptable(%d, %d, %d) = %v, want %v",
+					tt.firstWidth, tt.flippedWidth, tt.paneWidth, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMermaidFlipBlowupRatio_SeparatesTheMeasuredCases pins the margin on both
+// sides of the constant. The two cases in the table above are the real ones the
+// rule has to tell apart, and a constant that only just separates them would be
+// a coincidence rather than a rule.
+func TestMermaidFlipBlowupRatio_SeparatesTheMeasuredCases(t *testing.T) {
+	suppressedFix := 238.0 / 150.0 // the pane-width window bug: must be kept
+	falsePositive := 330.0 / 71.0  // the detector's phantom collision: must be vetoed
+
+	if suppressedFix >= mermaidFlipBlowupRatio {
+		t.Fatalf("the suppressed fix widens by %.2fx, which the ratio %.1f does not keep", suppressedFix, mermaidFlipBlowupRatio)
+	}
+	if falsePositive <= mermaidFlipBlowupRatio {
+		t.Fatalf("the false-positive blowup widens by %.2fx, which the ratio %.1f does not veto", falsePositive, mermaidFlipBlowupRatio)
+	}
+	if mermaidFlipBlowupRatio-suppressedFix < 1 || falsePositive-mermaidFlipBlowupRatio < 1 {
+		t.Fatalf("the ratio %.1f sits too close to a measured case (%.2fx kept, %.2fx vetoed) to be more than a coincidence",
+			mermaidFlipBlowupRatio, suppressedFix, falsePositive)
+	}
+}
+
+// TestMermaidFlipWidthAcceptable_MeasuresArtNotBytes pins that the gate's two
+// inputs are art WIDTHS — widest row, trailing padding stripped — and not the
+// length of the rendered strings, which for multi-row art are unrelated numbers.
+func TestMermaidFlipWidthAcceptable_MeasuresArtNotBytes(t *testing.T) {
+	// Ten rows of ten columns, each padded out to 40 columns by the renderer.
+	first := strings.TrimSuffix(strings.Repeat(strings.Repeat("─", 10)+strings.Repeat(" ", 30)+"\n", 10), "\n")
+	// One row of 25 columns: 2.5x the first render's width, inside the ratio,
+	// but a far SHORTER string than the first render.
+	flipped := strings.Repeat("─", 25)
+
+	if !mermaidFlipWidthAcceptable(first, flipped, 20) {
+		t.Fatalf("gate rejected a 10-column render being replaced by a 25-column one at a 20-column pane")
+	}
+	if mermaidFlipWidthAcceptable(first, strings.Repeat("─", 31), 20) {
+		t.Fatalf("gate accepted a 10-column render being replaced by a 31-column one at a 20-column pane")
+	}
 }
 
 func TestRenderMermaidSource_NoCollision_MatchesDirectRenderDiagram(t *testing.T) {
