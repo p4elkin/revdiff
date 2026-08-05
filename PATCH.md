@@ -74,8 +74,20 @@ preview included, published to the user's own fork, never to `origin`.
   renders each subgraph as a separate diagram stacked under its own title. Covers the five-rule
   split decision and the render + stack + fallback workflow.
 - `app/ui/mdpreview_subgraph_test.go` — its tests.
+- `app/ui/mdpreview_nbsp.go` — the shared no-break-space substitution used by every mermaid
+  edge-label call site, replacing spaces so `mergeDrawings` in the vendored renderer treats the
+  cell as opaque instead of letting the arrow line or a crossing edge bleed through (see
+  "Edge-label rendering wiring" below).
+- `app/ui/mdpreview_nbsp_test.go` — its tests.
+- `app/ui/mdpreview_collision.go` — the edge-label collision detector plus the LR-direction
+  retry gate: counts how many distinct labels land too close together on one row of rendered
+  art, and decides whether a second render with the direction flipped to LR is strictly better.
+- `app/ui/mdpreview_collision_test.go` — its tests.
+- `app/ui/mdpreview_corpus_test.go` — the differential corpus harness used to verify both fixes
+  against a large body of real fences; skipped unless `REVDIFF_MERMAID_CORPUS` is set, so it
+  never runs in `make test` or CI.
 
-A clean rebase never conflicts on these eight files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these thirteen files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -283,6 +295,30 @@ caution, not a safety condition, and it is gone.
 - `mdPreviewAllowedActions` is unchanged. `next_item`/`prev_item` stay blocked — see the expanded
   comment above the map, and the "must leave preview before changing file" limitation below.
 
+**Edge-label rendering wiring (no-break spaces and the LR collision retry, added later — see
+`docs/plans/20260805-mermaid-edge-label-rendering.md`):**
+
+- `app/ui/mdpreview_transpile.go`
+  - `mermaidEdgeLabel` — the `strings.ReplaceAll(s, " ", "·")` substitution and the
+    `mermaidDotRun` collapse were removed; the function now calls `mermaidNBSPSubstitute`
+    (`mdpreview_nbsp.go`) as its sole space-handling step, after `mermaidSafeText` and before
+    the rune/byte cap.
+  - `renderMermaidSource` — after the existing `mermaidcmd.RenderDiagram(toRender, nil)` call,
+    the result is passed through `mermaidRetryLRIfColliding(toRender, rendered, func(s string)
+    (string, error) { return mermaidcmd.RenderDiagram(s, nil) })` before the `return rendered,
+    nil`. The transpile and subgraph-split paths above that call are untouched — the retry only
+    ever sees the final whole-source (or per-subgraph) render.
+- `app/ui/mdpreview_flowchart.go`
+  - `unquoteFlowchartEdgeLabel` renamed to `normalizeFlowchartEdgeLabel` and restructured so the
+    no-break-space substitution runs on every path that has a label, not only the
+    previously-quoted one; it is now the single chokepoint for both edge-label spellings
+    (`normalizeFlowchartLine` normalizes links before nodes, so an inline `-- label -->` has
+    already become `-->|label|` by the time this function runs).
+
+Both files are already patch-owned (listed under "New files added by the patch" above), so none
+of this carries rebase conflict risk against upstream — recorded here for the call-flow map,
+same reasoning as the "Diagram transpile wiring" and "Horizontal panning wiring" entries above.
+
 **Test-only, mechanical, not part of the feature itself:**
 
 - `app/keymap/keymap_test.go` — asserts `P` resolves to `ActionTogglePreview`
@@ -487,12 +523,32 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   render still wider than the pane: only whole columns move, so a box straddling the edge is
   still cut mid-glyph until you pan past it, and prose (already wrapped to the pane by glamour)
   goes blank once you pan past its end.
-- **Spaces inside an edge label render as `─` (dash) on the arrow line.** When a label like
-  `"listVariants (segment coords)"` is drawn on top of an arrow line, space characters do not
-  paint — the arrow line shows through underneath. This is the vendored `mermaid-ascii`
-  renderer's `drawText` function, not the transpiler or normalizer. Fixing it requires changing
-  the vendored drawing code. Workaround: use non-breaking spaces or replace spaces with other
-  characters when the label must sit on an arrow.
+- ~~**Spaces inside an edge label render as `─` (dash) on the arrow line.**~~ **FIXED — every
+  edge-label space is now a no-break space, not a plain one** (see
+  `docs/plans/20260805-mermaid-edge-label-rendering.md` and `mdpreview_nbsp.go`'s doc comment).
+  U+00A0 is not the byte `" "`, so `mergeDrawings` in the vendored renderer treats the cell as
+  opaque and keeps it instead of letting the arrow line or a crossing edge bleed through, while
+  terminals still draw it as a blank. Two costs are accepted in exchange: art copied out of the
+  terminal carries no-break spaces rather than plain ones, and a small number of fonts render
+  U+00A0 visibly instead of blank. Measured across the corpus (see "Corpus verification result"
+  under Progress Tracking in the plan above): the substitution changed 84 of 229 fences,
+  replacing 517 plain spaces and 146 middle dots.
+- **A decision node with three or more labeled out-edges can still put two labels too close
+  together to tell apart, when the diagram's direction cannot be flipped or the flip doesn't
+  help.** The complete fix is in the vendored `drawTextOnLine` (reserve occupied cells, nudge
+  the label along its line), which would mean forking `mermaid-ascii`. Instead,
+  `renderMermaidSource` renders once, counts collisions with `mermaidCollisionCount`
+  (`mdpreview_collision.go`), and keeps a second render with the direction flipped to `LR` only
+  when ALL of: the first render collides at least once; the source has an explicit `TD`/`TB`
+  header (`RL`/`BT`/`LR` are left alone — `mermaidFlipDirectionToLR` reports false for anything
+  else, including a missing or malformed header); the flipped render succeeds and is non-blank;
+  the flipped render collides STRICTLY FEWER times than the first. Any gate failure keeps the
+  first render, so a fence with no collisions never renders twice and every failure path
+  degrades to today's output. Flipping to LR makes the art wider (measured on the affected
+  fences, 188 to 215 columns on average), which is the accepted trade-off — preview mode already
+  has horizontal panning. Measured across the corpus: 7 fences had a colliding label before this
+  change, 0 after; the retry fired and was kept on 6 of the corpus's 229 fences. A fence already
+  written `LR` that still collides is not helped — there is no further direction to try.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
 - **You must leave preview before changing file.** Preview now works in a multi-file review, but no

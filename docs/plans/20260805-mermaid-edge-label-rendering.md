@@ -456,15 +456,15 @@ Any failure returns the first render. A fence with no collisions never renders t
 
 **Model:** sonnet
 
-- [ ] add `mdpreview_nbsp.go` and `mdpreview_collision.go` to the new-files list in `PATCH.md`
-- [ ] record the no-break space substitution, why it exists, and the two accepted costs
+- [x] add `mdpreview_nbsp.go` and `mdpreview_collision.go` to the new-files list in `PATCH.md`
+- [x] record the no-break space substitution, why it exists, and the two accepted costs
       (copy-paste carries U+00A0, some fonts draw it visibly)
-- [ ] record the LR retry, its four gate conditions, and the measured corpus numbers
-- [ ] record the remaining limitation: the collision is a vendored `drawTextOnLine` defect, the
+- [x] record the LR retry, its four gate conditions, and the measured corpus numbers
+- [x] record the remaining limitation: the collision is a vendored `drawTextOnLine` defect, the
       retry only covers fences with a flippable direction, and a collided `LR` fence stays
       collided
-- [ ] add a manual test plan section with both fixtures and what to look for in each
-- [ ] run `go test ./app/ui` - must pass before task 9
+- [x] add a manual test plan section with both fixtures and what to look for in each
+- [x] run `go test ./app/ui` - must pass before task 9
 
 ### Task 9: Verify acceptance criteria
 
