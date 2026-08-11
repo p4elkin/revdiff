@@ -238,9 +238,9 @@ func TestMdPreviewStartAnnotation_NothingHighlighted_NoOp(t *testing.T) {
 }
 
 // TestMdPreviewStartAnnotation_AimMidDocument proves `a` anchors to whatever
-// block the scroll-following highlight currently marks — here the viewport is
-// scrolled so the second of three blocks is topmost, and the resolved
-// StartLine must be that block's, not the first or the last.
+// block the block cursor currently marks — here the cursor is steered onto the
+// second of three blocks, and the resolved StartLine must be that block's, not
+// the first or the last.
 func TestMdPreviewStartAnnotation_AimMidDocument(t *testing.T) {
 	doc := "# Heading\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph."
 	lines := mdLines(doc)
@@ -251,23 +251,18 @@ func TestMdPreviewStartAnnotation_AimMidDocument(t *testing.T) {
 	require.True(t, srcMap.aligned)
 	require.GreaterOrEqual(t, len(srcMap.blocks()), 3, "fixture sanity: need at least three distinct blocks")
 	target := srcMap.blocks()[1]
-	// direct field assignment, not SetYOffset: the viewport's own clamp is
-	// against its internal content buffer (populated by SetContent), which
-	// nothing here has set yet — target.row is a row of the srcMap's own
-	// render, a value the viewport's clamp knows nothing about and would zero
-	// out.
-	m.layout.viewport.YOffset = target.row
+	m.setMdPreviewBlockCursor(1)
 
 	m.mdPreviewStartAnnotation()
 
 	assert.True(t, m.annot.annotating)
 	assert.Equal(t, target.startLine, m.nav.diffCursor,
-		"aim must land on the block the highlight currently marks, not the first or last")
+		"aim must land on the block the cursor marks, not the first or last")
 }
 
 // TestMdPreviewStartAnnotation_AimPastLastBlock covers the "past the last
-// block" case: scrolled all the way to the final block, aim must still
-// resolve to it rather than falling off the end of the anchors slice.
+// block" case: with the cursor on the final block, aim must still resolve to it
+// rather than falling off the end of the anchors slice.
 func TestMdPreviewStartAnnotation_AimPastLastBlock(t *testing.T) {
 	doc := "# Heading\n\nFirst paragraph.\n\nSecond paragraph."
 	lines := mdLines(doc)
@@ -277,13 +272,13 @@ func TestMdPreviewStartAnnotation_AimPastLastBlock(t *testing.T) {
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned)
 	last := srcMap.blocks()[len(srcMap.blocks())-1]
-	m.layout.viewport.YOffset = last.row // see the AimMidDocument test for why not SetYOffset
+	m.setMdPreviewBlockCursor(len(srcMap.blocks()) - 1)
 
 	m.mdPreviewStartAnnotation()
 
 	assert.True(t, m.annot.annotating)
 	assert.Equal(t, last.startLine, m.nav.diffCursor,
-		"aim scrolled to the last block must anchor there, not lose the block entirely")
+		"aim on the last block must anchor there, not lose the block entirely")
 }
 
 // TestMdPreviewClickAnnotate_InsideBlockResolvesToIt covers "a click inside a
@@ -827,6 +822,7 @@ func TestMdPreviewHighlight_PannedRowReachesPaneEdge(t *testing.T) {
 	require.True(t, srcMap.aligned, "fixture sanity")
 	require.Greater(t, m.mdPreviewWidestRow(body), m.mdPreviewCutWidth(),
 		"fixture sanity: the document must be wider than the pane, or applyMdPreviewScroll returns the render untouched")
+	m.setMdPreviewBlockCursor(0) // nothing is marked until the reader steers the cursor
 	bi := m.mdPreviewHighlightAnchor(srcMap)
 	require.GreaterOrEqual(t, bi, 0, "fixture sanity: a block must be marked")
 

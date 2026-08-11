@@ -19,12 +19,14 @@ import (
 	"github.com/umputun/revdiff/app/ui/style"
 )
 
-// mdPreviewState holds markdown preview's own transient runtime state. Only a
-// status-bar hint today, following outputState / compactState: preview refuses
-// to annotate a document whose source map did not align, and a refusal with no
-// message on screen is indistinguishable from an unbound key.
+// mdPreviewState holds markdown preview's own runtime state: the transient
+// status-bar hint (following outputState / compactState — preview refuses to
+// annotate a document whose source map did not align, and a refusal with no
+// message on screen is indistinguishable from an unbound key), and the block
+// cursor the reader steers the highlight with.
 type mdPreviewState struct {
-	hint string // transient status-bar message; cleared on next key press
+	hint   string               // transient status-bar message; cleared on next key press
+	cursor mdPreviewCursorState // which block the highlight marks, if any; see mdpreview_cursor.go
 }
 
 // mdFencePrefix returns the fence character ('`' or '~') and the count of leading
@@ -527,6 +529,12 @@ func (m *Model) toggleMarkdownPreview() {
 	}
 	m.modes.mdPreview = !m.modes.mdPreview
 	m.layout.scrollX = 0
+	// entering preview marks nothing: the highlight is a cursor the reader
+	// steers, not a mark derived from where the viewport happens to sit (see
+	// mdPreviewCursorState). Leaving clears it too, so a later re-entry on the
+	// same file at the same loadSeq — which the cursor's own tag cannot tell
+	// apart from staying in preview — also starts with nothing marked.
+	m.clearMdPreviewBlockCursor()
 	if m.modes.mdPreview {
 		m.layout.viewport.SetContent(m.renderDiff())
 		m.layout.viewport.GotoTop()
@@ -539,16 +547,15 @@ func (m *Model) toggleMarkdownPreview() {
 // preview at the current viewport width, cut to the visible column window at
 // the current horizontal offset (see applyMdPreviewScroll). The base render
 // goes through mdPreviewBaseRender (mdpreview_cache.go), keyed on
-// file/loadSeq/width/noColors, so a repaint at an unchanged state (the
-// scroll-following highlight repainting on every offset change, in a later
-// task) reuses the last glamour+mermaid pass instead of paying for a fresh
-// one. loadSeq is what makes the key safe across an R reload of the same file
+// file/loadSeq/width/noColors, so a repaint at an unchanged state (the block
+// cursor moving to another block, an annotation edit) reuses the last
+// glamour+mermaid pass instead of paying for a fresh one. loadSeq is what makes the key safe across an R reload of the same file
 // at the same width: reload bumps it even though the file name and width do
 // not change, so a stale render can never satisfy a post-reload lookup.
 //
 // The frame it returns is the composed one — base render, this file's
-// annotations painted under the blocks they belong to, and the scroll-following
-// block highlight — assembled by mdPreviewFinalRender (mdpreview_cache.go),
+// annotations painted under the blocks they belong to, and the block cursor's
+// highlight if one is placed — assembled by mdPreviewFinalRender (mdpreview_cache.go),
 // which owns the order those three steps run in.
 //
 // A pan keypress does NOT go through here — panMarkdownPreview composes the
@@ -796,14 +803,23 @@ func (m *Model) panMarkdownPreview(direction int) {
 // diff-pane handler's handleHorizontalScroll would cut diff rows that the
 // preview render does not have.
 //
-// The vertical reading keys (down/up, page, half-page, home/end) are routed
-// here for the same reason and must never fall through: their ordinary
-// handlers are the moveDiffCursor* family (handleDiffMovement, diffnav.go),
-// which reposition m.nav.diffCursor in diff-line coordinates the preview
-// render does not have. Preview has no cursor, so here they mean exactly what
-// they look like — move the viewport — and are served by shifting YOffset
-// directly. Without this, the only way to read past the first screen was
-// J/K, and every key a reader reaches for first was silently dead.
+// The vertical reading keys (down/up, page, half-page, home/end, J/K) are
+// routed here for the same reason and must never fall through: their ordinary
+// handlers are the moveDiffCursor* family (handleDiffMovement, diffnav.go) and
+// scrollDiffViewportLine, which reposition m.nav.diffCursor in diff-line
+// coordinates the preview render does not have. Here they split in two:
+//
+//   - down/up (j/k and the arrows) move the BLOCK cursor, one rendered block
+//     per press, and the viewport follows it minimally (see
+//     moveMdPreviewBlockCursor, mdpreview_cursor.go).
+//   - J/K, page, half-page and home/end move the viewport only, and drop the
+//     block cursor when the block it marks scrolls entirely out of view.
+//
+// J/K is routed here rather than left to fall through even though
+// scrollDiffViewportLine is harmless in preview (pinDiffCursorTo is an
+// unconditional no-op there): it repaints only when the pin moved something, so
+// in preview it never repainted at all, and the block cursor has to be dropped
+// and the frame redrawn when a scroll hides it.
 func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, bool) {
 	if !mdPreviewActionAllowed(action) {
 		return m, nil, true
@@ -830,10 +846,16 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 		m.panMarkdownPreview(1)
 		return m, nil, true
 	case keymap.ActionDown:
-		m.scrollMarkdownPreview(1)
+		m.moveMdPreviewBlockCursor(1)
 		return m, nil, true
 	case keymap.ActionUp:
-		m.scrollMarkdownPreview(-1)
+		m.moveMdPreviewBlockCursor(-1)
+		return m, nil, true
+	case keymap.ActionScrollDiffDown:
+		m.scrollMarkdownPreview(wheelStep)
+		return m, nil, true
+	case keymap.ActionScrollDiffUp:
+		m.scrollMarkdownPreview(-wheelStep)
 		return m, nil, true
 	case keymap.ActionPageDown:
 		m.scrollMarkdownPreview(m.mdPreviewPageStep())
@@ -849,9 +871,11 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 		return m, nil, true
 	case keymap.ActionHome:
 		m.layout.viewport.GotoTop()
+		m.afterMdPreviewViewportScroll()
 		return m, nil, true
 	case keymap.ActionEnd:
 		m.layout.viewport.GotoBottom()
+		m.afterMdPreviewViewportScroll()
 		return m, nil, true
 	default: // every other allowed action runs through the ordinary dispatch
 	}
@@ -866,31 +890,32 @@ func (m Model) mdPreviewPageStep() int {
 }
 
 // scrollMarkdownPreview shifts the preview viewport by delta rows, clamped to
-// the content, and repaints so the block highlight lands on the block that is
-// now topmost. It deliberately does NOT go through scrollDiffViewportLine (the
+// the content. This is the pure row-scroll path — J/K, the page and half-page
+// keys, and down/up on a document whose source map did not align — so it never
+// moves the block cursor; it only drops it when the scroll has carried its block
+// entirely off screen (see dropMdPreviewCursorIfHidden), then repaints.
+//
+// It deliberately does NOT go through scrollDiffViewportLine (the diff pane's
 // J/K path): that helper follows the shift with pinDiffCursorTo, which is a
 // no-op under preview only because of an explicit mdPreview guard in mouse.go.
-// Preview has no cursor to pin, so it calls the pure shifter directly and the
-// guard stays a backstop for the wheel rather than load-bearing here.
+// Preview has no diff cursor to pin, so it calls the pure shifter directly and
+// the guard stays a backstop for the wheel rather than load-bearing here.
 //
 // The repaint is immediate rather than deferred, and that is the one place this
 // path differs from the wheel. A key press is one event; the wheel arrives in
 // bursts of hundreds, which is what wheelState's debounce exists for (see
 // .claude/rules/gotchas.md), and the wheel keeps using it — flushWheelPending
 // repaints preview once at burst end. Repainting here costs a cached base render
-// plus two per-row passes, not a glamour render, so a held-down j does not need
+// plus two per-row passes, not a glamour render, so a held-down J does not need
 // its own debounce beside that one.
 //
 // A no-op scroll (already at an edge) repaints nothing: the offset did not move,
-// so neither did the highlight.
+// so nothing on screen changed either.
 func (m *Model) scrollMarkdownPreview(delta int) {
 	if !m.scrollDiffViewportBy(delta) {
 		return
 	}
-	if !m.file.markdownPreviewable {
-		return // preview stuck on for a file renderDiff will not preview; see panMarkdownPreview
-	}
-	m.layout.viewport.SetContent(m.renderMarkdownPreview())
+	m.afterMdPreviewViewportScroll()
 }
 
 // mdPreviewAllowedActions is the fixed allowlist of keymap actions that stay
@@ -908,7 +933,8 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //   - toggle_preview must stay allowed so P can turn the mode back
 //     off — this is the mode's only exit key.
 //   - confirm (a/enter) creates a line-level annotation anchored to the block
-//     the scroll-following highlight currently marks (mdPreviewHighlightAnchor)
+//     the block cursor currently marks, seeding that cursor at the viewport
+//     center when the reader has not placed it yet (mdPreviewHighlightAnchor)
 //     — see mdPreviewStartAnnotation, mdpreview_annotate.go. It is routed INSIDE
 //     handleMdPreviewAction above rather than left to fall through: its
 //     ordinary fall-through target, handleEnterKey, branches on pane focus,

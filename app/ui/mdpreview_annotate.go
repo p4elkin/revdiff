@@ -35,7 +35,7 @@ import (
 // point, so the map that came out of mdPreviewBaseRender describes the BASE
 // render and stops describing the painted one the moment a single annotation
 // row is inserted. Anything that reads a row number off the painted render —
-// the scroll-following block highlight and the click-to-block mapping — must
+// the block highlight and the click-to-block mapping — must
 // use the map this returns, not the one it was handed.
 //
 // The accounting is exact rather than estimated: file-level rows are prepended
@@ -223,16 +223,22 @@ func (m Model) mdPreviewLiveInputTarget() (int, bool) {
 }
 
 // mdPreviewStartAnnotation begins creating a line-level annotation anchored to
-// the block markdown preview is currently highlighting. It calls
-// mdPreviewHighlightAnchor directly — the exact function that decides which
-// block the on-screen highlight marks — rather than computing a second,
-// parallel notion of "the current block": keyboard aim (`a`/enter) and the
-// visible highlight can never disagree about which block gets the comment.
+// the block the preview's block cursor marks. It reads that cursor through
+// mdPreviewHighlightAnchor — the exact function that decides which block the
+// on-screen highlight marks — rather than computing a second, parallel notion of
+// "the current block": keyboard aim (`a`/enter) and the visible highlight can
+// never disagree about which block gets the comment.
 //
-// Returns nil when there is nothing to anchor to (see mdPreviewHighlightAnchor:
-// an unaligned map, an empty document, or a viewport scrolled above the first
-// block) — annotation creation is refused, the same as pressing `a` on a diff
-// divider in source view.
+// With no cursor placed yet — the state every preview session starts in, since
+// nothing is highlighted until the reader moves — `a` SEEDS the cursor at the
+// block nearest the viewport center, exactly where the first down/up press would
+// have put it, and annotates that. Without the seed, `a` would be a dead key
+// until the reader happened to press j or k first, and pressing `a` straight
+// after `P` is the shortest path this feature has.
+//
+// Returns nil when there is nothing to anchor to at all (an unaligned map or an
+// empty document) — annotation creation is refused, the same as pressing `a` on
+// a diff divider in source view.
 //
 // A refusal sets a transient status-bar hint rather than being silent. A reader
 // who presses `a` on a document whose source map did not align (README.md is
@@ -244,23 +250,27 @@ func (m *Model) mdPreviewStartAnnotation() tea.Cmd {
 	_, srcMap := m.mdPreviewBody()
 	bi := m.mdPreviewHighlightAnchor(srcMap)
 	if bi < 0 {
-		m.preview.hint = mdPreviewRefusalHint(srcMap)
-		return nil
+		bi = m.mdPreviewCenterBlock(srcMap)
+		if bi < 0 {
+			m.preview.hint = mdPreviewUnanchorableHint
+			return nil
+		}
+		m.setMdPreviewBlockCursor(bi)
 	}
 	return m.mdPreviewStartAnnotationAt(srcMap.blocks()[bi].startLine)
 }
 
-// mdPreviewRefusalHint is the status-bar message for a refused preview
-// annotation, split by which of mdPreviewHighlightAnchor's two reasons applies.
-// An unaligned map is a property of the document and never resolves, so the
-// hint names the way out (press P, annotate in source view); a map that aligned
-// but resolved no block is positional and the reader can scroll out of it.
-func mdPreviewRefusalHint(srcMap mdPreviewSourceMap) string {
-	if !srcMap.aligned || len(srcMap.blocks()) == 0 {
-		return "Preview cannot anchor this document — press P to annotate in source view"
-	}
-	return "No block in view to annotate"
-}
+// mdPreviewUnanchorableHint is the status-bar message for a refused preview
+// annotation. There is only one reason left for a refusal: the document's source
+// map did not align, or it holds no block at all. That is a property of the
+// document and never resolves by scrolling, so the hint names the way out
+// instead.
+//
+// The old second reason — aligned, but the viewport sat where no block could be
+// marked — is gone with the scroll-derived highlight. `a` now seeds the block
+// cursor at the viewport center when none is set (mdPreviewStartAnnotation), and
+// an aligned map with at least one block always has a nearest block to seed on.
+const mdPreviewUnanchorableHint = "Preview cannot anchor this document — press P to annotate in source view"
 
 // mdPreviewStartAnnotationAt is the shared core behind mdPreviewStartAnnotation
 // (keyboard aim) and mdPreviewClickDiff (mouse aim): point the diff cursor at
@@ -328,6 +338,10 @@ func (m Model) mdPreviewClickDiff(y int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.layout.focus = paneDiff
+	// a click is aim, exactly like j/k: it leaves the block cursor on the block
+	// it annotated, so the highlight marks what the click hit and a following
+	// j/k continues from there instead of re-seeding at the viewport center.
+	m.setMdPreviewBlockCursor(bi)
 	cmd := m.mdPreviewStartAnnotationAt(srcMap.blocks()[bi].startLine)
 	return m, cmd
 }

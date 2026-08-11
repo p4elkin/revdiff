@@ -235,20 +235,35 @@ None is a regression; all are limits of the vendored renderer, recorded in `PATC
 ## 9. Annotating in preview
 
 New: preview is no longer read-only. Reading a document and commenting on it now happens in one
-view — the current block is highlighted as you scroll, `a` annotates it, a click annotates a
-different one, and existing annotations are painted under the block they belong to. See
-`docs/plans/20260811-preview-annotations.md` for the design. `--no-colors` is a whole-mode
-exception: none of this section applies there — see item 9.6.
+view — a block cursor you steer with `j`/`k` highlights the block you are on, `a` annotates it, a
+click annotates a different one, and existing annotations are painted under the block they belong
+to. See `docs/plans/20260811-preview-annotations.md` for the annotation design. The highlight used
+to follow the scroll position instead; it is now driven by the reader, which is what section 9.1
+below tests. `--no-colors` is a whole-mode exception: none of this section applies there — see item
+9.6.
 
-### 9.1 Scroll-following highlight
+### 9.1 Driveable block cursor
 
-- [ ] press `P` on this file; a background highlight appears on the topmost fully-visible block
-- [ ] scroll with `j`/`k`, page up/down, and the wheel — the highlight follows the block that is
-      now topmost
-- [ ] a fast wheel flick (several notches quickly) still feels immediate — the highlight settles
+- [ ] press `P` on this file; NOTHING is highlighted yet — no background bar anywhere on screen
+- [ ] press `j` once — a highlight appears on a block around the MIDDLE of the pane, not at its top
+      edge, and the page does not jump
+- [ ] press `j` a few more times — the highlight steps one block per press, and the page scrolls
+      only when the next block would otherwise be off the bottom (it must not re-center on every
+      press)
+- [ ] press `k` back up — one block per press, and near the top the page scrolls up only as far as
+      the block's own first row
+- [ ] hold `j` to the end of the document — the highlight stops on the last block, it does not wrap
+      round to the first; same with `k` at the first block
+- [ ] with a block highlighted, scroll away from it with `J`/`K`, page up/down, `end`, or the wheel
+      — once the block is entirely off screen the highlight disappears (you never have a highlight
+      you cannot see); a small scroll that leaves part of it on screen keeps it
+- [ ] a fast wheel flick (several notches quickly) still feels immediate — the highlight clears
       once at the end of the flick, not once per notch
 - [ ] the highlight is a background color, not a border or an icon — confirm it is legible against
       both a heading and a plain paragraph
+- [ ] press `P` off and on again — nothing is highlighted again; same after `R` reload
+- [ ] open a document whose preview cannot be anchored (`README.md` is one) and press `j` — the
+      view still scrolls one row per press rather than doing nothing
 
 ### 9.2 Keyboard aim (`a`)
 
@@ -259,15 +274,15 @@ exception: none of this section applies there — see item 9.6.
 - [ ] press `P` to leave preview — the same annotation is visible in source view, on the same
       source line the bullet came from (confirms the anchor is a real `(Line, Type)` pair, not a
       preview-only side note)
-- [ ] scroll so nothing has settled as "topmost" yet (immediately after `P`, before any scroll) and
-      press `a` — it aims at the topmost visible block rather than doing nothing
-- [ ] scroll to the very last block in the document and press `a` — it anchors there, not past the
+- [ ] press `P` and then `a` straight away, with no `j`/`k` in between — it aims at the block around
+      the middle of the pane rather than doing nothing, and leaves the highlight there
+- [ ] steer to the very last block in the document and press `a` — it anchors there, not past the
       end
 
 ### 9.3 Two annotations in one tight list
 
 - [ ] find (or add) a tight bullet list with at least two items close together
-- [ ] annotate the first item, then scroll/aim and annotate the second item
+- [ ] annotate the first item, then steer with `j`/`k` and annotate the second item
 - [ ] confirm both painted annotations are on screen at once, each under its own bullet — two
       distinct comments, not one overwriting the other
 - [ ] press `P` to leave preview, then open the annotation list popup (`@`) — both entries are
@@ -276,7 +291,8 @@ exception: none of this section applies there — see item 9.6.
 
 ### 9.4 Click aim
 
-- [ ] click directly on a bullet or paragraph — the annotation input opens anchored to that block
+- [ ] click directly on a bullet or paragraph — the annotation input opens anchored to that block,
+      and the highlight moves to the block you clicked (a following `j` continues from there)
 - [ ] click on a different block — a second annotation anchors to the new one, not the first
 - [ ] click below the last block in the document (into the empty space under the content) — it
       resolves to the last block rather than doing nothing

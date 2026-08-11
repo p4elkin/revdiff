@@ -120,15 +120,22 @@ feature, preview included, published to the user's own fork, never to upstream.
 - `app/ui/mdpreview_cache.go` — the single-entry render cache (`mdPreviewRenderCache`) that keys
   the base render and its source map on `(file.name, file.loadSeq, viewport.Width, noColors)`, plus
   the composed-frame assembly (`mdPreviewBody`, `mdPreviewFrame`, `mdPreviewHighlight`) that
-  layers the scroll-following block highlight and painted annotations on top of the cached base.
+  layers the block cursor's highlight and painted annotations on top of the cached base.
 - `app/ui/mdpreview_cache_test.go` — its tests, plus `BenchmarkMdPreviewRepaint`.
 - `app/ui/mdpreview_annotate.go` — painting existing annotations into the preview
   (`mdPreviewPaintAnnotationsTracked`, reusing `renderAnnotationOrInput`/`renderFileAnnotationHeader`
   rather than a parallel painter) and creating one (`mdPreviewStartAnnotation`,
   `mdPreviewStartAnnotationAt`, `mdPreviewClickDiff`, the live-input visibility helper).
 - `app/ui/mdpreview_annotate_test.go` — its tests.
+- `app/ui/mdpreview_cursor.go` — the driveable block cursor: its tagged state
+  (`mdPreviewCursorState`), the read/place/clear helpers, the center-of-viewport seed
+  (`mdPreviewCenterBlock`), the one-block-per-press move with its minimal viewport follow
+  (`moveMdPreviewBlockCursor`, `syncMdPreviewViewportToBlock`), and the drop-when-scrolled-out-of-view
+  rule every viewport-only scroll goes through (`dropMdPreviewCursorIfHidden`,
+  `afterMdPreviewViewportScroll`). See "Preview block cursor" below.
+- `app/ui/mdpreview_cursor_test.go` — its tests.
 
-A clean rebase never conflicts on these twenty-six files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these twenty-eight files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -397,8 +404,9 @@ on that one map and that one refusal contract.
   - `flushWheelPending` gained a two-line `if m.flushPreviewWheelPending()
     { return }` at its top (`mdpreview_cache.go`): `pinDiffCursorTo` is an
     unconditional no-op in preview (nothing to pin), so without it the deferred
-    repaint the wheel-burst debounce owes never landed, and the
-    scroll-following highlight would freeze on the pre-burst block. That helper
+    repaint the wheel-burst debounce owes never landed. That helper now also
+    drops the block cursor once per burst when the burst carried its block off
+    screen (see "Preview block cursor" below),
     repaints once and clears both `renderPending` and `tickInFlight` — it rides
     the SAME `wheelState` debounce documented in gotchas.md rather than adding a
     second one, per that task's explicit warning.
@@ -435,10 +443,13 @@ unmodified diff-pane-only gate and becomes reachable once `a` has moved focus.
 A refused preview annotation is not silent either: `mdPreviewStartAnnotation` sets
 `m.preview.hint` (an `mdPreviewState`, the same shape as `outputState` /
 `compactState`, rendered by `transientHint` and cleared on the next key or mouse
-event) when `mdPreviewHighlightAnchor` returns -1. That is the unaligned-document
-case — `README.md` is one — where the frame is otherwise byte-identical and the
+event) when neither the block cursor nor the center-of-viewport seed resolves a
+block. Since the block cursor landed that is exactly the unaligned-document case
+— `README.md` is one — where the frame is otherwise byte-identical and the
 reader cannot tell "this document cannot be anchored" from "the key is not
-bound".
+bound". The message is the constant `mdPreviewUnanchorableHint`; the old second
+message ("No block in view to annotate") is gone with the scroll-derived
+highlight, because an aligned map always has a nearest block to seed on.
 
 The render cache (`mdpreview_cache.go`) is a single entry, not a map — the
 preview shows one file at a time, so there is never more than one base render
@@ -476,10 +487,70 @@ came from timed `mdPreviewBaseRender` — a key comparison and a string return �
 while a repaint is `mdPreviewFinalRender`: cached base render, annotations
 painted in, the horizontal cut, the highlight. Mislabelling it is how a
 full-document width scan came to sit unnoticed in every keypress. The honest
-figure for the repaint the scroll-following highlight actually pays is the
+figure for the repaint a block-cursor move actually pays is the
 third row: ~0.12ms, down from ~6.2ms, and ~835x below a fresh render. The
 remaining cost is the highlight's own per-row pass, which cannot be cached
 because it moves with the offset.
+
+**Preview block cursor (the highlight became something the reader steers):**
+
+The preview annotations above shipped with a highlight *derived from scroll
+position*: `mdPreviewHighlightAnchor` computed the topmost fully visible block
+from `viewport.YOffset` and held no state. In use that marked a block nobody had
+chosen, always near the top of the pane, and it could not be aimed. It is now a
+real cursor over blocks.
+
+The whole feature lives in the patch's own files. **No upstream-owned file gained
+a hunk for it** — not `model.go`, not `loaders.go`, not `mouse.go`, not
+`keymap.go`. Two design choices are what bought that, and both are worth keeping
+through a rebase:
+
+- **The cursor is tagged, not reset.** `mdPreviewCursorState` stores the block
+  index together with the `file.name` + `file.loadSeq` it was placed under, and
+  reports "no block" whenever the tag does not match the current load. A file
+  switch and an `R` reload both bump `loadSeq`, so both leave nothing selected
+  with no reset in `handleFileLoaded` (`loaders.go`) to remember. It is the same
+  seq-tagging `compactState.pendingAnchor` uses. The zero value means "no block",
+  so `NewModel` needs no initializer either.
+- **The reading keys are routed inside `handleMdPreviewAction`**, which already
+  existed. `ActionDown`/`ActionUp` (j/k AND the arrows — one action each, they
+  cannot be told apart and are not meant to be) move the cursor;
+  `ActionScrollDiffDown`/`ActionScrollDiffUp` (J/K) joined the routed set so the
+  scroll can drop the cursor and repaint, which the fall-through
+  `scrollDiffViewportLine` never did in preview (`pinDiffCursorTo` is a no-op
+  there, so it repainted nothing).
+
+Behavior, in one place:
+
+- nothing is highlighted until the reader moves. Entering preview, a file load
+  and an `R` reload all leave the cursor unset.
+- `j`/`k` (and the arrows) with no cursor SEED it at the block nearest the
+  vertical center of the viewport and stop there; with a cursor they move one
+  block and clamp at the first and the last, no wrap.
+- the viewport then follows minimally — `syncMdPreviewViewportToBlock` is
+  `syncViewportToCursor` in preview-row coordinates, including its
+  "block taller than the pane shows its start" clamp. It never centers: centering
+  is what made the old top-edge behavior jumpy.
+- `J`/`K`, page/half-page, home/end and the wheel stay pure viewport scroll, and
+  each drops the cursor when its block has gone entirely off screen. That keeps
+  the feature's invariant: you always see what you are about to annotate. The
+  wheel does it in `flushPreviewWheelPending`, once per burst, not per event.
+- `a` with no cursor seeds at the center block and annotates that, so it is never
+  a dead key; with a cursor it annotates the cursor's block. A click sets the
+  cursor to the block it hit, in addition to annotating it.
+- a document whose source map did not align has no blocks to steer between, so
+  `j`/`k` fall back to a one-row scroll there rather than becoming dead keys.
+
+⚠️ **The block cursor is deliberately NOT a key of any preview memo, and adding
+it to one would be wrong twice over.** `mdPreviewHighlight` runs AFTER
+`applyMdPreviewScroll`'s memoized cut (`mdPreviewFrame` owns that order, for the
+reasons in its doc comment), so a cursor move misses nothing — the pass it
+changes is the only pass that is not memoized. Moving the highlight inside the
+cut memo would make every cursor move serve the previous frame until some other
+input changed. `TestMdPreviewFinalRender_CacheDoesNotServeAStaleFrameAcrossACursorMove`
+reaches the second cursor state on a model whose memos were warmed by the first,
+which is the only shape that catches it; it was verified by actually making that
+mutation.
 
 **Test-only, mechanical, not part of the feature itself:**
 

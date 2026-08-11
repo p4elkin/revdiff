@@ -962,17 +962,20 @@ func TestDispatchAction_MdPreviewOn_JK_CursorUnchanged(t *testing.T) {
 }
 
 func TestDispatchAction_MdPreviewOn_ReadingKeysScrollViewportNotCursor(t *testing.T) {
-	// the reading keys move the render and never the source-line cursor. The
+	// the row-scroll keys move the render and never the source-line cursor. The
 	// cursor half is already pinned by the tests above; this pins the half
 	// that was missing, i.e. that they actually scroll. Without it the keys
 	// stay in the allowlist and silently do nothing, which is the bug this
 	// replaced: J/K were the only way to reach past the first screen.
+	//
+	// j/k and the arrows are deliberately NOT here: they drive the block cursor
+	// now, and only scroll when the cursor's block is not already on screen (see
+	// mdpreview_cursor_test.go).
 	tests := []struct {
 		name string
 		key  string
 	}{
-		{"down (j)", "j"},
-		{"down (arrow)", "down"},
+		{"scroll_diff_down (J)", "J"},
 		{"page_down", "pgdown"},
 		{"half_page_down", "ctrl+d"},
 		{"end", "end"},

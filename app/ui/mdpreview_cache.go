@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"sort"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
@@ -27,13 +26,13 @@ type mdPreviewCacheKey struct {
 
 // mdPreviewRenderCache memoizes the base preview render — the whole-document
 // glamour+mermaid render plus its source map (mdPreviewRenderWithMap) — for
-// exactly one cache key at a time. It exists because the scroll-following
-// block highlight (a later task in this plan) has to repaint on every offset
-// change, the way the diff-pane wheel-burst coalescing already repaints
-// without re-rendering the diff itself (see wheelState in
-// .claude/rules/gotchas.md). Without this cache, that repaint would pay for a
-// full glamour+mermaid pass per scroll step instead of per file/width/color
-// change.
+// exactly one cache key at a time. It exists because the frame has to be
+// recomposed far more often than the document changes — every block-cursor
+// move, every scroll that drops the cursor, every annotation edit — the way
+// the diff-pane wheel-burst coalescing already repaints without re-rendering
+// the diff itself (see wheelState in .claude/rules/gotchas.md). Without this
+// cache, each of those would pay for a full glamour+mermaid pass instead of
+// one per file/width/color change.
 //
 // Held behind a pointer, the same reason renderCache (diffRenderCache,
 // app/ui/diffview.go) is: renderMarkdownPreview has a value receiver, so a
@@ -64,7 +63,10 @@ type mdPreviewCacheKey struct {
 //     additionally keys on the resolved «/» indicators, which is where the
 //     theme enters that pass.
 //   - the block highlight is not memoized at all — it is recomputed per frame
-//     from the live resolver.
+//     from the live resolver and the block cursor (mdpreview_cursor.go). That
+//     is what keeps the cursor OUT of every key here: a cursor move misses
+//     nothing, because the pass it changes runs after the last memo. Moving
+//     the highlight inside the cut memo would need the cursor in that key.
 type mdPreviewRenderCache struct {
 	key      mdPreviewCacheKey
 	valid    bool
@@ -81,8 +83,9 @@ type mdPreviewRenderCache struct {
 // It is keyed on the body string rather than on mdPreviewCacheKey, because the
 // body is the base render PLUS this file's annotation rows — it changes on
 // every annotation edit, which the base render's own key cannot see. Neither
-// pass depends on the vertical offset, so the repaint every j/k keypress now
-// triggers (the block highlight has to move with the viewport) reuses both.
+// pass depends on the vertical offset or on the block cursor, so the repaint
+// every j/k keypress triggers (the highlight moves to another block) reuses
+// both.
 //
 // The measurement that made this necessary, taken on
 // docs/plans/completed/20260722-markdown-preview-mode.md (983 rendered rows,
@@ -234,10 +237,14 @@ func (m Model) mdPreviewFinalRender() string {
 
 // flushPreviewWheelPending is the markdown-preview half of flushWheelPending
 // (app/ui/mouse.go), which calls it first and returns when it reports true.
-// pinDiffCursorTo is an unconditional no-op while previewing (there is no
+// pinDiffCursorTo is an unconditional no-op while previewing (there is no diff
 // cursor to pin), so without this the deferred SetContent the wheel-burst
-// debounce owes never runs and the scroll-following block highlight stays
-// frozen on the block that was topmost when the burst started.
+// debounce owes never runs.
+//
+// The wheel is a viewport-only scroll, so it drops the block cursor when the
+// burst has carried its block off screen — once per burst, here, rather than
+// once per wheel event, which is the whole reason this sits on the debounce
+// side rather than in handleWheel.
 //
 // It rides the SAME wheelState debounce (gen / renderPending / tickInFlight,
 // see .claude/rules/gotchas.md) rather than bringing a second one: one repaint
@@ -248,39 +255,36 @@ func (m *Model) flushPreviewWheelPending() bool {
 	if !m.modes.mdPreview {
 		return false
 	}
+	m.dropMdPreviewCursorIfHidden()
 	m.layout.viewport.SetContent(m.renderDiff())
 	m.wheel.renderPending = false
 	m.wheel.tickInFlight = false
 	return true
 }
 
-// mdPreviewHighlightAnchor picks the block the highlight marks: the topmost
-// FULLY visible one — the first block whose rows all fall inside the viewport at
-// the current YOffset. That is what makes the mark follow reading position
-// rather than the viewport edge: a block half-scrolled off the top is not the
-// one being read, the next whole one is.
+// mdPreviewHighlightAnchor is the block the highlight marks: whichever one the
+// reader has steered the block cursor onto, and nothing at all until they do.
 //
-// Blocks are contiguous and ascending (endRow of one is the row before the next
-// one's row, enforced when the map is built), so the first block starting at or
-// after the top is the only candidate — if it is too tall to fit, every later
-// block starts further down and cannot fit either. When it does not fit, the
-// fallback is the block owning the top row, which is the one filling the screen.
+// It used to DERIVE the mark from viewport.YOffset — the topmost fully visible
+// block — which meant something was always marked, always near the top of the
+// pane, and never anything the reader chose. The mark is now a real cursor
+// (mdPreviewCursorState, mdpreview_cursor.go): seeded at the viewport center by
+// the first down/up press or by `a`, moved a block at a time, and dropped when a
+// viewport-only scroll carries its block off screen.
 //
-// Returns -1 when there is nothing to mark: an unaligned or empty map, or a
-// viewport scrolled above the first block.
+// Returns -1 when there is nothing to mark: no cursor placed, an unaligned or
+// empty map, or a cursor pointing past the end of the current map (defensive —
+// the map can lose blocks at a width where alignment fails).
 func (m Model) mdPreviewHighlightAnchor(srcMap mdPreviewSourceMap) int {
 	anchors := srcMap.blocks()
 	if !srcMap.aligned || len(anchors) == 0 {
 		return -1
 	}
-	top := m.layout.viewport.YOffset
-	bottom := top + m.layout.viewport.Height - 1
-
-	i := sort.Search(len(anchors), func(i int) bool { return anchors[i].row >= top })
-	if i < len(anchors) && anchors[i].endRow <= bottom {
-		return i
+	bi := m.mdPreviewBlockCursor()
+	if bi >= len(anchors) {
+		return -1
 	}
-	return srcMap.anchorAtRow(top)
+	return bi
 }
 
 // mdPreviewHighlight paints the highlighted block's rows with a background.
