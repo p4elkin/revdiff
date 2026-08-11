@@ -127,15 +127,21 @@ feature, preview included, published to the user's own fork, never to upstream.
   rather than a parallel painter) and creating one (`mdPreviewStartAnnotation`,
   `mdPreviewStartAnnotationAt`, `mdPreviewClickDiff`, the live-input visibility helper).
 - `app/ui/mdpreview_annotate_test.go` — its tests.
-- `app/ui/mdpreview_cursor.go` — the driveable block cursor: its tagged state
+- `app/ui/mdpreview_cursor.go` — the driveable preview cursor: its tagged state
   (`mdPreviewCursorState`), the read/place/clear helpers, the center-of-viewport seed
-  (`mdPreviewCenterBlock`), the one-block-per-press move with its minimal viewport follow
-  (`moveMdPreviewBlockCursor`, `syncMdPreviewViewportToBlock`), and the drop-when-scrolled-out-of-view
-  rule every viewport-only scroll goes through (`dropMdPreviewCursorIfHidden`,
-  `afterMdPreviewViewportScroll`). See "Preview block cursor" below.
+  (`mdPreviewViewportCenter`, `mdPreviewCenterBlock`), the one-stop-per-press move with its minimal
+  viewport follow (`moveMdPreviewCursor`, `syncMdPreviewViewportToStop`), and the
+  drop-when-scrolled-out-of-view rule every viewport-only scroll goes through
+  (`dropMdPreviewCursorIfHidden`, `afterMdPreviewViewportScroll`). See "Preview cursor" below.
 - `app/ui/mdpreview_cursor_test.go` — its tests.
+- `app/ui/mdpreview_stops.go` — what the cursor can stop on: the identity a stop is addressed by
+  (`mdPreviewStopRef`), the stop and painted-annotation anchor types (`mdPreviewStop`,
+  `mdPreviewAnnotAnchor`), the ordered stop list and the two lookups over it
+  (`mdPreviewSourceMap.stops`/`stopAt`, `mdPreviewStopIndex`, `mdPreviewNearestStop`), and `d`
+  inside preview (`mdPreviewDeleteAnnotation`, `repaintMdPreviewAfterStopChange`).
+- `app/ui/mdpreview_stops_test.go` — its tests.
 
-A clean rebase never conflicts on these twenty-eight files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these thirty files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -492,56 +498,103 @@ third row: ~0.12ms, down from ~6.2ms, and ~835x below a fresh render. The
 remaining cost is the highlight's own per-row pass, which cannot be cached
 because it moves with the offset.
 
-**Preview block cursor (the highlight became something the reader steers):**
+**Preview cursor (the highlight became something the reader steers):**
 
 The preview annotations above shipped with a highlight *derived from scroll
 position*: `mdPreviewHighlightAnchor` computed the topmost fully visible block
 from `viewport.YOffset` and held no state. In use that marked a block nobody had
 chosen, always near the top of the pane, and it could not be aimed. It is now a
-real cursor over blocks.
+real cursor over **stops**.
+
+A stop is a rendered block, or a single annotation painted under one. It started
+out as blocks only, which meant `j`/`k` stepped straight over every painted
+comment: nothing could select one, so nothing could delete one either, and `d`
+was excluded from the allowlist for exactly that reason. Annotations are now
+stops of their own.
 
 The whole feature lives in the patch's own files. **No upstream-owned file gained
 a hunk for it** — not `model.go`, not `loaders.go`, not `mouse.go`, not
-`keymap.go`. Two design choices are what bought that, and both are worth keeping
-through a rebase:
+`keymap.go`. Three design choices are what bought that, and all three are worth
+keeping through a rebase:
 
-- **The cursor is tagged, not reset.** `mdPreviewCursorState` stores the block
-  index together with the `file.name` + `file.loadSeq` it was placed under, and
-  reports "no block" whenever the tag does not match the current load. A file
+- **The cursor is tagged, not reset.** `mdPreviewCursorState` stores the stop
+  together with the `file.name` + `file.loadSeq` it was placed under, and reports
+  "nothing selected" whenever the tag does not match the current load. A file
   switch and an `R` reload both bump `loadSeq`, so both leave nothing selected
   with no reset in `handleFileLoaded` (`loaders.go`) to remember. It is the same
-  seq-tagging `compactState.pendingAnchor` uses. The zero value means "no block",
-  so `NewModel` needs no initializer either.
-- **The reading keys are routed inside `handleMdPreviewAction`**, which already
-  existed. `ActionDown`/`ActionUp` (j/k AND the arrows — one action each, they
-  cannot be told apart and are not meant to be) move the cursor;
+  seq-tagging `compactState.pendingAnchor` uses. The zero value means "nothing
+  selected", so `NewModel` needs no initializer either.
+- **A stop is addressed by identity, never by its index in the stop list**
+  (`mdPreviewStopRef`: a block index, plus which annotation under it if any). The
+  list changes length under a cursor that never moved — `A` prepends a file-level
+  stop, `d` removes one from the middle — and an index would silently come to
+  mean a different stop. An identity survives both, and it is what makes the
+  after-delete placement exact rather than approximate.
+- **The reading keys and `d` are routed inside `handleMdPreviewAction`**, which
+  already existed. `ActionDown`/`ActionUp` (j/k AND the arrows — one action each,
+  they cannot be told apart and are not meant to be) move the cursor;
   `ActionScrollDiffDown`/`ActionScrollDiffUp` (J/K) joined the routed set so the
   scroll can drop the cursor and repaint, which the fall-through
   `scrollDiffViewportLine` never did in preview (`pinDiffCursorTo` is a no-op
-  there, so it repainted nothing).
+  there, so it repainted nothing); `ActionDeleteAnnotation` (`d`) joined it too —
+  see the delete rules below for why adding it to the allowlist alone would be
+  wrong.
 
 Behavior, in one place:
 
 - nothing is highlighted until the reader moves. Entering preview, a file load
   and an `R` reload all leave the cursor unset.
-- `j`/`k` (and the arrows) with no cursor SEED it at the block nearest the
+- `j`/`k` (and the arrows) with no cursor SEED it at the stop nearest the
   vertical center of the viewport and stop there; with a cursor they move one
-  block and clamp at the first and the last, no wrap.
-- the viewport then follows minimally — `syncMdPreviewViewportToBlock` is
+  stop and clamp at the first and the last, no wrap.
+- stop order is paint order: the file-level annotation (painted above the whole
+  body), then each block followed by the annotations painted under it. So `j`
+  from a block reaches that block's own first annotation before the next block.
+  That order is not imposed by the stop list — it follows from the paint
+  geometry, since block *i*'s annotation rows occupy exactly the gap between
+  block *i*'s `endRow` and block *i+1*'s `row`.
+- the highlight marks the cursor's own rows: a block's rows on a block stop, the
+  annotation's own rows on an annotation stop. What is marked is always what `a`
+  and `d` will act on.
+- the viewport then follows minimally — `syncMdPreviewViewportToStop` is
   `syncViewportToCursor` in preview-row coordinates, including its
-  "block taller than the pane shows its start" clamp. It never centers: centering
+  "taller than the pane shows its start" clamp. It never centers: centering
   is what made the old top-edge behavior jumpy.
 - `J`/`K`, page/half-page, home/end and the wheel stay pure viewport scroll, and
-  each drops the cursor when its block has gone entirely off screen. That keeps
-  the feature's invariant: you always see what you are about to annotate. The
-  wheel does it in `flushPreviewWheelPending`, once per burst, not per event.
+  each drops the cursor when its stop has gone entirely off screen. That keeps
+  the feature's invariant: you always see what you are about to annotate or
+  delete. The wheel does it in `flushPreviewWheelPending`, once per burst, not
+  per event.
 - `a` with no cursor seeds at the center block and annotates that, so it is never
-  a dead key; with a cursor it annotates the cursor's block. A click sets the
-  cursor to the block it hit, in addition to annotating it.
-- a document whose source map did not align has no blocks to steer between, so
+  a dead key. On a **block** stop it annotates that block's start line; on an
+  **annotation** stop it EDITS that annotation, aimed at its own `(Line, Type)`.
+  A click sets the cursor to the block it hit, in addition to annotating it.
+- `d` deletes the annotation the cursor is stopped on, then leaves the cursor on
+  the block that owned it. On a block stop, or with nothing selected, it refuses
+  with a transient hint (`mdPreviewDeleteNeedsAnnotationHint`) rather than
+  removing the block's annotations wholesale.
+- a document whose source map did not align has no stops to steer between, so
   `j`/`k` fall back to a one-row scroll there rather than becoming dead keys.
 
-⚠️ **The block cursor is deliberately NOT a key of any preview memo, and adding
+**Editing is the pre-existing diff-pane path, not a new mechanism.**
+`startAnnotation` already pre-fills its input from the store for the same
+`(Line, Type)` and `Store.Add` already replaces on that key, so aiming `a` at the
+selected annotation's own line IS the edit. The multi-line case comes with it
+unchanged: a comment containing newlines is stashed in `annot.existingMultiline`
+instead of being loaded into the textinput (whose sanitizer would flatten it), so
+the editor key seeds `$EDITOR` from it and Enter on an empty input preserves it
+rather than blanking it. No edit action and no new binding were added.
+
+⚠️ **`d` must stay routed inside `handleMdPreviewAction`, not merely allowlisted.**
+Its fall-through target `deleteAnnotation` (`app/ui/annotate.go`) reads
+`m.nav.diffCursor` + `m.annot.cursorOnAnnotation`, which preview drives neither
+of, and its tail can call `requestFileDiff` — a file load, mid-delete, out of
+preview. `mdPreviewDeleteAnnotation` deletes off the preview cursor instead. It
+does still refresh the tree filter and follow a selection the refresh moved off
+this file, exactly as source view does: the alternative is a file tree claiming
+this file carries annotations after its last one was deleted.
+
+⚠️ **The preview cursor is deliberately NOT a key of any preview memo, and adding
 it to one would be wrong twice over.** `mdPreviewHighlight` runs AFTER
 `applyMdPreviewScroll`'s memoized cut (`mdPreviewFrame` owns that order, for the
 reasons in its doc comment), so a cursor move misses nothing — the pass it
@@ -550,7 +603,11 @@ cut memo would make every cursor move serve the previous frame until some other
 input changed. `TestMdPreviewFinalRender_CacheDoesNotServeAStaleFrameAcrossACursorMove`
 reaches the second cursor state on a model whose memos were warmed by the first,
 which is the only shape that catches it; it was verified by actually making that
-mutation.
+mutation. A DELETE is a different question and needed checking separately, since
+it changes the painted body rather than only the highlight: the scroll memos key
+on that body string and so miss by themselves, which
+`TestMdPreviewDeleteAnnotation_RepaintDoesNotServeAStaleFrame` pins on a model
+whose memos were warmed with the annotation still present.
 
 **Test-only, mechanical, not part of the feature itself:**
 
@@ -1109,14 +1166,17 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   anchors to the whole paragraph, not the line or word under the cursor at the moment of wrapping
   — matching how the same paragraph would be commented in source view before this feature existed,
   where the paragraph's block boundary is already the finest resolution.
-- **Three annotation actions are still blocked in preview: `d`, `@`, and `}`/`{`.** Creating,
-  reading, and flushing annotations all work inside preview after this plan; deleting one, listing
-  them in the `@` popup, and stepping between them all still require leaving preview first (press
-  `P`, act, press `P` again). None of the three are on `mdPreviewAllowedActions`' allowlist — see
-  that map and its doc comment in `mdpreview.go` for the per-action reason. Practical consequence
-  worth stating on its own: **a comment made in preview cannot be undone from inside preview.**
-  Pressing `a` on the same block again pre-fills the existing comment, but clearing the input and
-  confirming runs `cancelAnnotation`, which leaves the stored comment untouched.
+- **Two annotation actions are still blocked in preview: `@` and `}`/`{`.** Creating, editing,
+  reading, deleting, and flushing annotations all work inside preview; listing them in the `@`
+  popup and stepping between them still require leaving preview first (press `P`, act, press `P`
+  again). Neither is on `mdPreviewAllowedActions`' allowlist — see that map and its doc comment in
+  `mdpreview.go` for the per-action reason. `d` used to be the third entry here, which made a
+  comment created in preview impossible to undo from inside preview; it is now allowed, because an
+  annotation is a cursor stop of its own (see "Preview cursor" above).
+- **Clearing an annotation's input does not delete it — that is what `d` is for.** `a` on an
+  annotation pre-fills the existing comment, but clearing the input and confirming runs
+  `cancelAnnotation`, which leaves the stored comment untouched. This is the diff pane's own
+  behavior, unchanged.
 - **A thematic break (`---`) has no position of its own and is recovered by a gap scan.** goldmark
   appends nothing to a `ThematicBreak`'s `Lines()`, so `mdBreakResolver` (`mdpreview_blocks.go`)
   bounds it between the nearest siblings that DO carry a position and takes the first line in that

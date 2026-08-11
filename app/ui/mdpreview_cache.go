@@ -262,19 +262,25 @@ func (m *Model) flushPreviewWheelPending() bool {
 	return true
 }
 
-// mdPreviewHighlightAnchor is the block the highlight marks: whichever one the
-// reader has steered the block cursor onto, and nothing at all until they do.
+// mdPreviewHighlightAnchor is the BLOCK the cursor sits on or under — the block
+// itself when the cursor is on a block stop, the OWNING block when it is on one
+// of that block's annotations. It is what `a` aims at on a block stop (on an
+// annotation stop `a` edits that annotation instead — see
+// mdPreviewStartAnnotation). The highlight itself paints the cursor's own stop,
+// which for an annotation stop is the annotation's rows and not the block's, so
+// mdPreviewHighlight goes through mdPreviewCursorStop instead of this.
 //
 // It used to DERIVE the mark from viewport.YOffset — the topmost fully visible
 // block — which meant something was always marked, always near the top of the
 // pane, and never anything the reader chose. The mark is now a real cursor
 // (mdPreviewCursorState, mdpreview_cursor.go): seeded at the viewport center by
-// the first down/up press or by `a`, moved a block at a time, and dropped when a
-// viewport-only scroll carries its block off screen.
+// the first down/up press or by `a`, moved a stop at a time, and dropped when a
+// viewport-only scroll carries its stop off screen.
 //
-// Returns -1 when there is nothing to mark: no cursor placed, an unaligned or
-// empty map, or a cursor pointing past the end of the current map (defensive —
-// the map can lose blocks at a width where alignment fails).
+// Returns -1 when there is no block to name: no cursor placed, an unaligned or
+// empty map, a cursor on the file-level annotation (which owns no block), or a
+// cursor pointing past the end of the current map (defensive — the map can lose
+// blocks at a width where alignment fails).
 func (m Model) mdPreviewHighlightAnchor(srcMap mdPreviewSourceMap) int {
 	anchors := srcMap.blocks()
 	if !srcMap.aligned || len(anchors) == 0 {
@@ -287,9 +293,10 @@ func (m Model) mdPreviewHighlightAnchor(srcMap mdPreviewSourceMap) int {
 	return bi
 }
 
-// mdPreviewHighlight paints the highlighted block's rows with a background.
-// rendered is the already-cut preview frame and srcMap must be in that frame's
-// coordinates.
+// mdPreviewHighlight paints the cursor's own rows with a background — a block's
+// rows on a block stop, the annotation's own rows on an annotation stop, so what
+// is marked is always exactly what `a` and `d` will act on. rendered is the
+// already-cut preview frame and srcMap must be in that frame's coordinates.
 //
 // The background is ColorKeySearchBg, borrowed deliberately: there is no
 // cursor-background color key to use instead, and adding one is the three-site
@@ -316,8 +323,8 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 	if bg == "" {
 		return rendered
 	}
-	bi := m.mdPreviewHighlightAnchor(srcMap)
-	if bi < 0 {
+	stop, ok := m.mdPreviewCursorStop(srcMap)
+	if !ok {
 		return rendered
 	}
 
@@ -332,10 +339,9 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 	if m.layout.scrollX > 0 {
 		padTo = m.mdPreviewCutWidth()
 	}
-	anchor := srcMap.blocks()[bi]
 	rows := strings.Split(rendered, "\n")
 	painted := false
-	for r := max(0, anchor.row); r <= anchor.endRow && r < len(rows); r++ {
+	for r := max(0, stop.row); r <= stop.endRow && r < len(rows); r++ {
 		if strings.TrimSpace(ansi.Strip(rows[r])) == "" {
 			continue
 		}

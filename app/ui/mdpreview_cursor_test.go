@@ -84,11 +84,11 @@ func TestMdPreviewCenterBlock_NoBlocksSelectsNothing(t *testing.T) {
 	assert.Equal(t, -1, m.mdPreviewCenterBlock(mdPreviewSourceMap{aligned: true}), "an empty map seeds nothing")
 }
 
-// TestMoveMdPreviewBlockCursor_FirstPressSeedsWithoutMoving is behavior 3's
+// TestMoveMdPreviewCursor_FirstPressSeedsWithoutMoving is behavior 3's
 // first half: with nothing selected, one press places the cursor at the center
 // block and stops there. Moving as well would flick past the block the reader
 // aimed at before they saw it marked.
-func TestMoveMdPreviewBlockCursor_FirstPressSeedsWithoutMoving(t *testing.T) {
+func TestMoveMdPreviewCursor_FirstPressSeedsWithoutMoving(t *testing.T) {
 	for _, delta := range []int{1, -1} {
 		m := mdPreviewHighlightModel(t)
 		_, srcMap := m.mdPreviewBody()
@@ -96,18 +96,18 @@ func TestMoveMdPreviewBlockCursor_FirstPressSeedsWithoutMoving(t *testing.T) {
 		want := m.mdPreviewCenterBlock(srcMap)
 		require.GreaterOrEqual(t, want, 0)
 
-		m.moveMdPreviewBlockCursor(delta)
+		m.moveMdPreviewCursor(delta)
 
 		assert.Equal(t, want, m.mdPreviewBlockCursor(),
 			"the seeding press (delta %d) must land on the center block and go no further", delta)
 	}
 }
 
-// TestMoveMdPreviewBlockCursor_StepsOneBlockAndClampsAtBothEnds is behavior 3's
+// TestMoveMdPreviewCursor_StepsOneBlockAndClampsAtBothEnds is behavior 3's
 // second half: one block per press, and a hard stop at the first and the last —
 // no wrap, so holding the key down cannot silently return to the other end of
 // the document.
-func TestMoveMdPreviewBlockCursor_StepsOneBlockAndClampsAtBothEnds(t *testing.T) {
+func TestMoveMdPreviewCursor_StepsOneBlockAndClampsAtBothEnds(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned, "fixture sanity")
@@ -115,26 +115,26 @@ func TestMoveMdPreviewBlockCursor_StepsOneBlockAndClampsAtBothEnds(t *testing.T)
 	require.GreaterOrEqual(t, last, 3, "fixture sanity: need several blocks")
 
 	m.setMdPreviewBlockCursor(1)
-	m.moveMdPreviewBlockCursor(1)
+	m.moveMdPreviewCursor(1)
 	assert.Equal(t, 2, m.mdPreviewBlockCursor(), "one press must move exactly one block")
-	m.moveMdPreviewBlockCursor(-1)
+	m.moveMdPreviewCursor(-1)
 	assert.Equal(t, 1, m.mdPreviewBlockCursor(), "the reverse press must come straight back")
 
 	m.setMdPreviewBlockCursor(0)
-	m.moveMdPreviewBlockCursor(-1)
+	m.moveMdPreviewCursor(-1)
 	assert.Equal(t, 0, m.mdPreviewBlockCursor(), "the first block must clamp, not wrap to the last")
 
 	m.setMdPreviewBlockCursor(last)
-	m.moveMdPreviewBlockCursor(1)
+	m.moveMdPreviewCursor(1)
 	assert.Equal(t, last, m.mdPreviewBlockCursor(), "the last block must clamp, not wrap to the first")
 }
 
-// TestMoveMdPreviewBlockCursor_ViewportFollowsMinimally is behavior 4: the
+// TestMoveMdPreviewCursor_ViewportFollowsMinimally is behavior 4: the
 // viewport scrolls the least it can to bring the cursor's block into view, and
 // not at all while it is already there. Centering on every press — what search
 // and hunk jumps do — would make each keystroke jump the page under the reader,
 // which is the top-edge behavior this change is replacing.
-func TestMoveMdPreviewBlockCursor_ViewportFollowsMinimally(t *testing.T) {
+func TestMoveMdPreviewCursor_ViewportFollowsMinimally(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned, "fixture sanity")
@@ -147,7 +147,7 @@ func TestMoveMdPreviewBlockCursor_ViewportFollowsMinimally(t *testing.T) {
 		require.LessOrEqual(t, anchors[1].endRow, mm.layout.viewport.Height-1,
 			"fixture sanity: block 1 must already be on screen at the top")
 
-		mm.moveMdPreviewBlockCursor(1)
+		mm.moveMdPreviewCursor(1)
 
 		assert.Equal(t, 0, mm.layout.viewport.YOffset, "a block already in view must not move the viewport")
 	})
@@ -166,7 +166,7 @@ func TestMoveMdPreviewBlockCursor_ViewportFollowsMinimally(t *testing.T) {
 		require.Positive(t, target, "fixture sanity: some block must fall below the first screen")
 		mm.setMdPreviewBlockCursor(target - 1)
 
-		mm.moveMdPreviewBlockCursor(1)
+		mm.moveMdPreviewCursor(1)
 
 		want := min(anchors[target].endRow-mm.layout.viewport.Height+1, anchors[target].row)
 		assert.Equal(t, want, mm.layout.viewport.YOffset,
@@ -182,24 +182,24 @@ func TestMoveMdPreviewBlockCursor_ViewportFollowsMinimally(t *testing.T) {
 		mm.layout.viewport.SetYOffset(anchors[3].row)
 		require.Greater(t, mm.layout.viewport.YOffset, anchors[1].row, "fixture sanity: block 1 must be above the fold")
 
-		mm.moveMdPreviewBlockCursor(-1)
+		mm.moveMdPreviewCursor(-1)
 
 		assert.Equal(t, anchors[1].row, mm.layout.viewport.YOffset,
 			"scrolling up must stop at the block's first row, not center it")
 	})
 }
 
-// TestMoveMdPreviewBlockCursor_UnalignedDocumentFallsBackToRowScroll covers the
+// TestMoveMdPreviewCursor_UnalignedDocumentFallsBackToRowScroll covers the
 // degradation: a document whose source map did not align has no blocks to steer
 // between, so down/up must keep scrolling rather than becoming dead keys.
-func TestMoveMdPreviewBlockCursor_UnalignedDocumentFallsBackToRowScroll(t *testing.T) {
+func TestMoveMdPreviewCursor_UnalignedDocumentFallsBackToRowScroll(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	m.cfg.noColors = true // the documented never-aligns mode (see mdPreviewRenderWithMap)
 	_, srcMap := m.mdPreviewBody()
 	require.False(t, srcMap.aligned, "fixture sanity: no-colors must not align")
 	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 
-	m.moveMdPreviewBlockCursor(1)
+	m.moveMdPreviewCursor(1)
 
 	assert.Equal(t, 1, m.layout.viewport.YOffset, "with no blocks to steer between, down must scroll one row")
 	assert.Equal(t, -1, m.mdPreviewBlockCursor(), "an unanchorable document can never carry a cursor")
@@ -384,17 +384,33 @@ func TestMdPreviewClickDiff_SetsTheBlockCursor(t *testing.T) {
 }
 
 // TestMdPreviewCursorState_ZeroValueSelectsNothing pins the property the whole
-// tagging scheme rests on: the zero value means "no block", so no constructor
+// tagging scheme rests on: the zero value selects nothing, so no constructor
 // and no reset on the load path is needed to make "nothing highlighted" the
-// default.
+// default. Note the zero mdPreviewStopRef is a real stop (block 0's own), so
+// this rests entirely on `set` — see mdPreviewStopRef.
 func TestMdPreviewCursorState_ZeroValueSelectsNothing(t *testing.T) {
 	var c mdPreviewCursorState
 
 	assert.Equal(t, -1, c.blockOf("", 0), "the zero value must select nothing even against a zero file/seq")
 	assert.Equal(t, -1, c.blockOf("plan.md", 3), "the zero value must select nothing against a real load either")
+	_, ok := c.refOf("plan.md", 3)
+	assert.False(t, ok, "the zero value must report no stop at all, not block 0's")
 
-	c = mdPreviewCursorState{set: true, block: 4, file: "plan.md", seq: 3}
+	c = mdPreviewCursorState{set: true, ref: mdPreviewStopRef{block: 4}, file: "plan.md", seq: 3}
 	assert.Equal(t, 4, c.blockOf("plan.md", 3), "the exact load it was placed under must read the cursor back")
 	assert.Equal(t, -1, c.blockOf("plan.md", 4), "a later load of the same file must not")
 	assert.Equal(t, -1, c.blockOf("other.md", 3), "another file must not")
+
+	// an annotation stop names the block that OWNS it, which is the coordinate
+	// `a` aims at — never the annotation itself.
+	c = mdPreviewCursorState{set: true, ref: mdPreviewStopRef{block: 4, onAnnot: true, annot: 1},
+		file: "plan.md", seq: 3}
+	assert.Equal(t, 4, c.blockOf("plan.md", 3), "an annotation stop must read back as its owning block")
+
+	// the file-level annotation owns no block at all.
+	c = mdPreviewCursorState{set: true, ref: mdPreviewStopRef{block: mdPreviewFileStopBlock, onAnnot: true},
+		file: "plan.md", seq: 3}
+	assert.Equal(t, -1, c.blockOf("plan.md", 3), "the file-level annotation stop names no block")
+	_, ok = c.refOf("plan.md", 3)
+	assert.True(t, ok, "but it is still a placed cursor")
 }

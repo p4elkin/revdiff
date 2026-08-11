@@ -849,24 +849,22 @@ func pressKey(t *testing.T, m Model, key string) Model {
 }
 
 func TestDispatchAction_MdPreviewOn_AnnotationKeysAreInert(t *testing.T) {
-	// covers the unsafe actions that remain inert after Task 7: deleting an
-	// annotation ('d') and opening the annotation-list jump ('@'). Confirm
-	// (Enter/'a' -> ActionConfirm) and annotate_file ('A') are deliberately
-	// NOT in this list anymore — Task 7 makes confirm create a line-level
-	// annotation anchored through the source map instead of the ordinary
-	// cursor-based path, and Task 8 allows annotate_file to fall through to
-	// its ordinary handler unmodified, since a file-level annotation's Line
-	// is always 0 and needs no source-map anchor; see startPreviewAnnotation,
-	// mdPreviewAllowedActions's doc comment, and their tests
-	// (mdpreview_annotate.go, mdpreview_annotate_test.go). A real annotation
-	// is pre-seeded on the cursor's line so "delete_annotation" has something
-	// to (fail to) delete — otherwise that subtest would trivially pass with
-	// no guard at all.
+	// covers the annotation actions that are still inert while previewing.
+	// Three keys have left this list over time and each for its own reason:
+	// confirm (Enter/'a') creates or edits an annotation anchored through the
+	// source map, annotate_file ('A') falls through unmodified because a
+	// file-level annotation's Line is always 0, and delete_annotation ('d') now
+	// removes whichever annotation the preview cursor is stopped on (see
+	// mdPreviewDeleteAnnotation, mdpreview_stops.go, and its tests). What 'd'
+	// must still NOT do is act on the diff-pane state this test sets up:
+	// m.nav.diffCursor plus cursorOnAnnotation name a real target in source
+	// view, and preview must ignore both, because with no preview cursor
+	// placed there is nothing selected on screen to delete.
 	tests := []struct {
 		name string
 		key  string
 	}{
-		{"delete_annotation", "d"},
+		{"delete_annotation with no preview cursor", "d"},
 		{"annot_list", "@"},
 	}
 	for _, tc := range tests {
@@ -875,10 +873,11 @@ func TestDispatchAction_MdPreviewOn_AnnotationKeysAreInert(t *testing.T) {
 			m.nav.diffCursor = 2 // "line one", NewNum=3, ChangeType=" "
 			seeded := annotation.Annotation{File: "plan.md", Line: 3, Type: string(diff.ChangeContext), Comment: "existing"}
 			m.store.Add(seeded)
-			m.annot.cursorOnAnnotation = true // so delete_annotation has a real target, matching the normal-mode landing-on-annotation state
+			m.annot.cursorOnAnnotation = true // the normal-mode landing-on-annotation state 'd' reads in source view
 			m.toggleMarkdownPreview()
 			require.True(t, m.modes.mdPreview)
 			require.Equal(t, 1, m.store.Count())
+			require.Equal(t, -1, m.mdPreviewBlockCursor(), "entering preview selects nothing")
 
 			model := pressKey(t, m, tc.key)
 

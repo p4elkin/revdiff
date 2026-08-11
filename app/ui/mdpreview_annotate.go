@@ -43,9 +43,16 @@ import (
 // endRow, which is always before block i+1's row. So block i moves by the
 // file-level row count plus every earlier block's annotation row count, and by
 // nothing else.
+//
+// The map it returns also carries where each painted annotation landed
+// (mdPreviewAnnotAnchor, mdpreview_stops.go), which is what lets the cursor stop
+// on one and `d` delete it. Those spans are recorded AS THE ROWS ARE SPLICED,
+// never by scanning the painted string afterwards: the splice is the only place
+// that knows which rows belong to which annotation, and a scan looking for them
+// again would be a second source of truth free to drift from it.
 func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPreviewSourceMap) (string, mdPreviewSourceMap) {
 	all := m.store.Get(m.file.name)
-	liveIdx, liveOK := m.mdPreviewLiveInputTarget()
+	_, liveOK := m.mdPreviewLiveInputTarget()
 	// mdPreviewLiveInputTarget only ever reports true for the line-level case
 	// (see its own doc comment), so a brand-new file-level annotation has to be
 	// checked directly here — without it the early return below would skip
@@ -68,7 +75,69 @@ func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPrevie
 	}
 
 	annotationMap, fileComment := m.buildAnnotationMap()
-	blockRows := make([][]string, len(anchors))
+	blockRows, blockRuns := m.mdPreviewCollectAnnotationRows(all, srcMap, annotationMap)
+
+	var top strings.Builder
+	m.renderFileAnnotationHeader(&top, fileComment)
+	topRows := mdPreviewRowsFromBuilder(&top)
+
+	// shifted anchors are a copy, never an in-place edit: srcMap's backing array
+	// belongs to the render cache (mdpreview_cache.go) and is handed to every
+	// later repaint.
+	shifted := make([]mdPreviewBlockAnchor, len(anchors))
+	delta := len(topRows)
+	for i := range anchors {
+		shifted[i] = anchors[i]
+		shifted[i].row += delta
+		shifted[i].endRow += delta
+		delta += len(blockRows[i])
+	}
+
+	rows := strings.Split(rendered, "\n")
+	out := topRows
+	// the file-level annotation occupies the prepended rows, so it is the first
+	// stop of the whole document. Gated on hasFileAnnotation, not on topRows
+	// being non-empty: a file-level input still being typed paints rows too, and
+	// there is nothing in the store for it to delete yet.
+	var annots []mdPreviewAnnotAnchor
+	if len(topRows) > 0 && m.hasFileAnnotation() && !liveFileAnnotating {
+		annots = append(annots, mdPreviewAnnotAnchor{block: mdPreviewFileStopBlock, row: 0, endRow: len(topRows) - 1})
+	}
+	bi := 0
+	for i, line := range rows {
+		out = append(out, line)
+		for bi < len(anchors) && anchors[bi].endRow == i {
+			annots = appendMdPreviewAnnotAnchors(annots, blockRuns[bi], bi, len(out))
+			out = append(out, blockRows[bi]...)
+			bi++
+		}
+	}
+	// defensive: a block whose endRow never matched a row index (should not
+	// happen — endRow is derived from this same rendered string) still gets
+	// its annotations painted rather than silently dropped.
+	for ; bi < len(anchors); bi++ {
+		annots = appendMdPreviewAnnotAnchors(annots, blockRuns[bi], bi, len(out))
+		out = append(out, blockRows[bi]...)
+	}
+	return strings.Join(out, "\n"), mdPreviewSourceMap{aligned: true, anchors: shifted, annots: annots}
+}
+
+// mdPreviewCollectAnnotationRows renders this file's line-level annotations and
+// buckets them under the block each one belongs to: blockRows[i] is the rows to
+// splice under block i, blockRuns[i] the same rows described as one run per
+// annotation so the splice can turn them into row spans (see
+// appendMdPreviewAnnotAnchors). Both slices are indexed by block and are always
+// len(srcMap.blocks()) long.
+//
+// Split out of mdPreviewPaintAnnotationsTracked so that function stays under the
+// cyclomatic ceiling; the two halves are "what to paint" and "where it lands".
+func (m Model) mdPreviewCollectAnnotationRows(all []annotation.Annotation, srcMap mdPreviewSourceMap,
+	annotationMap map[annotLineKey]string) (blockRows [][]string, blockRuns [][]mdPreviewAnnotRun) {
+	anchors := srcMap.blocks()
+	blockRows = make([][]string, len(anchors))
+	blockRuns = make([][]mdPreviewAnnotRun, len(anchors))
+
+	liveIdx, liveOK := m.mdPreviewLiveInputTarget()
 	liveCovered := false
 	for _, a := range all {
 		if a.Line == 0 {
@@ -79,7 +148,10 @@ func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPrevie
 		// repaint (inside resolve, inside render, and for the liveIdx compare).
 		idx, idxOK := m.mdPreviewLineIndex(a.Line, a.Type)
 		bi := srcMap.resolveBlock(idx, idxOK)
-		blockRows[bi] = append(blockRows[bi], m.mdPreviewRenderOne(a, annotationMap, idx, idxOK)...)
+		painted := m.mdPreviewRenderOne(a, annotationMap, idx, idxOK)
+		blockRows[bi] = append(blockRows[bi], painted...)
+		blockRuns[bi] = append(blockRuns[bi],
+			mdPreviewAnnotRun{rows: len(painted), line: a.Line, changeType: a.Type, stored: true})
 		if liveOK && idxOK && idx == liveIdx {
 			// mdPreviewRenderOne already routed through renderAnnotationOrInput for
 			// this exact idx, which draws the live input in place of the stored
@@ -101,42 +173,48 @@ func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPrevie
 		bi := max(srcMap.anchorAtLine(liveIdx), 0)
 		var b strings.Builder
 		m.renderAnnotationOrInput(&b, liveIdx, annotationMap)
-		blockRows[bi] = append(blockRows[bi], mdPreviewRowsFromBuilder(&b)...)
+		rows := mdPreviewRowsFromBuilder(&b)
+		blockRows[bi] = append(blockRows[bi], rows...)
+		// stored=false: the store holds nothing for this line yet, so the row is
+		// a live input rather than a deletable annotation. It still counts toward
+		// the row offsets of the annotations painted after it, which is why it is
+		// recorded at all instead of being left out of the run list.
+		blockRuns[bi] = append(blockRuns[bi], mdPreviewAnnotRun{rows: len(rows)})
 	}
+	return blockRows, blockRuns
+}
 
-	var top strings.Builder
-	m.renderFileAnnotationHeader(&top, fileComment)
-	topRows := mdPreviewRowsFromBuilder(&top)
+// mdPreviewAnnotRun is one painted annotation's row count plus the store key
+// that identifies it, collected while the rows are rendered and turned into
+// row spans once the splice point is known. stored is false for a live input
+// row — it takes up rows like any other, so it must be counted, but there is
+// nothing in the store behind it to select or delete.
+type mdPreviewAnnotRun struct {
+	rows       int
+	line       int
+	changeType string
+	stored     bool
+}
 
-	// shifted anchors are a copy, never an in-place edit: srcMap's backing array
-	// belongs to the render cache (mdpreview_cache.go) and is handed to every
-	// later repaint.
-	shifted := make([]mdPreviewBlockAnchor, len(anchors))
-	delta := len(topRows)
-	for i := range anchors {
-		shifted[i] = anchors[i]
-		shifted[i].row += delta
-		shifted[i].endRow += delta
-		delta += len(blockRows[i])
-	}
-
-	rows := strings.Split(rendered, "\n")
-	out := topRows
-	bi := 0
-	for i, line := range rows {
-		out = append(out, line)
-		for bi < len(anchors) && anchors[bi].endRow == i {
-			out = append(out, blockRows[bi]...)
-			bi++
+// appendMdPreviewAnnotAnchors turns one block's runs into row spans, given the
+// painted row the block's annotation rows start at. Runs are laid out back to
+// back in the order they were rendered, which is ascending store order, so the
+// spans follow from the row counts alone. A run of zero rows contributes no
+// anchor — there is nothing on screen to put a cursor on.
+func appendMdPreviewAnnotAnchors(dst []mdPreviewAnnotAnchor, runs []mdPreviewAnnotRun,
+	block, start int) []mdPreviewAnnotAnchor {
+	row, ord := start, 0
+	for _, r := range runs {
+		if r.stored && r.rows > 0 {
+			dst = append(dst, mdPreviewAnnotAnchor{
+				block: block, ord: ord, row: row, endRow: row + r.rows - 1,
+				line: r.line, changeType: r.changeType,
+			})
+			ord++
 		}
+		row += r.rows
 	}
-	// defensive: a block whose endRow never matched a row index (should not
-	// happen — endRow is derived from this same rendered string) still gets
-	// its annotations painted rather than silently dropped.
-	for ; bi < len(anchors); bi++ {
-		out = append(out, blockRows[bi]...)
-	}
-	return strings.Join(out, "\n"), mdPreviewSourceMap{aligned: true, anchors: shifted}
+	return dst
 }
 
 // mdPreviewAnnotateDegraded lists every one of this file's annotations —
@@ -222,12 +300,27 @@ func (m Model) mdPreviewLiveInputTarget() (int, bool) {
 	return m.nav.diffCursor, true
 }
 
-// mdPreviewStartAnnotation begins creating a line-level annotation anchored to
-// the block the preview's block cursor marks. It reads that cursor through
-// mdPreviewHighlightAnchor — the exact function that decides which block the
-// on-screen highlight marks — rather than computing a second, parallel notion of
-// "the current block": keyboard aim (`a`/enter) and the visible highlight can
-// never disagree about which block gets the comment.
+// mdPreviewStartAnnotation is `a`/enter in preview: open an annotation input on
+// whatever the cursor is stopped on.
+//
+// Two cases, and both bottom out in the ordinary startAnnotation path:
+//   - on an ANNOTATION stop, it targets that annotation's own (Line, Type), so
+//     startAnnotation's existing pre-fill loads its current text and saving
+//     replaces it. That is how editing already works in the diff pane —
+//     Store.Add replaces on a (File, Line, Type) collision — so this is a reuse
+//     of the edit path, not a new mechanism. The multi-line case comes with it
+//     unchanged: a comment containing newlines is stashed in
+//     annot.existingMultiline rather than loaded into the textinput (whose
+//     sanitizer would flatten it), so the editor key can seed $EDITOR from it and
+//     Enter on an empty input preserves it instead of blanking it.
+//   - on a BLOCK stop, it targets the block's own start line, which by the same
+//     mechanism edits a comment already sitting exactly there, or creates a new
+//     one.
+//
+// It reads the cursor through the same functions that decide what the on-screen
+// highlight marks — mdPreviewCursorStop for the stop, mdPreviewHighlightAnchor
+// for the block — rather than computing a second, parallel notion of "the
+// current thing": keyboard aim and the visible highlight can never disagree.
 //
 // With no cursor placed yet — the state every preview session starts in, since
 // nothing is highlighted until the reader moves — `a` SEEDS the cursor at the
@@ -248,6 +341,9 @@ func (m Model) mdPreviewLiveInputTarget() (int, bool) {
 // compactState use for their own refusals, and clears on the next key press.
 func (m *Model) mdPreviewStartAnnotation() tea.Cmd {
 	_, srcMap := m.mdPreviewBody()
+	if stop, ok := m.mdPreviewCursorStop(srcMap); ok && stop.ref.onAnnot {
+		return m.mdPreviewEditAnnotationStop(stop, srcMap)
+	}
 	bi := m.mdPreviewHighlightAnchor(srcMap)
 	if bi < 0 {
 		bi = m.mdPreviewCenterBlock(srcMap)
@@ -294,6 +390,38 @@ const mdPreviewUnanchorableHint = "Preview cannot anchor this document — press
 // a live input row for the exact line this Model is currently annotating, so
 // without a fresh SetContent here the viewport would keep showing the
 // pre-annotation frame until the next keystroke's own re-render.
+// mdPreviewEditAnnotationStop opens the input on the annotation the cursor is
+// stopped on, so the reader edits THAT comment rather than adding a second one
+// beside it. It aims at the annotation's own (Line, Type) — resolved back to a
+// diff-line index the same way the painter resolved it to paint the rows — which
+// is what makes startAnnotation's pre-fill find it and Store.Add replace it.
+//
+// The file-level annotation takes the file-level input instead, because Line 0
+// has no diff line to point the cursor at. That is the same call `A` makes, and
+// it carries the same pre-fill, so editing works there too.
+//
+// An ORPHANED annotation — one whose line the file no longer has, painted under
+// the last block by resolveBlock — has no index to aim at. It falls back to the
+// owning block's start line, which creates or edits a comment there and leaves
+// the orphan untouched. Aiming at a line that does not exist would just cancel
+// the save.
+func (m *Model) mdPreviewEditAnnotationStop(stop mdPreviewStop, srcMap mdPreviewSourceMap) tea.Cmd {
+	if stop.ref.block == mdPreviewFileStopBlock {
+		cmd := m.startFileAnnotation()
+		m.layout.viewport.SetContent(m.renderDiff())
+		return cmd
+	}
+	idx, ok := m.mdPreviewLineIndex(stop.line, stop.changeType)
+	if !ok {
+		anchors := srcMap.blocks()
+		if stop.ref.block < 0 || stop.ref.block >= len(anchors) {
+			return nil
+		}
+		idx = anchors[stop.ref.block].startLine
+	}
+	return m.mdPreviewStartAnnotationAt(idx)
+}
+
 func (m *Model) mdPreviewStartAnnotationAt(idx int) tea.Cmd {
 	savedOffset := m.layout.viewport.YOffset
 	m.nav.diffCursor = idx

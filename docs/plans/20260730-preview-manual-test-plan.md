@@ -235,14 +235,19 @@ None is a regression; all are limits of the vendored renderer, recorded in `PATC
 ## 9. Annotating in preview
 
 New: preview is no longer read-only. Reading a document and commenting on it now happens in one
-view — a block cursor you steer with `j`/`k` highlights the block you are on, `a` annotates it, a
-click annotates a different one, and existing annotations are painted under the block they belong
-to. See `docs/plans/20260811-preview-annotations.md` for the annotation design. The highlight used
-to follow the scroll position instead; it is now driven by the reader, which is what section 9.1
-below tests. `--no-colors` is a whole-mode exception: none of this section applies there — see item
-9.6.
+view — a cursor you steer with `j`/`k` highlights what you are on, `a` annotates it, a click
+annotates a different one, and existing annotations are painted under the block they belong to. See
+`docs/plans/20260811-preview-annotations.md` for the annotation design. The highlight used to follow
+the scroll position instead; it is now driven by the reader, which is what section 9.1 below tests.
+The cursor also stops on the annotations themselves, so one can be edited or deleted without
+leaving preview — section 9.7. `--no-colors` is a whole-mode exception: none of this section applies
+there — see item 9.6.
 
-### 9.1 Driveable block cursor
+### 9.1 Driveable cursor
+
+(The cursor steps over *stops*: every rendered block, plus every annotation painted under one. With
+no annotations on screen every stop is a block, which is what the checks below start from — section
+9.7 covers what changes once annotations are there.)
 
 - [ ] press `P` on this file; NOTHING is highlighted yet — no background bar anywhere on screen
 - [ ] press `j` once — a highlight appears on a block around the MIDDLE of the pane, not at its top
@@ -286,8 +291,8 @@ below tests. `--no-colors` is a whole-mode exception: none of this section appli
 - [ ] confirm both painted annotations are on screen at once, each under its own bullet — two
       distinct comments, not one overwriting the other
 - [ ] press `P` to leave preview, then open the annotation list popup (`@`) — both entries are
-      listed with different line numbers. `@` is a no-op while preview is on (same as `d`), so the
-      popup has to be opened from source view
+      listed with different line numbers. `@` is a no-op while preview is on, so the popup has to
+      be opened from source view
 
 ### 9.4 Click aim
 
@@ -305,10 +310,7 @@ below tests. `--no-colors` is a whole-mode exception: none of this section appli
       row 0
 - [ ] confirm it, then press `O` (with `-o`/`--output` set) — the output file updates without
       exiting preview
-- [ ] press `d` on a painted annotation in preview — confirm it is still a no-op (not yet
-      supported); leave preview with `P` to delete it from source view instead
-- [ ] same for `@` and `}`/`{` — all three annotation actions are blocked in preview; press `P`
-      first
+- [ ] `@` and `}`/`{` are still blocked in preview — press `P` first to use them
 - [ ] move focus to the file-tree/TOC pane FIRST, then press `P` and press `a` — the first press
       does not annotate, it hands focus to the diff pane; press `a` again and the input opens. This
       is the only way back to diff focus while previewing, since `tab`, `h` and `l` are all blocked
@@ -324,6 +326,38 @@ below tests. `--no-colors` is a whole-mode exception: none of this section appli
       before this feature (no highlight, no click-to-annotate)
 - [ ] confirm `a` and a click are silent no-ops in this mode — this is expected, not a bug (see
       PATCH.md's `--no-colors` limitation)
+
+### 9.7 Selecting, editing and deleting an annotation
+
+Start from a document that already carries two annotations on the same block plus one on another
+block (section 9.3's list is a good starting point; add a second comment to the first item).
+
+- [ ] steer with `j` onto the block that carries the comments, then press `j` again — the highlight
+      moves DOWN ONTO the painted comment, not past it to the next block. Press `j` again — the
+      second comment. Once more — the following block
+- [ ] `k` walks the same stops back up, in reverse
+- [ ] with a comment highlighted, press `a` — the input opens pre-filled with THAT comment's current
+      text. Change it and confirm — the comment is replaced in place, there is now no second comment
+      beside it
+- [ ] press `a` on a comment, then Esc — the comment is unchanged
+- [ ] make a multi-line comment (press `a`, then the editor key, write two lines, save), highlight
+      it, press `a` and confirm with the input left EMPTY — the two lines survive intact. Clearing
+      the input is not how you delete
+- [ ] with a comment highlighted, press `d` — that comment disappears and the highlight lands on the
+      block it belonged to. The other comment on the same block is still there, and so is the one on
+      the other block
+- [ ] press `d` again straight away (highlight now on a block) — nothing is deleted, and the status
+      bar says to select an annotation with `j`/`k` first
+- [ ] press `P` off then on, then press `d` before touching `j`/`k` — nothing is deleted, same
+      message (nothing is selected yet)
+- [ ] delete the LAST comment in the document (steer to the bottom) — the highlight lands on the
+      last block, and `j` there still clamps rather than going nowhere
+- [ ] press `A` for a file-level note, confirm it, then press `k` repeatedly from the first block —
+      the highlight reaches the note above the document body. Press `a` there — it opens the
+      file-level input pre-filled; press `d` there — the file-level note is deleted and the
+      highlight lands on the first block
+- [ ] after all of this press `P` to leave preview — source view shows exactly the comments that
+      survived, on the same lines, and `-o` output (press `O`) matches
 
 ## Notes
 

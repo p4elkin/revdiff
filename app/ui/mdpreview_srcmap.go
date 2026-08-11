@@ -47,9 +47,15 @@ type mdPreviewBlockAnchor struct {
 // the zero mdPreviewSourceMap, and mdPreviewBuildSourceMap is the only place
 // that ever sets aligned=true. Both fields are unexported so no caller outside
 // this package's preview files can construct a value that breaks it.
+// annots is the one field NOT produced here. It is where the annotation rows
+// spliced into the render ended up, and only mdPreviewPaintAnnotationsTracked —
+// the pass that splices them — can know that, so a map straight out of
+// mdPreviewRenderWithMap always has it empty. See mdPreviewAnnotAnchor and
+// mdPreviewSourceMap.stops (mdpreview_stops.go).
 type mdPreviewSourceMap struct {
 	aligned bool
 	anchors []mdPreviewBlockAnchor
+	annots  []mdPreviewAnnotAnchor
 }
 
 // blocks returns the anchors in document order.
