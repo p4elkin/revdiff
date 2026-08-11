@@ -1823,7 +1823,7 @@ func TestRenderMarkdownDocument_StateDiagram_NoLongerFallsBackVerbatim(t *testin
 // bytes renderMarkdownDocument splices back into the rendered page.
 func mdPreviewFenceArt(t *testing.T, doc string) string {
 	t.Helper()
-	_, arts := mermaidPlaceholderDocument(mdLines(doc), "testnonce", mdPreviewPaneWidth)
+	_, arts, _ := mermaidPlaceholderDocument(mdLines(doc), "testnonce", mdPreviewPaneWidth)
 	require.Len(t, arts, 1, "the document must contain exactly one mermaid fence")
 	return arts[0]
 }

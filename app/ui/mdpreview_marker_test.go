@@ -55,9 +55,11 @@ func TestMdPreviewMarkerDistinctBytes(t *testing.T) {
 // TestMdPreviewMarkerKindsCoverage pins the kind table to exactly the set
 // this task specifies, and to the style field each kind prepends to. The
 // generic "heading" is deliberately absent (glamour never emits
-// Heading.Prefix — only H1..H6.Prefix), and so are "list", "document",
-// "task", and "text" — see mdPreviewMarkerKinds' doc comment for why. A
-// change here is a scope change to this feature, not routine maintenance.
+// Heading.Prefix — only H1..H6.Prefix), and so are "list", "document" and
+// "text" — see mdPreviewMarkerKinds' doc comment for why. "task" IS present:
+// glamour renders a checkbox list item through Styles.Task and never through
+// Styles.Item, so without it every checklist document would fail alignment.
+// A change here is a scope change to this feature, not routine maintenance.
 func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
 	want := map[mdPreviewBlockKind]string{
 		"paragraph":   "Paragraph.Prefix",
@@ -74,6 +76,7 @@ func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
 		"table":       "Table.Prefix",
 		"hr":          "HorizontalRule.Prefix",
 		"html_block":  "HTMLBlock.Prefix",
+		"task":        "Task.BlockPrefix",
 	}
 	if len(mdPreviewMarkerKinds) != len(want) {
 		t.Fatalf("got %d kinds, want %d", len(mdPreviewMarkerKinds), len(want))
@@ -81,7 +84,7 @@ func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
 	for _, k := range mdPreviewMarkerKinds {
 		field, ok := want[k.kind]
 		if !ok {
-			t.Errorf("unexpected kind %q in table (excluded kinds: heading, list, document, task, text)", k.kind)
+			t.Errorf("unexpected kind %q in table (excluded kinds: heading, list, document, text)", k.kind)
 			continue
 		}
 		if k.styleField != field {
@@ -100,7 +103,7 @@ func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
 			t.Errorf("missing kind %q from table", name)
 		}
 	}
-	for _, excluded := range []mdPreviewBlockKind{"heading", "list", "document", "task", "text"} {
+	for _, excluded := range []mdPreviewBlockKind{"heading", "list", "document", "text"} {
 		for _, k := range mdPreviewMarkerKinds {
 			if k.kind == excluded {
 				t.Errorf("kind %q must not be in the table (see doc comment)", excluded)

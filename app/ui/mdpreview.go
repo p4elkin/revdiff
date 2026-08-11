@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -71,9 +72,10 @@ func mdFencePrefix(s string) (rune, int) {
 // verify width-dependent behavior must go through renderMarkdownDocument
 // instead.
 func renderMermaidFences(lines []diff.DiffLine) string {
-	return joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
+	doc, _ := joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
 		return renderMermaidBlock(body, openLine, closeLine, mermaidUnconstrainedWidth)
 	})
+	return doc
 }
 
 // joinWithMermaidFences is the shared fence-scanning walk behind
@@ -83,7 +85,18 @@ func renderMermaidFences(lines []diff.DiffLine) string {
 // fence — renderMermaidFences passes renderMermaidBlock (inline rendered
 // art), mermaidPlaceholderDocument passes a callback that defers rendering
 // and substitutes a placeholder instead (see renderMarkdownDocument for why).
-func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string, openLine, closeLine string) string) string {
+//
+// origins is the per-emitted-document-line provenance: origins[i] is the index
+// into lines that produced document line i+1. It exists because the document
+// this builds is NOT line-for-line with lines — divider rows are dropped and
+// every mermaid fence collapses to whatever renderBlock returns — so a
+// document line number cannot be used as a diff-line index without it. The
+// markdown source map (mdpreview_srcmap.go) is its only consumer; the two
+// other callers discard it. Every line of a fence's replacement text is
+// attributed to the fence's OPENING line, so a comment anywhere on a rendered
+// diagram anchors to the ```mermaid line the reader sees in source view.
+func joinWithMermaidFences(lines []diff.DiffLine,
+	renderBlock func(body []string, openLine, closeLine string) string) (doc string, origins []int) {
 	var out strings.Builder
 
 	var fenceChar rune // 0 when outside any fence
@@ -92,9 +105,10 @@ func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string
 	var fenceStart int     // index into lines of the opening fence line
 	var fenceBody []string // body lines collected while inside a mermaid fence
 
-	writeLine := func(content string) {
+	writeLine := func(content string, origin int) {
 		out.WriteString(content)
 		out.WriteString("\n")
+		origins = append(origins, origin)
 	}
 
 	for i, line := range lines {
@@ -120,15 +134,19 @@ func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string
 			fenceStart = i
 			fenceBody = nil
 			if fenceLang != "mermaid" {
-				writeLine(content)
+				writeLine(content, i)
 			}
 			continue
 		case fenceChar != 0 && ch == fenceChar && n >= fenceLen && strings.TrimSpace(trimmed[n:]) == "":
 			// closing fence
 			if fenceLang == "mermaid" {
-				out.WriteString(renderBlock(fenceBody, lines[fenceStart].Content, content))
+				replacement := renderBlock(fenceBody, lines[fenceStart].Content, content)
+				out.WriteString(replacement)
+				for range strings.Count(replacement, "\n") {
+					origins = append(origins, fenceStart)
+				}
 			} else {
-				writeLine(content)
+				writeLine(content, i)
 			}
 			fenceChar = 0
 			fenceLen = 0
@@ -141,12 +159,12 @@ func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string
 			if fenceLang == "mermaid" {
 				fenceBody = append(fenceBody, content)
 			} else {
-				writeLine(content)
+				writeLine(content, i)
 			}
 			continue
 		}
 
-		writeLine(content)
+		writeLine(content, i)
 	}
 
 	// an unterminated mermaid fence extends to end of document; its opening
@@ -154,13 +172,13 @@ func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string
 	// never came, so flush them verbatim rather than losing them. Non-mermaid
 	// fences are written eagerly above and need no flush here.
 	if fenceChar != 0 && fenceLang == "mermaid" {
-		writeLine(lines[fenceStart].Content)
-		for _, b := range fenceBody {
-			writeLine(b)
+		writeLine(lines[fenceStart].Content, fenceStart)
+		for bi, b := range fenceBody {
+			writeLine(b, fenceStart+1+bi)
 		}
 	}
 
-	return out.String()
+	return out.String(), origins
 }
 
 // renderMermaidBlock renders one mermaid fence's body via mermaid-ascii,
@@ -271,15 +289,18 @@ func mermaidPlaceholder(nonce string, idx int) string {
 // mdpreview_transpile.go) — the whole reason this function has a width
 // parameter at all, since renderMarkdownDocument is the only caller that
 // ever has a real viewport width to offer.
-func mermaidPlaceholderDocument(lines []diff.DiffLine, nonce string, paneWidth int) (doc string, arts []string) {
+//
+// origins is joinWithMermaidFences' per-document-line provenance, passed
+// straight through — see there. Only the markdown source map uses it.
+func mermaidPlaceholderDocument(lines []diff.DiffLine, nonce string, paneWidth int) (doc string, arts []string, origins []int) {
 	idx := 0
-	doc = joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
+	doc, origins = joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
 		arts = append(arts, renderMermaidBlock(body, openLine, closeLine, paneWidth))
 		placeholder := mermaidPlaceholder(nonce, idx)
 		idx++
 		return "\n" + placeholder + "\n\n"
 	})
-	return doc, arts
+	return doc, arts, origins
 }
 
 // spliceMermaidArt replaces, for each art in order, the FIRST not-yet-consumed
@@ -300,11 +321,34 @@ func mermaidPlaceholderDocument(lines []diff.DiffLine, nonce string, paneWidth i
 // being word-wrap-atomic — see there) is left as visible plain text rather
 // than silently dropping the diagram or panicking.
 func spliceMermaidArt(rendered, nonce string, arts []string) string {
+	out, _ := spliceMermaidArtTracked(rendered, nonce, arts)
+	return out
+}
+
+// mdPreviewArtShift records that the splice of one diagram turned a single
+// rendered row into several: row is the placeholder's row in the PRE-splice
+// render (0-based) and added is how many rows the art introduced beyond it.
+// Every pre-splice row strictly greater than row therefore moves down by
+// added. See mdPreviewShiftRow (mdpreview_srcmap.go), which is the only
+// consumer — the markdown source map's rows are produced against the
+// pre-splice render because that is the one the markers were extracted from.
+type mdPreviewArtShift struct {
+	row   int
+	added int
+}
+
+// spliceMermaidArtTracked is spliceMermaidArt plus the row shifts its
+// substitutions cause. The shifts are in pre-splice row coordinates and in
+// ascending row order. See spliceMermaidArt for the substitution rules; this
+// function is the implementation and that one is a thin wrapper for the
+// callers that do not need the shifts.
+func spliceMermaidArtTracked(rendered, nonce string, arts []string) (string, []mdPreviewArtShift) {
 	if len(arts) == 0 {
-		return rendered
+		return rendered, nil
 	}
 	lines := strings.Split(rendered, "\n")
 	consumed := make([]bool, len(lines))
+	var shifts []mdPreviewArtShift
 	for idx, art := range arts {
 		placeholder := mermaidPlaceholder(nonce, idx)
 		for i, line := range lines {
@@ -314,12 +358,17 @@ func spliceMermaidArt(rendered, nonce string, arts []string) string {
 			if strings.TrimSpace(ansi.Strip(line)) != placeholder {
 				continue
 			}
-			lines[i] = mermaidArtWithoutControls(strings.TrimSuffix(art, "\n"))
+			replacement := mermaidArtWithoutControls(strings.TrimSuffix(art, "\n"))
+			lines[i] = replacement
 			consumed[i] = true
+			if added := strings.Count(replacement, "\n"); added > 0 {
+				shifts = append(shifts, mdPreviewArtShift{row: i, added: added})
+			}
 			break
 		}
 	}
-	return strings.Join(lines, "\n")
+	sort.Slice(shifts, func(a, b int) bool { return shifts[a].row < shifts[b].row })
+	return strings.Join(lines, "\n"), shifts
 }
 
 // mermaidArtWithoutControls drops C0 control bytes and DEL from one diagram's
@@ -397,7 +446,7 @@ func mermaidControlRune(r rune) bool {
 // know which rows actually overflow.
 func renderMarkdownDocument(lines []diff.DiffLine, width int, noColors bool) string {
 	nonce := mermaidNonce()
-	doc, arts := mermaidPlaceholderDocument(lines, nonce, width)
+	doc, arts, _ := mermaidPlaceholderDocument(lines, nonce, width)
 
 	w := max(width, mdPreviewMinWidth)
 

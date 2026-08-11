@@ -55,19 +55,30 @@ type mdPreviewMarkerKind struct {
 }
 
 // mdPreviewMarkerKinds is every block kind this feature marks: paragraph,
-// h1..h6, item, enumeration, code_block, block_quote, table, hr, and
-// html_block.
+// h1..h6, item, enumeration, code_block, block_quote, table, hr, html_block,
+// and task.
 //
 // Deliberately NOT the generic "heading" — glamour never emits
 // Heading.Prefix, only H1..H6.Prefix (established by the spike; see this
 // plan's Technical Details). Also deliberately not "list" (its items are
 // marked individually via item/enumeration, which is the granularity this
-// feature needs), "document" (not a block a comment can target), "task"
-// (glamour renders a task list item through a separate Task style field;
-// task 2's goldmark walk folds task items into their enclosing list item
-// instead of needing a marker of their own — see the plan's "Decided by the
-// spike" section), or "text" (a spike-only probe kind used to investigate
-// table cell rendering, not a block kind).
+// feature needs), "document" (not a block a comment can target), or "text"
+// (a spike-only probe kind used to investigate table cell rendering, not a
+// block kind).
+//
+// "task" IS marked, which reverses this table's original scope decision, and
+// the reason is measured: glamour dispatches a checkbox list item to
+// TaskElement (vendor/.../glamour/ansi/elements.go's KindListItem case), which
+// renders through Styles.Task and NEVER through Styles.Item — so with no task
+// marker a "- [ ] ..." row carries no marker at all, while the goldmark walk
+// still emits an item/enumeration target for it. Every checklist document —
+// which is every plan document this fork's preview exists to review — would
+// then fail alignment on length and degrade to read-only. Marking
+// Task.BlockPrefix gives those rows an exact row number instead; alignment
+// accepts a "task" hit wherever it expects an "item" or "enumeration" target
+// (see mdPreviewKindMatches in mdpreview_srcmap.go). The marker lands after
+// the "[ ] " / "[x] " checkbox glyph, so it is reported mid-row — that is
+// cosmetic classification only, the row is exact.
 var mdPreviewMarkerKinds = []mdPreviewMarkerKind{
 	{mdBlockParagraph, 1, "Paragraph.Prefix", func(sc *ansi.StyleConfig, m string) {
 		sc.Paragraph.Prefix = m + sc.Paragraph.Prefix
@@ -96,6 +107,9 @@ var mdPreviewMarkerKinds = []mdPreviewMarkerKind{
 	}},
 	{mdBlockHTMLBlock, 14, "HTMLBlock.Prefix", func(sc *ansi.StyleConfig, m string) {
 		sc.HTMLBlock.Prefix = m + sc.HTMLBlock.Prefix
+	}},
+	{mdBlockTask, 15, "Task.BlockPrefix", func(sc *ansi.StyleConfig, m string) {
+		sc.Task.BlockPrefix = m + sc.Task.BlockPrefix
 	}},
 }
 

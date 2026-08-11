@@ -46,6 +46,15 @@ const (
 	mdBlockTable     mdPreviewBlockKind = "table"
 	mdBlockHR        mdPreviewBlockKind = "hr"
 	mdBlockHTMLBlock mdPreviewBlockKind = "html_block"
+
+	// mdBlockTask is produced by the MARKER side only (see
+	// mdPreviewMarkerKinds in mdpreview_marker.go): glamour renders a
+	// checkbox list item through Styles.Task instead of Styles.Item, so its
+	// rendered row carries a "task" marker where this walk emits an
+	// mdBlockItem / mdBlockEnum target. mdPreviewBlockTargets never produces
+	// this kind — mdPreviewKindMatches (mdpreview_srcmap.go) is what bridges
+	// the two sides.
+	mdBlockTask mdPreviewBlockKind = "task"
 )
 
 // mdPreviewBlockTarget is one annotatable unit: a tracked block kind and the

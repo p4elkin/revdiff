@@ -237,13 +237,13 @@ hunk expansion today, and populating it differently would break that promise.
 
 **Model:** opus
 
-- [ ] align the extracted marker sequence against the goldmark sequence and verify: equal length, kind-for-kind match, monotonically increasing rows
-- [ ] on agreement, build the map with `rowToLine` and `lineToRow` queries; on any disagreement set `Aligned = false` and expose no targets
-- [ ] adjust the map for mermaid art, whose splice shifts row numbers — `spliceMermaidArt` must report its insertions so the adjustment happens in the same pipeline step
-- [ ] handle the `--no-colors` path: markers are escape sequences and that mode promises none, so strip and then run `ansi.Strip` over the result as a net
-- [ ] write tests for a clean alignment, a length mismatch, a kind mismatch, a non-monotonic row sequence, an empty document, and a document of only a table
-- [ ] write tests that `rowToLine` and `lineToRow` are consistent inverses over a real document
-- [ ] run `go test ./app/ui -run 'TestMdPreviewSrcMap|TestAlign'` — must pass before the next task
+- [x] align the extracted marker sequence against the goldmark sequence and verify: equal length, kind-for-kind match, monotonically increasing rows
+- [x] on agreement, build the map with `rowToLine` and `lineToRow` queries; on any disagreement set `Aligned = false` and expose no targets
+- [x] adjust the map for mermaid art, whose splice shifts row numbers — `spliceMermaidArt` must report its insertions so the adjustment happens in the same pipeline step
+- [x] handle the `--no-colors` path: markers are escape sequences and that mode promises none, so strip and then run `ansi.Strip` over the result as a net
+- [x] write tests for a clean alignment, a length mismatch, a kind mismatch, a non-monotonic row sequence, an empty document, and a document of only a table
+- [x] write tests that `rowToLine` and `lineToRow` are consistent inverses over a real document
+- [x] run `go test ./app/ui -run 'TestMdPreviewSrcMap|TestAlign'` — must pass before the next task
 
 ### Task 4: Render cache
 
