@@ -56,7 +56,16 @@ func (m Model) mdPreviewPaintAnnotations(rendered string, srcMap mdPreviewSource
 func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPreviewSourceMap) (string, mdPreviewSourceMap) {
 	all := m.store.Get(m.file.name)
 	liveIdx, liveOK := m.mdPreviewLiveInputTarget()
-	if len(all) == 0 && !liveOK {
+	// a brand-new file-level annotation (A with nothing saved yet for this
+	// file) has no entry in `all` either, same gap startPreviewAnnotationAt
+	// closed for line-level input above. mdPreviewLiveInputTarget only ever
+	// reports true for the line-level case (see its own doc comment), so the
+	// file-level live-input state has to be checked directly here — without
+	// it the early return below would skip renderFileAnnotationHeader
+	// entirely and the text a reader is actively typing into the file-level
+	// box would stay invisible until the moment it is saved.
+	liveFileAnnotating := m.annot.annotating && m.annot.fileAnnotating
+	if len(all) == 0 && !liveOK && !liveFileAnnotating {
 		return rendered, srcMap // nothing spliced, so every row kept its number
 	}
 

@@ -900,11 +900,25 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     so they move the render and never the cursor. They must never fall
 //     through: the fall-through target is handleDiffMovement (diffnav.go),
 //     i.e. the exact cursor motion this mode exists to avoid.
+//   - annotate_file (A) creates a file-level annotation the same way source
+//     view does — handleFileAnnotateKey (app/ui/handlers.go) falls all the
+//     way through to startFileAnnotation (app/ui/annotate.go) unmodified. A
+//     file-level annotation's Line is always 0, and mdPreviewPaintAnnotationsTracked
+//     (mdpreview_annotate.go) already paints Line-0 rows ahead of every block
+//     unconditionally, so there is no block to resolve and no source map to
+//     consult — unlike confirm, this needs no routing here. It is gated the
+//     same as source view: handleFileAnnotateKey is a no-op unless the diff
+//     pane has focus, so it cannot fire while the tree/TOC pane is focused.
+//   - flush_output (O) writes the current annotation store to the --output
+//     file (handleFlushOutput, app/ui/output.go). It never reads or assigns
+//     m.nav.diffCursor and never touches the viewport, so it is safe to let
+//     it fall through unmodified — creating annotations in preview without a
+//     way to flush them out would be half a feature.
 //
 // Deliberately NOT included, despite being layout/session actions with no
 // obvious annotation/cursor risk on their own: toggle_pane / focus_tree /
 // focus_diff (switching focus into the TOC pane is pointless once TOC
-// navigation itself is blocked below), info, reload, flush_output,
+// navigation itself is blocked below), info, reload,
 // mark_reviewed, filter, filter_unreviewed, open_file_in_editor,
 // toggle_untracked, and the other view-mode toggles (wrap/collapsed/compact/
 // line_numbers/blame/word_diff/toggle_hunk) — none of them are needed to
@@ -959,6 +973,8 @@ var mdPreviewAllowedActions = map[keymap.Action]bool{
 	keymap.ActionHome:           true,
 	keymap.ActionEnd:            true,
 	keymap.ActionDismiss:        true,
+	keymap.ActionAnnotateFile:   true,
+	keymap.ActionFlushOutput:    true,
 }
 
 // mdPreviewActionAllowed reports whether action may run while markdown

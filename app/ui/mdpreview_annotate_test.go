@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -475,4 +476,117 @@ func TestMdPreviewPaintAnnotations_LiveInputVisibleForNewAnnotation(t *testing.T
 
 	assert.Contains(t, ansi.Strip(rendered), "typing now",
 		"the annotation currently being typed must be visible in the preview before it is saved")
+}
+
+// TestDispatchAction_MdPreviewOn_AnnotateFileStartsAnnotation is Task 8's
+// allowlist round trip for 'A': pressed through the real Update path (not
+// the guard helper in isolation), it must start a file-level annotation the
+// same way it does in source view — startFileAnnotation always sets
+// diffCursor to -1 and needs no source-map anchor, since a file-level
+// annotation's Line is always 0.
+func TestDispatchAction_MdPreviewOn_AnnotateFileStartsAnnotation(t *testing.T) {
+	lines := mdLines("# Title\n\nSome text.")
+	m := mdPreviewTestModel(lines)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	model := pressKey(t, m, "A")
+
+	assert.True(t, model.annot.annotating, "A must start an annotation while previewing")
+	assert.True(t, model.annot.fileAnnotating, "A must start a FILE-level annotation, not a line-level one")
+	assert.Equal(t, -1, model.nav.diffCursor, "file-level annotation always targets Line 0 via cursor -1")
+}
+
+// TestDispatchAction_MdPreviewOn_AnnotateFileNoOpWhenTreeFocused checks the
+// assumption the allowlist doc comment makes explicit: handleFileAnnotateKey
+// is gated on the diff pane having focus, in preview exactly as in source
+// view, so allowing annotate_file to fall through unmodified needs no
+// preview-specific focus guard of its own.
+func TestDispatchAction_MdPreviewOn_AnnotateFileNoOpWhenTreeFocused(t *testing.T) {
+	lines := mdLines("# Title\n\nSome text.")
+	m := mdPreviewTestModel(lines)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	m.layout.focus = paneTree
+
+	model := pressKey(t, m, "A")
+
+	assert.False(t, model.annot.annotating, "A must stay a no-op while the tree pane has focus")
+}
+
+// TestDispatchAction_MdPreviewOn_AnnotateFileSavedAnnotationPaintsAboveRowZero
+// is the task's named checklist assertion: a saved file-level annotation must
+// paint above row 0, pushing every block down by its own row count, driven
+// through the real 'A' dispatch path rather than by seeding the store
+// directly (that shape is already covered by
+// TestMdPreviewPaintAnnotations_FileLevelAlwaysAtTop).
+func TestDispatchAction_MdPreviewOn_AnnotateFileSavedAnnotationPaintsAboveRowZero(t *testing.T) {
+	lines := mdLines("# Title\n\nSome text.")
+	m := mdPreviewTestModel(lines)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+
+	model := pressKey(t, m, "A")
+	require.True(t, model.annot.annotating)
+	require.True(t, model.annot.fileAnnotating)
+	model.annot.input.SetValue("file-level note")
+	model.saveAnnotation()
+
+	body, srcMap := model.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	require.NotEmpty(t, srcMap.blocks())
+	assert.Positive(t, srcMap.blocks()[0].Row,
+		"the first block must be pushed past row 0 by the file-level annotation ahead of it")
+
+	rows := strings.Split(body, "\n")
+	assert.Contains(t, ansi.Strip(rows[0]), "file-level note",
+		"a file-level annotation must paint at row 0, above every block")
+}
+
+// TestMdPreviewPaintAnnotations_FileLevelLiveInputVisibleForNewAnnotation is
+// the file-level counterpart to
+// TestMdPreviewPaintAnnotations_LiveInputVisibleForNewAnnotation. Before Task
+// 8 this path was unreachable in a running TUI (annotate_file was blocked),
+// so the gap never showed: mdPreviewPaintAnnotationsTracked's early return
+// only checked the store and the line-level live-input target, neither of
+// which sees a brand-new file-level annotation (nothing saved yet for this
+// file) — the text a reader is actively typing into the file-level box
+// stayed invisible until the moment it was saved. Fixed by checking
+// m.annot.fileAnnotating directly alongside the store/line-level checks.
+func TestMdPreviewPaintAnnotations_FileLevelLiveInputVisibleForNewAnnotation(t *testing.T) {
+	doc := "# Title\n\nSome text."
+	lines := mdLines(doc)
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	require.Equal(t, 0, m.store.Count(), "fixture sanity: no existing annotations for this file")
+	m.startFileAnnotation()
+	require.True(t, m.annot.annotating)
+	require.True(t, m.annot.fileAnnotating)
+	m.annot.input.SetValue("typing a file note")
+
+	rendered := m.renderMarkdownPreview()
+
+	assert.Contains(t, ansi.Strip(rendered), "typing a file note",
+		"the file-level annotation currently being typed must be visible in preview before it is saved")
+}
+
+// TestDispatchAction_MdPreviewOn_FlushOutputWritesFile is Task 8's allowlist
+// round trip for 'O': handleFlushOutput touches neither m.nav.diffCursor nor
+// the viewport, so it needs no preview-specific handling — creating
+// annotations in preview without a way to flush them would be half a
+// feature.
+func TestDispatchAction_MdPreviewOn_FlushOutputWritesFile(t *testing.T) {
+	lines := mdLines("# Title\n\nSome text.")
+	m := mdPreviewTestModel(lines)
+	m.toggleMarkdownPreview()
+	require.True(t, m.modes.mdPreview)
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 0, Type: "", Comment: "file note"})
+	path := filepath.Join(t.TempDir(), "out.md")
+	m.cfg.outputPath = path
+
+	model := pressKey(t, m, "O")
+
+	assert.FileExists(t, path, "O must flush annotations to the output file while previewing")
+	assert.True(t, model.modes.mdPreview, "flushing output must not exit preview")
 }

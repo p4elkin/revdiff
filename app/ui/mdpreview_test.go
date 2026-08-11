@@ -725,22 +725,23 @@ func pressKey(t *testing.T, m Model, key string) Model {
 }
 
 func TestDispatchAction_MdPreviewOn_AnnotationKeysAreInert(t *testing.T) {
-	// covers the unsafe actions identified in the Task 5 investigation that
-	// remain inert after Task 7: starting a file-level annotation ('A'),
-	// deleting an annotation ('d'), and opening the annotation-list jump
-	// ('@'). Confirm (Enter/'a' -> ActionConfirm) is deliberately NOT in this
-	// list anymore — Task 7 makes it create a line-level annotation anchored
-	// through the source map instead of the ordinary cursor-based path; see
-	// startPreviewAnnotation and its tests (mdpreview_annotate.go,
-	// mdpreview_annotate_test.go). A real annotation is
-	// pre-seeded on the cursor's line so "delete_annotation" has something to
-	// (fail to) delete — otherwise that subtest would trivially pass with no
-	// guard at all.
+	// covers the unsafe actions that remain inert after Task 7: deleting an
+	// annotation ('d') and opening the annotation-list jump ('@'). Confirm
+	// (Enter/'a' -> ActionConfirm) and annotate_file ('A') are deliberately
+	// NOT in this list anymore — Task 7 makes confirm create a line-level
+	// annotation anchored through the source map instead of the ordinary
+	// cursor-based path, and Task 8 allows annotate_file to fall through to
+	// its ordinary handler unmodified, since a file-level annotation's Line
+	// is always 0 and needs no source-map anchor; see startPreviewAnnotation,
+	// mdPreviewAllowedActions's doc comment, and their tests
+	// (mdpreview_annotate.go, mdpreview_annotate_test.go). A real annotation
+	// is pre-seeded on the cursor's line so "delete_annotation" has something
+	// to (fail to) delete — otherwise that subtest would trivially pass with
+	// no guard at all.
 	tests := []struct {
 		name string
 		key  string
 	}{
-		{"annotate_file", "A"},
 		{"delete_annotation", "d"},
 		{"annot_list", "@"},
 	}

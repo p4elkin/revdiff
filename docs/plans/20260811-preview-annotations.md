@@ -341,10 +341,10 @@ hunk expansion today, and populating it differently would break that promise.
 
 **Model:** sonnet
 
-- [ ] allow `A` — `startFileAnnotation` sets the cursor to -1 and goes to the top, which is where file-level rows render, so it needs no map
-- [ ] allow `O` — `handleFlushOutput` touches neither cursor nor viewport maths, and creation without a way to flush is half a feature
-- [ ] write tests that both work in preview and that a file-level annotation paints above row 0
-- [ ] run `go test ./app/ui -run 'TestMdPreview|TestFileAnnotation|TestFlushOutput'` — must pass before the next task
+- [x] allow `A` — `startFileAnnotation` sets the cursor to -1 and goes to the top, which is where file-level rows render, so it needs no map
+- [x] allow `O` — `handleFlushOutput` touches neither cursor nor viewport maths, and creation without a way to flush is half a feature
+- [x] write tests that both work in preview and that a file-level annotation paints above row 0
+- [x] run `go test ./app/ui -run 'TestMdPreview|TestFileAnnotation|TestFlushOutput'` — must pass before the next task
 
 ### Task 9: Verify acceptance criteria
 
