@@ -119,7 +119,10 @@ var mdPreviewMarkerKinds = []mdPreviewMarkerKind{
 // replacing, is what keeps an existing prefix intact — e.g. item's
 // BlockPrefix is glamour's "• " bullet, and the marked style must still
 // render that bullet, just with the marker ahead of it.
-func mdPreviewStyleWithMarkers(base ansi.StyleConfig, kinds ...mdPreviewMarkerKind) ansi.StyleConfig {
+//
+// kinds is a plain slice rather than a variadic: production always passes the
+// whole mdPreviewMarkerKinds table, and only tests ever pass a subset.
+func mdPreviewStyleWithMarkers(base ansi.StyleConfig, kinds []mdPreviewMarkerKind) ansi.StyleConfig {
 	sc := base // struct copy: every field this loop touches is a plain string
 	for _, k := range kinds {
 		k.apply(&sc, mdPreviewMarker(k.id))

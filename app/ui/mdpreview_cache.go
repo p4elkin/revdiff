@@ -48,6 +48,23 @@ type mdPreviewCacheKey struct {
 // never more than one base render worth keeping warm, and a single entry
 // means a key mismatch (any field changing) is a plain evict-and-replace
 // with no eviction policy to get wrong.
+//
+// Deliberately NOT wired into invalidateRenderCaches (app/ui/diffview.go),
+// which is the chokepoint for the two diff-pane memos. Everything this cache
+// and its nested mdPreviewScrollCache hold is fully self-keying, so there is
+// nothing for an external invalidator to catch:
+//   - the base render reads only m.file.lines, the viewport width and
+//     noColors, all of which mdPreviewCacheKey carries (lines change only with
+//     loadSeq, which is in the key). It does not read the style resolver at
+//     all — glamour renders through the fixed mdPreviewStyle/mdPreviewStyleNoColor
+//     configs — nor file.highlighted, file.blameData or file.intraRanges, which
+//     are the four non-comparable inputs invalidateRenderCaches exists for.
+//   - the scroll memos key on the painted body string, so an annotation edit or
+//     a theme change reaching the annotation rows misses by itself; the cut
+//     additionally keys on the resolved «/» indicators, which is where the
+//     theme enters that pass.
+//   - the block highlight is not memoized at all — it is recomputed per frame
+//     from the live resolver.
 type mdPreviewRenderCache struct {
 	key      mdPreviewCacheKey
 	valid    bool
@@ -187,11 +204,14 @@ func (m Model) mdPreviewBody() (string, mdPreviewSourceMap) {
 	return m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
 }
 
-// mdPreviewFinalRender is the whole preview pipeline in one place: cached base
-// render -> annotations spliced in -> horizontal cut -> block highlight. Both
-// entry points that push preview content into the viewport
-// (renderMarkdownPreview and panMarkdownPreview, app/ui/mdpreview.go) bottom out
-// here, so there is exactly one definition of what a preview frame looks like.
+// mdPreviewFrame is the one definition of what a preview frame looks like:
+// an uncut body (annotations already spliced in) plus the map in that body's
+// own row numbers, cut to the horizontal window, then given the block
+// highlight. Both entry points that push preview content into the viewport go
+// through it — renderMarkdownPreview via mdPreviewFinalRender, and
+// panMarkdownPreview directly, because it has already computed the body to
+// measure the pan clamp against and would otherwise pay for a second
+// annotation paint per pan step.
 //
 // The highlight runs AFTER applyMdPreviewScroll, unlike the annotations, and the
 // order is load-bearing in both directions. Annotation rows are ordinary content
@@ -202,9 +222,36 @@ func (m Model) mdPreviewBody() (string, mdPreviewSourceMap) {
 // to bleed through the » indicator and into the pane padding. Applying it to the
 // already-cut rows makes that impossible. Row indices are unaffected by the cut
 // (it is per-row), so the map stays valid across it.
-func (m Model) mdPreviewFinalRender() string {
-	body, srcMap := m.mdPreviewBody()
+func (m Model) mdPreviewFrame(body string, srcMap mdPreviewSourceMap) string {
 	return m.mdPreviewHighlight(m.applyMdPreviewScroll(body), srcMap)
+}
+
+// mdPreviewFinalRender is the whole preview pipeline from Model state alone:
+// cached base render -> annotations spliced in -> mdPreviewFrame.
+func (m Model) mdPreviewFinalRender() string {
+	return m.mdPreviewFrame(m.mdPreviewBody())
+}
+
+// flushPreviewWheelPending is the markdown-preview half of flushWheelPending
+// (app/ui/mouse.go), which calls it first and returns when it reports true.
+// pinDiffCursorTo is an unconditional no-op while previewing (there is no
+// cursor to pin), so without this the deferred SetContent the wheel-burst
+// debounce owes never runs and the scroll-following block highlight stays
+// frozen on the block that was topmost when the burst started.
+//
+// It rides the SAME wheelState debounce (gen / renderPending / tickInFlight,
+// see .claude/rules/gotchas.md) rather than bringing a second one: one repaint
+// per burst, not per wheel event. Clearing both flags here is what the diff
+// path's own tail does, and is why the caller returns instead of falling
+// through.
+func (m *Model) flushPreviewWheelPending() bool {
+	if !m.modes.mdPreview {
+		return false
+	}
+	m.layout.viewport.SetContent(m.renderDiff())
+	m.wheel.renderPending = false
+	m.wheel.tickInFlight = false
+	return true
 }
 
 // mdPreviewHighlightAnchor picks the block the highlight marks: the topmost
@@ -213,8 +260,8 @@ func (m Model) mdPreviewFinalRender() string {
 // rather than the viewport edge: a block half-scrolled off the top is not the
 // one being read, the next whole one is.
 //
-// Blocks are contiguous and ascending (EndRow of one is the row before the next
-// one's Row, enforced when the map is built), so the first block starting at or
+// Blocks are contiguous and ascending (endRow of one is the row before the next
+// one's row, enforced when the map is built), so the first block starting at or
 // after the top is the only candidate — if it is too tall to fit, every later
 // block starts further down and cannot fit either. When it does not fit, the
 // fallback is the block owning the top row, which is the one filling the screen.
@@ -223,22 +270,30 @@ func (m Model) mdPreviewFinalRender() string {
 // viewport scrolled above the first block.
 func (m Model) mdPreviewHighlightAnchor(srcMap mdPreviewSourceMap) int {
 	anchors := srcMap.blocks()
-	if !srcMap.Aligned || len(anchors) == 0 {
+	if !srcMap.aligned || len(anchors) == 0 {
 		return -1
 	}
 	top := m.layout.viewport.YOffset
 	bottom := top + m.layout.viewport.Height - 1
 
-	i := sort.Search(len(anchors), func(i int) bool { return anchors[i].Row >= top })
-	if i < len(anchors) && anchors[i].EndRow <= bottom {
+	i := sort.Search(len(anchors), func(i int) bool { return anchors[i].row >= top })
+	if i < len(anchors) && anchors[i].endRow <= bottom {
 		return i
 	}
 	return srcMap.anchorAtRow(top)
 }
 
-// mdPreviewHighlight paints the highlighted block's rows with a background,
-// the way the diff pane marks the line the cursor is on. rendered is the
-// already-cut preview frame and srcMap must be in that frame's coordinates.
+// mdPreviewHighlight paints the highlighted block's rows with a background.
+// rendered is the already-cut preview frame and srcMap must be in that frame's
+// coordinates.
+//
+// The background is ColorKeySearchBg, borrowed deliberately: there is no
+// cursor-background color key to use instead, and adding one is the three-site
+// change CLAUDE.md describes (theme.go's colorKeys, the options struct, and
+// colorFieldPtrs() in themes.go) plus a new field in all 7 bundled themes. The
+// diff pane's own cursor is NOT drawn this way — it uses a cursor bar glyph
+// over the line's own change background — so this is a reuse of a theme color,
+// not a reuse of a rendering convention.
 //
 // Skipped entirely in no-colors mode. The highlight is ANSI by construction and
 // --no-colors promises a preview with none in it (see mdPreviewStyleNoColor);
@@ -276,7 +331,7 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 	anchor := srcMap.blocks()[bi]
 	rows := strings.Split(rendered, "\n")
 	painted := false
-	for r := max(0, anchor.Row); r <= anchor.EndRow && r < len(rows); r++ {
+	for r := max(0, anchor.row); r <= anchor.endRow && r < len(rows); r++ {
 		if strings.TrimSpace(ansi.Strip(rows[r])) == "" {
 			continue
 		}
@@ -298,12 +353,13 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 // default background showing to its right, so the mark stops short of the edge
 // instead of spanning it.
 //
-// Raw ANSI, never lipgloss.Render: this is a styled substring inside a
-// lipgloss-rendered pane, and Render would emit a full "\033[0m" that kills the
-// pane's own background (see .claude/rules/gotchas.md, "ANSI nesting with
-// lipgloss"). The re-assertion is what a plain prefix cannot do — a glamour row
-// is full of per-span resets, and each one would end the highlight partway
-// through the row, leaving it striped.
+// The re-assertion itself belongs to style.SGR (ReassertBackground), which owns
+// the set of SGR spellings that clear a background — a glamour row is full of
+// per-span resets, and each one would end the highlight partway through the row,
+// leaving it striped. Doing it here by string replacement would cover whichever
+// spellings this file happened to list. The zero value is how that type is used
+// (it is stateless by design); Model's injected sgrProcessor covers only the
+// Reemit path.
 func mdPreviewHighlightRow(row, bg string, width int) string {
 	if row == "" {
 		return row
@@ -311,8 +367,5 @@ func mdPreviewHighlightRow(row, bg string, width int) string {
 	if pad := width - ansi.StringWidth(row); pad > 0 {
 		row += strings.Repeat(" ", pad)
 	}
-	out := strings.ReplaceAll(row, "\033[0m", "\033[0m"+bg)
-	out = strings.ReplaceAll(out, "\033[m", "\033[m"+bg)
-	out = strings.ReplaceAll(out, "\033[49m", "\033[49m"+bg)
-	return bg + out + "\033[49m"
+	return style.SGR{}.ReassertBackground(row, bg)
 }

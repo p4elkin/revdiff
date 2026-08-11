@@ -3,6 +3,7 @@ package ui
 import (
 	"log"
 	"sort"
+	"strings"
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/x/ansi"
@@ -17,8 +18,8 @@ import (
 // systems the preview has to live in at once: the rendered row range the block
 // occupies on screen, and the source lines it came from.
 //
-// Row/EndRow are 0-based row indices into the FINAL render (mermaid art
-// already spliced in), inclusive on both ends. StartLine/EndLine are indices
+// row/endRow are 0-based row indices into the FINAL render (mermaid art
+// already spliced in), inclusive on both ends. startLine/endLine are indices
 // into the []diff.DiffLine the render was produced from — i.e. the same
 // coordinate m.nav.diffCursor uses, not a 1-based file line number and not a
 // line number of the intermediate placeholder document. That choice is what
@@ -26,46 +27,76 @@ import (
 // (diffLineNum(m.file.lines[i]) / m.file.lines[i].ChangeType), producing an
 // annotation indistinguishable from one made with preview off.
 type mdPreviewBlockAnchor struct {
-	Kind      mdPreviewBlockKind
-	Row       int
-	EndRow    int
-	StartLine int
-	EndLine   int
+	kind      mdPreviewBlockKind
+	row       int
+	endRow    int
+	startLine int
+	endLine   int
 }
 
 // mdPreviewSourceMap is the result of agreeing two independently produced
 // sequences: the block targets goldmark found in the source, and the markers
-// glamour left in the render. Aligned is the safety net — false means the two
+// glamour left in the render. aligned is the safety net — false means the two
 // disagreed and NOTHING may be anchored, so anchors is empty and every query
 // reports "no answer". There is no partial map: a map that is right about some
 // blocks and silently wrong about others is the one outcome this whole
 // mechanism exists to avoid.
+//
+// The "aligned=false implies no anchors" invariant is enforced where the value
+// is built, not where it is read: every disagreement path in this file returns
+// the zero mdPreviewSourceMap, and mdPreviewBuildSourceMap is the only place
+// that ever sets aligned=true. Both fields are unexported so no caller outside
+// this package's preview files can construct a value that breaks it.
 type mdPreviewSourceMap struct {
-	Aligned bool
+	aligned bool
 	anchors []mdPreviewBlockAnchor
 }
 
-// blocks returns the anchors in document order. Empty whenever Aligned is
-// false, so a caller that forgets to check Aligned still cannot anchor
-// anything to a disagreeing render.
+// blocks returns the anchors in document order.
 func (sm mdPreviewSourceMap) blocks() []mdPreviewBlockAnchor {
 	return sm.anchors
+}
+
+// resolveBlock resolves which block a line-level annotation should be spliced
+// under. idx/idxOK are the annotation's line already resolved through
+// mdPreviewLineIndex (see mdPreviewRenderOne for why the lookup is the
+// caller's). Caller guarantees len(sm.blocks()) > 0.
+//
+// Three outcomes, matching this map's own resolution rules:
+//   - the line still exists and anchorAtLine finds a containing block (the
+//     block starts exactly there, or the line falls inside a block's span
+//     without being its first line, e.g. a mid-paragraph annotation): that
+//     block.
+//   - the line still exists but precedes every block (there is nothing to be
+//     "inside", e.g. an annotation on a blank separator line before the very
+//     first block): the first block — the nearest one there is.
+//   - the line no longer resolves to any current diff line at all (the file
+//     changed since the annotation was saved): the last block, so an orphaned
+//     annotation is never lost, just pinned to the end of the document.
+func (sm mdPreviewSourceMap) resolveBlock(idx int, idxOK bool) int {
+	if !idxOK {
+		return len(sm.anchors) - 1
+	}
+	if bi := sm.anchorAtLine(idx); bi >= 0 {
+		return bi
+	}
+	return 0
 }
 
 // anchorAtRow answers "which block did this rendered row come from?" — the one
 // question the whole feature reduces to, once a caller has the block it can
 // read the source line off it. It returns the index of the block owning row
-// (the last block whose Row is at or before it), or -1. A row that belongs to
+// (the last block whose row is at or before it), or -1. A row that belongs to
 // no block (glamour's top margin aside, that is padding between blocks)
 // resolves to the nearest preceding one; -1 means row precedes the first block
 // entirely, or the map is not aligned.
 func (sm mdPreviewSourceMap) anchorAtRow(row int) int {
-	if !sm.Aligned || len(sm.anchors) == 0 {
+	if !sm.aligned || len(sm.anchors) == 0 {
 		return -1
 	}
-	// anchors are strictly increasing in Row (enforced by alignment), so the
+	// anchors are strictly increasing in row (enforced by alignment), so the
 	// first anchor starting after row bounds the search.
-	i := sort.Search(len(sm.anchors), func(i int) bool { return sm.anchors[i].Row > row })
+	i := sort.Search(len(sm.anchors), func(i int) bool { return sm.anchors[i].row > row })
 	if i == 0 {
 		return -1
 	}
@@ -83,10 +114,10 @@ func (sm mdPreviewSourceMap) anchorAtRow(row int) int {
 // the innermost one, matching the "deepest block owning a start line wins"
 // rule the block walk already applies.
 func (sm mdPreviewSourceMap) anchorAtLine(line int) int {
-	if !sm.Aligned || len(sm.anchors) == 0 {
+	if !sm.aligned || len(sm.anchors) == 0 {
 		return -1
 	}
-	i := sort.Search(len(sm.anchors), func(i int) bool { return sm.anchors[i].StartLine > line })
+	i := sort.Search(len(sm.anchors), func(i int) bool { return sm.anchors[i].startLine > line })
 	if i == 0 {
 		return -1
 	}
@@ -133,7 +164,7 @@ func mdPreviewRenderWithMap(lines []diff.DiffLine, width int, noColors bool) (st
 		base = mdPreviewStyleNoColor
 		opts = append(opts, glamour.WithColorProfile(termenv.Ascii))
 	}
-	marked := mdPreviewStyleWithMarkers(base, mdPreviewMarkerKinds...)
+	marked := mdPreviewStyleWithMarkers(base, mdPreviewMarkerKinds)
 	opts = append(opts, glamour.WithStyles(marked))
 
 	r, err := glamour.NewTermRenderer(opts...)
@@ -224,7 +255,7 @@ func mdPreviewAlignRows(targets []mdPreviewBlockTarget, hits []mdPreviewMarkerHi
 	rows := make([]int, len(targets))
 	for i, tg := range targets {
 		st.drainQuoteParagraphs()
-		row, ok := st.take(tg.Kind)
+		row, ok := st.take(tg.kind)
 		if !ok || row <= st.prevRow {
 			return nil, false
 		}
@@ -355,13 +386,13 @@ func mdPreviewQuoteParagraphs(doc string) []int {
 		if !entering || n.Kind() != gast.KindBlockquote {
 			return gast.WalkContinue, nil
 		}
-		n1 := 0
+		paragraphs := 0
 		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 			if c.Kind() == gast.KindParagraph {
-				n1++
+				paragraphs++
 			}
 		}
-		counts = append(counts, n1)
+		counts = append(counts, paragraphs)
 		return gast.WalkContinue, nil
 	})
 	return counts
@@ -391,7 +422,7 @@ func mdPreviewShiftRow(shifts []mdPreviewArtShift, row int) int {
 // of the render).
 //
 // It refuses the whole map — the same all-or-nothing degrade
-// mdPreviewAlignRows applies to rows — when StartLine is not strictly
+// mdPreviewAlignRows applies to rows — when startLine is not strictly
 // increasing across the targets. mdPreviewAlignRows already enforces that on
 // the RENDER side, and enforcing the same on the SOURCE side is not
 // redundant: the two sequences are produced independently, so a goldmark-side
@@ -407,8 +438,8 @@ func mdPreviewBuildSourceMap(targets []mdPreviewBlockTarget, rows []int, shifts 
 	anchors := make([]mdPreviewBlockAnchor, 0, len(targets))
 	prevLine := -1
 	for i, tg := range targets {
-		start, sok := mdPreviewOriginOf(origins, tg.StartLine)
-		end, eok := mdPreviewOriginOf(origins, tg.EndLine)
+		start, sok := mdPreviewOriginOf(origins, tg.startLine)
+		end, eok := mdPreviewOriginOf(origins, tg.endLine)
 		if !sok || !eok {
 			// a target pointing outside the document it was parsed from means
 			// the two halves disagree about the document itself; refuse the
@@ -420,22 +451,22 @@ func mdPreviewBuildSourceMap(targets []mdPreviewBlockTarget, rows []int, shifts 
 		}
 		prevLine = start
 		anchors = append(anchors, mdPreviewBlockAnchor{
-			Kind:      tg.Kind,
-			Row:       mdPreviewShiftRow(shifts, rows[i]),
-			StartLine: start,
-			EndLine:   max(start, end),
+			kind:      tg.kind,
+			row:       mdPreviewShiftRow(shifts, rows[i]),
+			startLine: start,
+			endLine:   max(start, end),
 		})
 	}
 
-	lastRow := mdPreviewRowCount(rendered) - 1
+	lastRow := strings.Count(rendered, "\n")
 	for i := range anchors {
 		if i+1 < len(anchors) {
-			anchors[i].EndRow = max(anchors[i].Row, anchors[i+1].Row-1)
+			anchors[i].endRow = max(anchors[i].row, anchors[i+1].row-1)
 			continue
 		}
-		anchors[i].EndRow = max(anchors[i].Row, lastRow)
+		anchors[i].endRow = max(anchors[i].row, lastRow)
 	}
-	return mdPreviewSourceMap{Aligned: true, anchors: anchors}
+	return mdPreviewSourceMap{aligned: true, anchors: anchors}
 }
 
 // mdPreviewOriginOf maps a 1-based line number of the placeholder document to
@@ -446,15 +477,4 @@ func mdPreviewOriginOf(origins []int, docLine int) (int, bool) {
 		return 0, false
 	}
 	return origins[docLine-1], true
-}
-
-// mdPreviewRowCount returns how many rows a rendered document has.
-func mdPreviewRowCount(rendered string) int {
-	n := 1
-	for i := range len(rendered) {
-		if rendered[i] == '\n' {
-			n++
-		}
-	}
-	return n
 }

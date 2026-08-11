@@ -26,6 +26,69 @@ func (SGR) Reemit(lines []string) []string {
 	return lines
 }
 
+// ReassertBackground wraps row in the background bg and re-emits bg after
+// every SGR sequence the row already contains that would clear it, so the
+// background spans the whole row instead of ending at the row's first reset.
+// It closes with a background reset (\033[49m). An empty row or an empty bg is
+// returned unchanged.
+//
+// This type owns the question "which SGR sequences clear the background?"
+// because there is no single spelling of it: a full reset is \033[0m, \033[m
+// or \033[00m, an explicit background reset is \033[49m, and either can arrive
+// inside a multi-parameter sequence such as \033[0;39m. A caller doing its own
+// string replacement covers whichever spellings it happened to think of, and
+// silently stripes the row on the rest — sequences are parsed here instead
+// (see parseSGR), so every spelling is handled by construction.
+//
+// Raw ANSI, never lipgloss: the result is meant to sit inside a
+// lipgloss-rendered parent, whose background a full reset would kill. See
+// .claude/rules/gotchas.md, "ANSI nesting with lipgloss".
+func (SGR) ReassertBackground(row, bg string) string {
+	if row == "" || bg == "" {
+		return row
+	}
+	var b strings.Builder
+	b.Grow(len(row) + 2*len(bg) + len(bgReset))
+	b.WriteString(bg)
+	for i := 0; i < len(row); i++ {
+		if row[i] != '\033' || i+1 >= len(row) || row[i+1] != '[' {
+			b.WriteByte(row[i])
+			continue
+		}
+		seq, params, end := parseSGR(row, i)
+		if end < 0 { // unterminated CSI: nothing left to parse, copy the tail verbatim
+			b.WriteString(row[i:])
+			break
+		}
+		b.WriteString(row[i : end+1])
+		if seq != "" && clearsBackground(params) {
+			b.WriteString(bg)
+		}
+		i = end
+	}
+	b.WriteString(bgReset)
+	return b.String()
+}
+
+// bgReset is the SGR sequence that restores the terminal's default background.
+const bgReset = "\033[49m"
+
+// clearsBackground reports whether an SGR parameter string resets the
+// background: a full reset (empty, or an all-zero parameter such as "0" or
+// "00") or the explicit background reset "49", in any position of a
+// multi-parameter sequence.
+func clearsBackground(params string) bool {
+	if params == "" {
+		return true // "\033[m" is a full reset
+	}
+	for p := range strings.SplitSeq(params, ";") {
+		if p == "49" || strings.Trim(p, "0") == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // sgrState tracks active SGR attributes during a scan.
 type sgrState struct {
 	fg, bg       string // e.g. "\033[38;2;100;200;50m" or "\033[48;2;...]m"

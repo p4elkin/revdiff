@@ -182,7 +182,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.modes.mdPreview {
 			if zone == hitDiff {
-				return m.clickPreviewDiff(msg.Y)
+				return m.mdPreviewClickDiff(msg.Y)
 			}
 			// every other zone stays read-only in preview: a tree/TOC click would
 			// reposition the source-line cursor (clickTree -> syncDiffToTOCCursor),
@@ -427,17 +427,8 @@ func (m *Model) flushWheelPending() {
 	if !m.wheel.renderPending {
 		return
 	}
-	// markdown preview owes a repaint the pin cannot ask for. pinDiffCursorTo is
-	// an unconditional no-op while previewing (there is no cursor to pin), so
-	// without this branch the deferred SetContent below never runs and the
-	// scroll-following block highlight would stay frozen on the block that was
-	// topmost when the burst started. The repaint rides this same debounce
-	// rather than bringing its own: one repaint per burst, not per wheel event.
-	if m.modes.mdPreview {
-		m.layout.viewport.SetContent(m.renderDiff())
-		m.wheel.renderPending = false
-		m.wheel.tickInFlight = false
-		return
+	if m.flushPreviewWheelPending() {
+		return // markdown preview owns the deferred repaint (see mdpreview_cache.go)
 	}
 	if m.pinDiffCursorTo(m.layout.viewport.YOffset) {
 		m.syncTOCActiveSection()
@@ -506,44 +497,6 @@ func (m *Model) pinDiffCursorTo(newOffset int) bool {
 	m.nav.diffCursor = idx
 	m.annot.cursorOnAnnotation = onAnnot
 	return true
-}
-
-// clickPreviewDiff handles a left-click press in the diff viewport while
-// markdown preview is on. A preview click has no diff cursor to move — it
-// maps the clicked row through the current source map (the same one
-// mdPreviewBody used to paint the frame on screen, so the click and what the
-// reader sees can never disagree) to the block that row belongs to, and
-// starts annotating it: the mouse equivalent of `a` aiming at the highlighted
-// block. anchorAtRow's own fallback resolves a row past the last block's
-// rows to that last block, so a click below the content still lands
-// somewhere sensible rather than doing nothing. A click when the map cannot
-// resolve any block at all (unaligned, or an empty document) is a no-op.
-//
-// Two more no-ops, matching this feature's siblings:
-//
-//   - not markdownPreviewable — the same double gate panMarkdownPreview and
-//     scrollMarkdownPreview carry (see their doc comments). With preview stuck
-//     on for a file renderDiff will not preview, running the markdown pipeline
-//     over a non-markdown diff would anchor an annotation off a map of a
-//     document that is not on screen.
-//   - an annotation input already open — startPreviewAnnotationAt goes through
-//     startAnnotation, whose clearPendingInputState plus a fresh
-//     newAnnotationInput would discard whatever the reader had typed. Source
-//     view's clickDiff keeps the text (it only moves the cursor), and losing
-//     typed text to a stray click is worse than a click that does nothing.
-func (m Model) clickPreviewDiff(y int) (tea.Model, tea.Cmd) {
-	if m.file.name == "" || !m.file.markdownPreviewable || m.annot.annotating {
-		return m, nil
-	}
-	row := (y - m.diffTopRow()) + m.layout.viewport.YOffset
-	_, srcMap := m.mdPreviewBody()
-	bi := srcMap.anchorAtRow(row)
-	if bi < 0 {
-		return m, nil
-	}
-	m.layout.focus = paneDiff
-	cmd := m.startPreviewAnnotationAt(srcMap.blocks()[bi].StartLine)
-	return m, cmd
 }
 
 // clickDiff handles a left-click press in the diff viewport. the click

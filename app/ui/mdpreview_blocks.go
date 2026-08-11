@@ -66,9 +66,9 @@ const (
 // source line belongs to at most one target (see the "deepest block owning
 // a start line wins" note on swallowedSpan).
 type mdPreviewBlockTarget struct {
-	Kind      mdPreviewBlockKind
-	StartLine int
-	EndLine   int
+	kind      mdPreviewBlockKind
+	startLine int
+	endLine   int
 }
 
 // mdBlockMarkdown is the goldmark instance used to locate block targets. Its
@@ -104,7 +104,7 @@ func mdPreviewBlockTargets(doc string) []mdPreviewBlockTarget {
 	var targets []mdPreviewBlockTarget
 	add := func(kind mdPreviewBlockKind, start, end int, ok bool) {
 		if ok {
-			targets = append(targets, mdPreviewBlockTarget{Kind: kind, StartLine: start, EndLine: end})
+			targets = append(targets, mdPreviewBlockTarget{kind: kind, startLine: start, endLine: end})
 		}
 	}
 

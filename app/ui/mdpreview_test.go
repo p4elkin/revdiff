@@ -451,7 +451,7 @@ func TestRenderDiff_MarkdownPreviewOn_RendersPreview(t *testing.T) {
 	// not byte-identical (see mdPreviewRenderWithMap's doc comment and this
 	// plan's Technical Details), so this asserts ansi.Strip equality, row
 	// count, and per-row display width rather than byte equality — the same
-	// pattern TestMdPreviewSrcMapVisualIdentity already established.
+	// pattern TestMdPreviewSrcMap_VisualIdentity already established.
 	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
 	m.toggleMarkdownPreview()
 	require.True(t, m.modes.mdPreview)
@@ -1105,7 +1105,7 @@ func mdPreviewMouseModel(t *testing.T, lines []diff.DiffLine) Model {
 
 func TestHandleMouse_MdPreviewOn_ClickInDiffAnchorsToBlockThroughSourceMap(t *testing.T) {
 	// Task 7 replaced the old blanket "click in the diff pane is inert while
-	// previewing" behavior with a click-to-annotate mapping (clickPreviewDiff,
+	// previewing" behavior with a click-to-annotate mapping (mdPreviewClickDiff,
 	// mouse.go): the clicked row is resolved through the source map to the
 	// block it belongs to, NOT through clickDiff's raw pixel-row-to-diff-line
 	// math, and an annotation input opens on that block's StartLine.
@@ -1116,11 +1116,11 @@ func TestHandleMouse_MdPreviewOn_ClickInDiffAnchorsToBlockThroughSourceMap(t *te
 	m.layout.viewport.SetYOffset(0) // deterministic click math
 
 	_, srcMap := m.mdPreviewBody()
-	require.True(t, srcMap.Aligned, "fixture sanity: this document must align for the test to prove anything")
+	require.True(t, srcMap.aligned, "fixture sanity: this document must align for the test to prove anything")
 	row := (12 - m.diffTopRow()) + m.layout.viewport.YOffset
 	wantBI := srcMap.anchorAtRow(row)
 	require.GreaterOrEqual(t, wantBI, 0, "fixture sanity: the clicked row must resolve to a real block")
-	want := srcMap.blocks()[wantBI].StartLine
+	want := srcMap.blocks()[wantBI].startLine
 
 	// y=12, diffTopRow=2, YOffset=0 -> row 10 (the same row clickDiff's own
 	// math would have produced); the assertion below is what proves the two

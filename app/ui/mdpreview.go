@@ -605,12 +605,9 @@ func (m Model) mdPreviewMaxOffset(rendered string, cutWidth int) int {
 
 // mdPreviewWidestRow is mdPreviewMaxLineWidth through the memo on the render
 // cache (see mdPreviewScrollCache), which is what keeps the full-document
-// grapheme scan off every repaint. Falls back to the direct scan for a Model
-// built without NewModel, where the cache pointer is nil.
+// grapheme scan off every repaint. NewModel initializes that cache; like
+// renderCache, direct Model{} construction is unsupported.
 func (m Model) mdPreviewWidestRow(rendered string) int {
-	if m.mdPreviewCache == nil {
-		return mdPreviewMaxLineWidth(rendered)
-	}
 	return m.mdPreviewCache.scroll.widestOf(rendered)
 }
 
@@ -642,9 +639,6 @@ func (m Model) applyMdPreviewScroll(rendered string) string {
 	}
 
 	compute := func() string { return m.cutMdPreviewRows(rendered, offset, cutWidth) }
-	if m.mdPreviewCache == nil {
-		return compute() // Model built without NewModel: no cache to memoize into
-	}
 	indicators := m.mdPreviewLeftIndicator() + m.mdPreviewRightIndicator()
 	return m.mdPreviewCache.scroll.cutOf(rendered, offset, cutWidth, indicators, compute)
 }
@@ -742,10 +736,10 @@ func (m Model) mdPreviewRightIndicator() string {
 // left when direction < 0 and right otherwise, and pushes the re-cut render
 // into the viewport. Mirrors handleHorizontalScroll's shape for the diff pane.
 //
-// It composes the frame itself (mdPreviewBody + the same cut and highlight
-// mdPreviewFinalRender applies) instead of going through renderDiff: the clamp
-// needs the widest row of the uncut body, and that same body then supplies the
-// rows to cut. Going through the cache (mdpreview_cache.go) means a pan
+// It composes the frame itself — mdPreviewBody, then the shared mdPreviewFrame
+// renderMarkdownPreview also ends in — instead of going through renderDiff: the
+// clamp needs the widest row of the uncut body, and that same body then supplies
+// the rows to cut. Going through the cache (mdpreview_cache.go) means a pan
 // keypress only pays for a fresh glamour+mermaid pass on the first call at a
 // given file/width/color state — every pan step after that, and every
 // renderMarkdownPreview call in between, reuses the same cached render.
@@ -775,7 +769,7 @@ func (m *Model) panMarkdownPreview(direction int) {
 	}
 	m.layout.scrollX = min(max(0, offset), maxOffset)
 
-	m.layout.viewport.SetContent(m.mdPreviewHighlight(m.applyMdPreviewScroll(body), srcMap))
+	m.layout.viewport.SetContent(m.mdPreviewFrame(body, srcMap))
 }
 
 // handleMdPreviewAction is the preview-mode gate every keymap-resolved action
@@ -827,7 +821,7 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 			m.layout.focus = paneDiff
 			return m, nil, true
 		}
-		cmd := m.startPreviewAnnotation()
+		cmd := m.mdPreviewStartAnnotation()
 		return m, cmd, true
 	case keymap.ActionScrollLeft:
 		m.panMarkdownPreview(-1)
@@ -915,7 +909,7 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     off — this is the mode's only exit key.
 //   - confirm (a/enter) creates a line-level annotation anchored to the block
 //     the scroll-following highlight currently marks (mdPreviewHighlightAnchor)
-//     — see startPreviewAnnotation, mdpreview_annotate.go. It is routed INSIDE
+//     — see mdPreviewStartAnnotation, mdpreview_annotate.go. It is routed INSIDE
 //     handleMdPreviewAction above rather than left to fall through: its
 //     ordinary fall-through target, handleEnterKey, branches on pane focus,
 //     and the tree/TOC pane is reachable while previewing (nothing in this
@@ -980,7 +974,7 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //   - delete_annotation (d) is excluded: deleteAnnotation resolves its target
 //     from m.nav.diffCursor plus m.annot.cursorOnAnnotation, and preview drives
 //     neither — the cursor points at whichever block the last a/click aimed at,
-//     and cursorOnAnnotation is cleared by startPreviewAnnotationAt. To remove
+//     and cursorOnAnnotation is cleared by mdPreviewStartAnnotationAt. To remove
 //     a comment made in preview, press P, delete it in source view, press P
 //     again.
 //   - annot_list (@) is excluded: the overlay's whole purpose is its jump

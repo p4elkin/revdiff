@@ -10,10 +10,10 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 )
 
-// TestMdPreviewMarkerZeroWidth proves a marker never contributes to a row's
+// TestMdPreviewMarker_ZeroWidth proves a marker never contributes to a row's
 // measured display width — the property the whole mechanism depends on
 // (word-wrap and lipgloss must never see it as content).
-func TestMdPreviewMarkerZeroWidth(t *testing.T) {
+func TestMdPreviewMarker_ZeroWidth(t *testing.T) {
 	for _, k := range mdPreviewMarkerKinds {
 		m := mdPreviewMarker(k.id)
 		if w := xansi.StringWidth(m); w != 0 {
@@ -28,11 +28,11 @@ func TestMdPreviewMarkerZeroWidth(t *testing.T) {
 	}
 }
 
-// TestMdPreviewMarkerDistinctBytes proves every kind's marker is a unique
+// TestMdPreviewMarker_DistinctBytes proves every kind's marker is a unique
 // byte sequence and none is a substring of another — required for
 // mdPreviewStripMarkers' exact-match removal and mdPreviewExtractMarkers'
 // per-kind strings.Index scan to never cross-match a different kind.
-func TestMdPreviewMarkerDistinctBytes(t *testing.T) {
+func TestMdPreviewMarker_DistinctBytes(t *testing.T) {
 	seen := map[string]mdPreviewBlockKind{}
 	for _, k := range mdPreviewMarkerKinds {
 		m := mdPreviewMarker(k.id)
@@ -54,7 +54,7 @@ func TestMdPreviewMarkerDistinctBytes(t *testing.T) {
 	}
 }
 
-// TestMdPreviewMarkerKindsCoverage pins the kind table to exactly the set
+// TestMdPreviewMarkerKinds_Coverage pins the kind table to exactly the set
 // this task specifies, and to the style field each kind prepends to. The
 // generic "heading" is deliberately absent (glamour never emits
 // Heading.Prefix — only H1..H6.Prefix), and so are "list", "document" and
@@ -62,7 +62,7 @@ func TestMdPreviewMarkerDistinctBytes(t *testing.T) {
 // glamour renders a checkbox list item through Styles.Task and never through
 // Styles.Item, so without it every checklist document would fail alignment.
 // A change here is a scope change to this feature, not routine maintenance.
-func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
+func TestMdPreviewMarkerKinds_Coverage(t *testing.T) {
 	want := map[mdPreviewBlockKind]bool{
 		"paragraph": true, "h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
 		"item": true, "enumeration": true, "code_block": true, "block_quote": true,
@@ -118,10 +118,10 @@ func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
 	}
 }
 
-// TestMdPreviewMarkerStripExactAndTotal proves mdPreviewStripMarkers removes
+// TestMdPreviewMarker_StripExactAndTotal proves mdPreviewStripMarkers removes
 // exactly the marker bytes (nothing else) and removes ALL of them, for
 // every kind, and is a no-op on a string that contains no markers at all.
-func TestMdPreviewMarkerStripExactAndTotal(t *testing.T) {
+func TestMdPreviewMarker_StripExactAndTotal(t *testing.T) {
 	var b strings.Builder
 	for _, k := range mdPreviewMarkerKinds {
 		b.WriteString("before-")
@@ -159,12 +159,12 @@ func TestMdPreviewMarkerStripExactAndTotal(t *testing.T) {
 	}
 }
 
-// TestMdPreviewMarkerDropEmptySGRPairs proves the post-pass collapses a
+// TestMdPreviewMarker_DropEmptySGRPairs proves the post-pass collapses a
 // SET-then-RESET pair left behind when a marker occupied a style field that
 // had no existing prefix, including two such pairs back to back, while
 // leaving an unrelated SGR sequence with real content between SET and
 // RESET untouched.
-func TestMdPreviewMarkerDropEmptySGRPairs(t *testing.T) {
+func TestMdPreviewMarker_DropEmptySGRPairs(t *testing.T) {
 	m1 := mdPreviewMarker(mdPreviewMarkerKindByName(t, "paragraph").id)
 	m2 := mdPreviewMarker(mdPreviewMarkerKindByName(t, "h1").id)
 	const reset = "\x1b[0m"
@@ -188,12 +188,12 @@ func TestMdPreviewMarkerDropEmptySGRPairs(t *testing.T) {
 	}
 }
 
-// TestMdPreviewMarkerStylePreservesExistingPrefix proves
+// TestMdPreviewMarker_StylePreservesExistingPrefix proves
 // mdPreviewStyleWithMarkers prepends rather than replaces: item's
 // BlockPrefix ("• " in DarkStyleConfig) and enumeration's (". ") must both
 // still render after the marker, and a field with no existing prefix
 // (paragraph, table) ends up as exactly the marker with nothing after it.
-func TestMdPreviewMarkerStylePreservesExistingPrefix(t *testing.T) {
+func TestMdPreviewMarker_StylePreservesExistingPrefix(t *testing.T) {
 	item := mdPreviewMarkerKindByName(t, "item")
 	enumeration := mdPreviewMarkerKindByName(t, "enumeration")
 	paragraph := mdPreviewMarkerKindByName(t, "paragraph")
@@ -207,7 +207,7 @@ func TestMdPreviewMarkerStylePreservesExistingPrefix(t *testing.T) {
 		t.Fatal("test assumption broken: DarkStyleConfig.Enumeration.BlockPrefix is empty")
 	}
 
-	sc := mdPreviewStyleWithMarkers(base, item, enumeration, paragraph, table)
+	sc := mdPreviewStyleWithMarkers(base, []mdPreviewMarkerKind{item, enumeration, paragraph, table})
 
 	wantItem := mdPreviewMarker(item.id) + base.Item.BlockPrefix
 	if sc.Item.BlockPrefix != wantItem {
@@ -240,11 +240,11 @@ func mdPreviewMarkerKindByName(t *testing.T, name mdPreviewBlockKind) mdPreviewM
 	return mdPreviewMarkerKind{}
 }
 
-// TestMdPreviewMarkerExtractDedupesRepeats proves a kind whose marker
+// TestMdPreviewMarker_ExtractDedupesRepeats proves a kind whose marker
 // appears multiple times on the same rendered row (the ~3x-per-block
 // repeat several kinds produce) yields exactly one hit for that row, not
 // one per occurrence.
-func TestMdPreviewMarkerExtractDedupesRepeats(t *testing.T) {
+func TestMdPreviewMarker_ExtractDedupesRepeats(t *testing.T) {
 	h2 := mdPreviewMarker(mdPreviewMarkerKindByName(t, "h2").id)
 	line := h2 + "## " + h2 + "Heading text" + h2 + "\n"
 
@@ -264,10 +264,10 @@ func TestMdPreviewMarkerExtractDedupesRepeats(t *testing.T) {
 	}
 }
 
-// TestMdPreviewMarkerExtractRowOrderAndNoFalseHits proves extraction walks
+// TestMdPreviewMarker_ExtractRowOrderAndNoFalseHits proves extraction walks
 // rows in order, reports a hit only on the row a marker actually occupies,
 // and reports nothing at all for a document with no markers.
-func TestMdPreviewMarkerExtractRowOrderAndNoFalseHits(t *testing.T) {
+func TestMdPreviewMarker_ExtractRowOrderAndNoFalseHits(t *testing.T) {
 	h1 := mdPreviewMarker(mdPreviewMarkerKindByName(t, "h1").id)
 	para := mdPreviewMarker(mdPreviewMarkerKindByName(t, "paragraph").id)
 	doc := "no marker on this row\n" + h1 + "Title\n" + "still no marker\n" + para + "Body text\n"

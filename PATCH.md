@@ -91,7 +91,7 @@ feature, preview included, published to the user's own fork, never to upstream.
   their enclosing list item and a table into one target covering the whole table.
 - `app/ui/mdpreview_blocks_test.go` — its tests.
 - `app/ui/mdpreview_srcmap.go` — agrees the block walk's targets against the markers glamour left
-  in the render and builds the row↔line map (`mdPreviewSourceMap`), or sets `Aligned = false` and
+  in the render and builds the row↔line map (`mdPreviewSourceMap`), or sets `aligned = false` and
   exposes no targets when the two disagree. Also carries the mermaid-splice row-shift adjustment
   and the `--no-colors` degrade.
 - `app/ui/mdpreview_srcmap_test.go` — its tests.
@@ -101,16 +101,16 @@ feature, preview included, published to the user's own fork, never to upstream.
   branch predates — see "Preview annotations" → "Corpus measurement" below).
 - `app/ui/mdpreview_cache.go` — the single-entry render cache (`mdPreviewRenderCache`) that keys
   the base render and its source map on `(file.name, file.loadSeq, viewport.Width, noColors)`, plus
-  the composed-frame assembly (`mdPreviewBody`, `mdPreviewFinalRender`, `mdPreviewHighlight`) that
+  the composed-frame assembly (`mdPreviewBody`, `mdPreviewFrame`, `mdPreviewHighlight`) that
   layers the scroll-following block highlight and painted annotations on top of the cached base.
 - `app/ui/mdpreview_cache_test.go` — its tests, plus `BenchmarkMdPreviewRepaint`.
 - `app/ui/mdpreview_annotate.go` — painting existing annotations into the preview
   (`mdPreviewPaintAnnotationsTracked`, reusing `renderAnnotationOrInput`/`renderFileAnnotationHeader`
-  rather than a parallel painter) and creating one (`startPreviewAnnotation`,
-  `startPreviewAnnotationAt`, the live-input visibility helper).
+  rather than a parallel painter) and creating one (`mdPreviewStartAnnotation`,
+  `mdPreviewStartAnnotationAt`, `mdPreviewClickDiff`, the live-input visibility helper).
 - `app/ui/mdpreview_annotate_test.go` — its tests.
 
-A clean rebase never conflicts on these eighteen files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these nineteen files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -327,7 +327,7 @@ independently lists what block starts on what source line
 (`mdpreview_blocks.go`); the two sequences are agreed kind-for-kind and
 row-for-row (`mdpreview_srcmap.go`) into `mdPreviewSourceMap`, which answers
 "which source line did this rendered row come from?" or, on any disagreement,
-refuses to answer at all (`Aligned = false`, no targets exposed). Everything
+refuses to answer at all (`aligned = false`, no targets exposed). Everything
 downstream — the highlight, the painted annotations, `a`, a click — is built
 on that one map and that one refusal contract.
 
@@ -342,20 +342,22 @@ on that one map and that one refusal contract.
     produces a non-nil cmd is `ActionConfirm` starting an annotation input
     (`startAnnotation`'s `ti.Focus()` cmd, ordinarily nil under this fork's
     `cursor.CursorStatic` — see gotchas.md's per-line render cache note).
-- `app/ui/mouse.go`
+- `app/ui/mouse.go` — both hunks are a single call line, with the preview logic
+  itself in the patch-owned preview files, the way `handleMdPreviewAction` was
+  moved out of `model.go`.
   - the preview branch of `handleMouse`'s left-click case now checks
-    `zone == hitDiff` first and routes to the new `clickPreviewDiff` (maps the
-    clicked row through the current source map to a block and starts
-    annotating it); every other zone still falls through to the old
-    read-only `return m, nil`.
-  - `flushWheelPending` gained an `mdPreview` branch at its top: `pinDiffCursorTo`
-    is an unconditional no-op in preview (nothing to pin), so without this
-    branch the deferred repaint the wheel-burst debounce owes never landed,
-    and the scroll-following highlight would freeze on the pre-burst block.
-    The branch repaints once and clears both `renderPending` and
-    `tickInFlight` — it rides the SAME `wheelState` debounce documented in
-    gotchas.md rather than adding a second one, per that task's explicit
-    warning.
+    `zone == hitDiff` first and calls `mdPreviewClickDiff`
+    (`mdpreview_annotate.go` — maps the clicked row through the current source
+    map to a block and starts annotating it); every other zone still falls
+    through to the old read-only `return m, nil`.
+  - `flushWheelPending` gained a two-line `if m.flushPreviewWheelPending()
+    { return }` at its top (`mdpreview_cache.go`): `pinDiffCursorTo` is an
+    unconditional no-op in preview (nothing to pin), so without it the deferred
+    repaint the wheel-burst debounce owes never landed, and the
+    scroll-following highlight would freeze on the pre-burst block. That helper
+    repaints once and clears both `renderPending` and `tickInFlight` — it rides
+    the SAME `wheelState` debounce documented in gotchas.md rather than adding a
+    second one, per that task's explicit warning.
 
 `mdPreviewAllowedActions`' doc comment (`mdpreview.go`, a patch-owned file, so
 this carries no upstream conflict risk) was rewritten because its blanket
@@ -386,7 +388,7 @@ in `handleFilesLoaded`), and `toggle_pane` / `focus_tree` / `focus_diff` are all
 excluded from the allowlist, so no key could hand focus back. `A` keeps its own
 unmodified diff-pane-only gate and becomes reachable once `a` has moved focus.
 
-A refused preview annotation is not silent either: `startPreviewAnnotation` sets
+A refused preview annotation is not silent either: `mdPreviewStartAnnotation` sets
 `m.preview.hint` (an `mdPreviewState`, the same shape as `outputState` /
 `compactState`, rendered by `transientHint` and cleared on the next key or mouse
 event) when `mdPreviewHighlightAnchor` returns -1. That is the unaligned-document
@@ -750,7 +752,7 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   row" — see `mdPreviewAlignRows`' `takeTable` in `mdpreview_srcmap.go`. A consequence: two tables
   separated by nothing but a blank line produce one indistinguishable run of table markers, so
   that document fails alignment and degrades entirely rather than mis-anchoring one table's
-  comment onto the other (`TestMdPreviewSrcMapAdjacentTablesDegrade`).
+  comment onto the other (`TestMdPreviewSrcMap_AdjacentTablesDegrade`).
 - **A blockquote is one annotation target too — its inner paragraphs get no separate anchors.**
   This was a task 2 deviation from the plan's own granularity list, which did not call this out
   explicitly; it follows the same "one target per swallowing construct" treatment the spike

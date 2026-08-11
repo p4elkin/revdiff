@@ -85,13 +85,13 @@ func TestMdPreviewSrcMapCorpusAlignment(t *testing.T) {
 		total++
 
 		_, srcMap := mdPreviewRenderWithMap(mdLines(string(body)), srcMapCorpusWidth, false)
-		if !srcMap.Aligned {
+		if !srcMap.aligned {
 			unaligned = append(unaligned, filepath.Base(path))
 			continue
 		}
 		aligned++
 		for _, a := range srcMap.blocks() {
-			kindCounts[a.Kind]++
+			kindCounts[a.kind]++
 			blocksAligned++
 		}
 	}
