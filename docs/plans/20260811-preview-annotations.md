@@ -115,18 +115,27 @@ behaviour the task text says so and requires the wider `go test ./app/ui` before
 
 **Task 4 repaint-cost measurement** (`BenchmarkMdPreviewRepaint`, `app/ui/mdpreview_cache_test.go`,
 run on the fence-heavy corpus document `docs/plans/completed/20260722-markdown-preview-mode.md`, 3
-mermaid fences, 810 lines, Apple M2 Max, `go test ./app/ui -run '^$' -bench
-'BenchmarkMdPreviewRepaint' -benchtime=50x -benchmem`):
+mermaid fences, 810 source lines / 983 rendered rows, pane width 80, Apple M2 Max, `go test
+./app/ui -run '^$' -bench 'BenchmarkMdPreviewRepaint' -benchtime=50x -benchmem`):
 
-| repaint path | ns/op | B/op | allocs/op |
+| path | ns/op | B/op | allocs/op |
 |---|---|---|---|
-| before (fresh `mdPreviewRenderWithMap` every repaint) | 112,619,951 | 42,911,769 | 415,342 |
-| after (cached, warm) | 523.3 | 0 | 0 |
+| fresh `mdPreviewRenderWithMap` (what a repaint cost before the cache) | 104,003,012 | 42,925,885 | 415,344 |
+| repaint frame, before the width/cut memos | 6,222,047 | 1,409,447 | 1,092 |
+| repaint frame, current (`mdPreviewFinalRender`) | 124,481 | 671,822 | 21 |
+| cached base-render lookup alone — NOT a repaint | 502.5 | 0 | 0 |
 
-A repeat repaint at an unchanged file/width/color state drops from ~113ms to ~0.5us — about a
-215,000x reduction, and markdown rendering (all 415k allocations) is fully absent from the warm
-path. This is a clear pass: the cache removes markdown rendering from the repaint path, which is
-exactly what task 6's scroll-following highlight needs to be affordable.
+⚠️ **The last row is a cache lookup, not a repaint, and this table used to record it as one**
+(`523.3ns`, "about 215,000x"). The sub-benchmark it came from timed `mdPreviewBaseRender` — a key
+comparison and a string return — while a repaint is `mdPreviewFinalRender`: cached base render,
+annotations painted in, the horizontal cut, the block highlight. Mislabelling it is how a
+full-document `ansi.StringWidth` scan and an uncached per-row cut came to sit in every keypress
+unnoticed. Both are now memoized on `mdPreviewRenderCache` (see `mdPreviewScrollCache`), keyed on
+the painted body so an annotation edit misses and a vertical scroll does not.
+
+The honest reading: markdown rendering is fully absent from the repaint path (all 415k allocations
+gone), and a repaint costs ~0.12ms rather than ~6.2ms. That is what makes task 6's
+scroll-following highlight affordable.
 
 ## Solution Overview
 

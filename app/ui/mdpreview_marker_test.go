@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/glamour/ansi"
 	glamourStyles "github.com/charmbracelet/glamour/styles"
 	xansi "github.com/charmbracelet/x/ansi"
 )
@@ -61,34 +63,27 @@ func TestMdPreviewMarkerDistinctBytes(t *testing.T) {
 // Styles.Item, so without it every checklist document would fail alignment.
 // A change here is a scope change to this feature, not routine maintenance.
 func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
-	want := map[mdPreviewBlockKind]string{
-		"paragraph":   "Paragraph.Prefix",
-		"h1":          "H1.Prefix",
-		"h2":          "H2.Prefix",
-		"h3":          "H3.Prefix",
-		"h4":          "H4.Prefix",
-		"h5":          "H5.Prefix",
-		"h6":          "H6.Prefix",
-		"item":        "Item.BlockPrefix",
-		"enumeration": "Enumeration.BlockPrefix",
-		"code_block":  "CodeBlock.BlockPrefix",
-		"block_quote": "BlockQuote.Prefix",
-		"table":       "Table.Prefix",
-		"hr":          "HorizontalRule.Prefix",
-		"html_block":  "HTMLBlock.Prefix",
-		"task":        "Task.BlockPrefix",
+	want := map[mdPreviewBlockKind]bool{
+		"paragraph": true, "h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
+		"item": true, "enumeration": true, "code_block": true, "block_quote": true,
+		"table": true, "hr": true, "html_block": true, "task": true,
 	}
 	if len(mdPreviewMarkerKinds) != len(want) {
 		t.Fatalf("got %d kinds, want %d", len(mdPreviewMarkerKinds), len(want))
 	}
 	for _, k := range mdPreviewMarkerKinds {
-		field, ok := want[k.kind]
-		if !ok {
+		if !want[k.kind] {
 			t.Errorf("unexpected kind %q in table (excluded kinds: heading, list, document, text)", k.kind)
 			continue
 		}
-		if k.styleField != field {
-			t.Errorf("kind %s: styleField = %q, want %q", k.kind, k.styleField, field)
+		// behavioral stand-in for the string field label this table used to
+		// carry: every kind's apply func must actually write into the style
+		// config, so a kind cannot sit in the table marking nothing.
+		var sc ansi.StyleConfig
+		before := sc
+		k.apply(&sc, "MARK")
+		if reflect.DeepEqual(before, sc) {
+			t.Errorf("kind %s: apply wrote nothing into the style config", k.kind)
 		}
 	}
 	for name := range want {
@@ -255,45 +250,6 @@ func TestMdPreviewMarkerExtractDedupesRepeats(t *testing.T) {
 	}
 	if h2Hits[0].row != 0 {
 		t.Errorf("row = %d, want 0", h2Hits[0].row)
-	}
-}
-
-// TestMdPreviewMarkerExtractMidRowClassification proves a marker preceded
-// only by chrome (whitespace, list bullets/numbers, blockquote bars) is
-// classified row-start (midRow=false), and a marker preceded by real
-// content is classified mid-row (midRow=true) — the distinction task-list
-// checkboxes need (established by the spike: their marker always lands
-// after the checkbox glyph, which is not chrome).
-func TestMdPreviewMarkerExtractMidRowClassification(t *testing.T) {
-	item := mdPreviewMarker(mdPreviewMarkerKindByName(t, "item").id)
-
-	cases := []struct {
-		name       string
-		line       string
-		wantMidRow bool
-	}{
-		{"plain chrome bullet prefix", "  " + item + "item text", false},
-		{"blockquote bar prefix", "│ " + item + "quoted text", false},
-		{"ordered number prefix", "12" + item + "item text", false},
-		{"checkbox glyph before marker is content", "[x] " + item + "done task", true},
-		{"arbitrary text before marker is content", "some text " + item + "more", true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			hits := mdPreviewExtractMarkers(c.line)
-			var itemHits []mdPreviewMarkerHit
-			for _, h := range hits {
-				if h.kind == "item" {
-					itemHits = append(itemHits, h)
-				}
-			}
-			if len(itemHits) != 1 {
-				t.Fatalf("got %d item hits, want 1: %+v", len(itemHits), itemHits)
-			}
-			if itemHits[0].midRow != c.wantMidRow {
-				t.Errorf("midRow = %v, want %v", itemHits[0].midRow, c.wantMidRow)
-			}
-		})
 	}
 }
 

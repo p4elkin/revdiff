@@ -517,8 +517,21 @@ func (m *Model) pinDiffCursorTo(newOffset int) bool {
 // rows to that last block, so a click below the content still lands
 // somewhere sensible rather than doing nothing. A click when the map cannot
 // resolve any block at all (unaligned, or an empty document) is a no-op.
+//
+// Two more no-ops, matching this feature's siblings:
+//
+//   - not markdownPreviewable — the same double gate panMarkdownPreview and
+//     scrollMarkdownPreview carry (see their doc comments). With preview stuck
+//     on for a file renderDiff will not preview, running the markdown pipeline
+//     over a non-markdown diff would anchor an annotation off a map of a
+//     document that is not on screen.
+//   - an annotation input already open — startPreviewAnnotationAt goes through
+//     startAnnotation, whose clearPendingInputState plus a fresh
+//     newAnnotationInput would discard whatever the reader had typed. Source
+//     view's clickDiff keeps the text (it only moves the cursor), and losing
+//     typed text to a stray click is worse than a click that does nothing.
 func (m Model) clickPreviewDiff(y int) (tea.Model, tea.Cmd) {
-	if m.file.name == "" {
+	if m.file.name == "" || !m.file.markdownPreviewable || m.annot.annotating {
 		return m, nil
 	}
 	row := (y - m.diffTopRow()) + m.layout.viewport.YOffset

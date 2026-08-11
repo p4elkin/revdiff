@@ -217,8 +217,11 @@ exception: none of this section applies there — see item 9.6.
 
 - [ ] find (or add) a tight bullet list with at least two items close together
 - [ ] annotate the first item, then scroll/aim and annotate the second item
-- [ ] open the annotation list popup (`@`) — both annotations are present as two distinct entries,
-      not one overwriting the other
+- [ ] confirm both painted annotations are on screen at once, each under its own bullet — two
+      distinct comments, not one overwriting the other
+- [ ] press `P` to leave preview, then open the annotation list popup (`@`) — both entries are
+      listed with different line numbers. `@` is a no-op while preview is on (same as `d`), so the
+      popup has to be opened from source view
 
 ### 9.4 Click aim
 
@@ -237,6 +240,11 @@ exception: none of this section applies there — see item 9.6.
       exiting preview
 - [ ] press `d` on a painted annotation in preview — confirm it is still a no-op (not yet
       supported); leave preview with `P` to delete it from source view instead
+- [ ] same for `@` and `}`/`{` — all three annotation actions are blocked in preview; press `P`
+      first
+- [ ] move focus to the file-tree/TOC pane FIRST, then press `P` (focus cannot be changed while
+      previewing) and press `a` — confirm nothing happens, the same as `A` there. Aiming only works
+      with the diff pane focused
 
 ### 9.6 `--no-colors`
 

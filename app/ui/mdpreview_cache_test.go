@@ -158,13 +158,18 @@ func fenceHeavyCorpusDoc(b *testing.B) string {
 
 // BenchmarkMdPreviewRepaint measures the claim behind task 4: a repaint at an
 // unchanged file/width/color state must stop paying for a fresh
-// glamour+mermaid pass. "uncached" is what every repaint cost before this
-// task (and what it would still cost if a later repaint path, such as the
-// scroll-following highlight, called mdPreviewRenderWithMap directly instead
-// of going through the cache). "cached" pre-warms the cache once outside the
-// timed loop and then measures the steady-state cost of a repeat repaint
-// through mdPreviewBaseRender — the shape every scroll-driven repaint takes
-// once the highlight task lands on top of this cache.
+// glamour+mermaid pass.
+//
+// Three cases, and the distinction between the last two is the whole point.
+// "uncached_full_render_per_repaint" is what every repaint cost before the
+// cache existed, and what one would still cost if a repaint path called
+// mdPreviewRenderWithMap directly. "cached_base_render_lookup" is the cache
+// lookup ALONE — a key comparison and a string return. It is NOT a repaint,
+// and an earlier version of this benchmark recorded it as one, which is how a
+// full-document width scan came to sit unnoticed in every keypress.
+// "cached_repaint_frame" is the real thing: mdPreviewFinalRender, i.e. what
+// renderDiff returns while preview is on — cached base render, annotations
+// painted in, the horizontal cut, and the block highlight.
 func BenchmarkMdPreviewRepaint(b *testing.B) {
 	doc := fenceHeavyCorpusDoc(b)
 	lines := mdLines(doc)
@@ -180,13 +185,34 @@ func BenchmarkMdPreviewRepaint(b *testing.B) {
 		}
 	})
 
-	b.Run("cached_repeat_repaint", func(b *testing.B) {
+	b.Run("cached_base_render_lookup", func(b *testing.B) {
 		_, _ = m.mdPreviewBaseRender() // warm the cache once, outside the timed loop
 		b.ReportAllocs()
 		b.ResetTimer()
 		for range b.N {
 			rendered, _ := m.mdPreviewBaseRender()
 			sink = rendered
+		}
+	})
+
+	b.Run("cached_repaint_frame", func(b *testing.B) {
+		// a repaint's real cost lives in the cut and the highlight, and both are
+		// skipped by the plain test model: mdPreviewTestModel uses
+		// style.PlainResolver (no search background, so mdPreviewHighlight is a
+		// documented no-op) and at width 100 this document's widest row is
+		// exactly 100 (so applyMdPreviewScroll passes the render straight
+		// through). A narrower pane plus a resolver that carries a background is
+		// what a reader on a real terminal actually pays per keypress.
+		fm := m
+		fm.layout.viewport.Width = 80
+		res := style.NewResolver(style.Colors{DiffBg: "#112233", SearchBg: "#5f00af", Normal: "#cccccc"})
+		fm.resolver, fm.renderer = res, style.NewRenderer(res)
+		fm.mdPreviewCache = &mdPreviewRenderCache{}
+		sink = fm.mdPreviewFinalRender() // warm both memos once, outside the timed loop
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			sink = fm.mdPreviewFinalRender()
 		}
 	})
 }
@@ -342,7 +368,8 @@ func TestMdPreviewFinalRender_HighlightDisabled_IdenticalToAnnotationsOnly(t *te
 		m.store.Add(annotation.Annotation{File: "plan.md", Line: 1, Type: " ", Comment: "a comment"})
 
 		base, srcMap := m.mdPreviewBaseRender()
-		want := m.applyMdPreviewScroll(m.mdPreviewPaintAnnotations(base, srcMap))
+		painted, _ := m.mdPreviewPaintAnnotationsTracked(base, srcMap)
+		want := m.applyMdPreviewScroll(painted)
 
 		assert.Equal(t, want, m.mdPreviewFinalRender(), "no-colors must render exactly the task-5 frame")
 	})

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour/ansi"
-	xansi "github.com/charmbracelet/x/ansi"
 )
 
 // mdPreviewMarkerBase is added to a block kind's id to build its marker's
@@ -44,14 +43,12 @@ func mdPreviewMarker(id int) string {
 // rendered glamour document: the shared mdPreviewBlockKind (see
 // mdpreview_blocks.go's doc comment on that type for why the marker table
 // and the goldmark block walk share one kind vocabulary instead of two),
-// the id its marker is built from, the style field the marker is
-// prepended to (documentation and test-coverage only — no production code reads it), and the apply func
-// that clones the marker into that field on a style config copy.
+// the id its marker is built from, and the apply func that clones the marker
+// into that kind's style field on a style config copy.
 type mdPreviewMarkerKind struct {
-	kind       mdPreviewBlockKind
-	id         int
-	styleField string
-	apply      func(sc *ansi.StyleConfig, marker string)
+	kind  mdPreviewBlockKind
+	id    int
+	apply func(sc *ansi.StyleConfig, marker string)
 }
 
 // mdPreviewMarkerKinds is every block kind this feature marks: paragraph,
@@ -77,38 +74,42 @@ type mdPreviewMarkerKind struct {
 // Task.BlockPrefix gives those rows an exact row number instead; alignment
 // accepts a "task" hit wherever it expects an "item" or "enumeration" target
 // (see mdPreviewKindMatches in mdpreview_srcmap.go). The marker lands after
-// the "[ ] " / "[x] " checkbox glyph, so it is reported mid-row — that is
-// cosmetic classification only, the row is exact.
+// the "[ ] " / "[x] " checkbox glyph rather than at the start of the row; only
+// the row number matters, and that is exact.
+//
+// Each entry's apply func names the glamour style field it prepends to, and
+// that closure is the only record of the mapping — there is deliberately no
+// parallel string label beside it to drift out of step.
 var mdPreviewMarkerKinds = []mdPreviewMarkerKind{
-	{mdBlockParagraph, 1, "Paragraph.Prefix", func(sc *ansi.StyleConfig, m string) {
+	{mdBlockParagraph, 1, func(sc *ansi.StyleConfig, m string) {
 		sc.Paragraph.Prefix = m + sc.Paragraph.Prefix
 	}},
-	{mdBlockH1, 2, "H1.Prefix", func(sc *ansi.StyleConfig, m string) { sc.H1.Prefix = m + sc.H1.Prefix }},
-	{mdBlockH2, 3, "H2.Prefix", func(sc *ansi.StyleConfig, m string) { sc.H2.Prefix = m + sc.H2.Prefix }},
-	{mdBlockH3, 4, "H3.Prefix", func(sc *ansi.StyleConfig, m string) { sc.H3.Prefix = m + sc.H3.Prefix }},
-	{mdBlockH4, 5, "H4.Prefix", func(sc *ansi.StyleConfig, m string) { sc.H4.Prefix = m + sc.H4.Prefix }},
-	{mdBlockH5, 6, "H5.Prefix", func(sc *ansi.StyleConfig, m string) { sc.H5.Prefix = m + sc.H5.Prefix }},
-	{mdBlockH6, 7, "H6.Prefix", func(sc *ansi.StyleConfig, m string) { sc.H6.Prefix = m + sc.H6.Prefix }},
-	{mdBlockItem, 8, "Item.BlockPrefix", func(sc *ansi.StyleConfig, m string) {
+	{mdBlockH1, 2, func(sc *ansi.StyleConfig, m string) { sc.H1.Prefix = m + sc.H1.Prefix }},
+	{mdBlockH2, 3, func(sc *ansi.StyleConfig, m string) { sc.H2.Prefix = m + sc.H2.Prefix }},
+	{mdBlockH3, 4, func(sc *ansi.StyleConfig, m string) { sc.H3.Prefix = m + sc.H3.Prefix }},
+	{mdBlockH4, 5, func(sc *ansi.StyleConfig, m string) { sc.H4.Prefix = m + sc.H4.Prefix }},
+	{mdBlockH5, 6, func(sc *ansi.StyleConfig, m string) { sc.H5.Prefix = m + sc.H5.Prefix }},
+	{mdBlockH6, 7, func(sc *ansi.StyleConfig, m string) { sc.H6.Prefix = m + sc.H6.Prefix }},
+	{mdBlockItem, 8, func(sc *ansi.StyleConfig, m string) {
 		sc.Item.BlockPrefix = m + sc.Item.BlockPrefix
 	}},
-	{mdBlockEnum, 9, "Enumeration.BlockPrefix", func(sc *ansi.StyleConfig, m string) {
+	{mdBlockEnum, 9, func(sc *ansi.StyleConfig, m string) {
 		sc.Enumeration.BlockPrefix = m + sc.Enumeration.BlockPrefix
 	}},
-	{mdBlockCodeBlock, 10, "CodeBlock.BlockPrefix", func(sc *ansi.StyleConfig, m string) {
+	{mdBlockCodeBlock, 10, func(sc *ansi.StyleConfig, m string) {
 		sc.CodeBlock.BlockPrefix = m + sc.CodeBlock.BlockPrefix
 	}},
-	{mdBlockQuote, 11, "BlockQuote.Prefix", func(sc *ansi.StyleConfig, m string) {
+	{mdBlockQuote, 11, func(sc *ansi.StyleConfig, m string) {
 		sc.BlockQuote.Prefix = m + sc.BlockQuote.Prefix
 	}},
-	{mdBlockTable, 12, "Table.Prefix", func(sc *ansi.StyleConfig, m string) { sc.Table.Prefix = m + sc.Table.Prefix }},
-	{mdBlockHR, 13, "HorizontalRule.Prefix", func(sc *ansi.StyleConfig, m string) {
+	{mdBlockTable, 12, func(sc *ansi.StyleConfig, m string) { sc.Table.Prefix = m + sc.Table.Prefix }},
+	{mdBlockHR, 13, func(sc *ansi.StyleConfig, m string) {
 		sc.HorizontalRule.Prefix = m + sc.HorizontalRule.Prefix
 	}},
-	{mdBlockHTMLBlock, 14, "HTMLBlock.Prefix", func(sc *ansi.StyleConfig, m string) {
+	{mdBlockHTMLBlock, 14, func(sc *ansi.StyleConfig, m string) {
 		sc.HTMLBlock.Prefix = m + sc.HTMLBlock.Prefix
 	}},
-	{mdBlockTask, 15, "Task.BlockPrefix", func(sc *ansi.StyleConfig, m string) {
+	{mdBlockTask, 15, func(sc *ansi.StyleConfig, m string) {
 		sc.Task.BlockPrefix = m + sc.Task.BlockPrefix
 	}},
 }
@@ -158,26 +159,13 @@ func mdPreviewDropEmptySGRPairs(s string) string {
 	}
 }
 
-// mdPreviewChromeRe matches a row prefix made only of whitespace, list
-// bullets/numbers, or blockquote bars — the "chrome" glamour draws ahead of
-// a block's own content, never the content itself.
-var mdPreviewChromeRe = regexp.MustCompile(`^[ \t]*(?:[0-9]+|[•▪‣]|\|\s|│\s|\*\s|\+\s|-\s)?[ \t]*$`)
-
-// mdPreviewIsChrome reports whether s — everything on a rendered row before
-// a marker — is pure chrome, meaning the marker sits at the start of the
-// block's rendered content on that row rather than mid-row.
-func mdPreviewIsChrome(s string) bool {
-	return mdPreviewChromeRe.MatchString(s)
-}
-
 // mdPreviewMarkerHit is one block-kind marker located in a rendered
 // document, after the ~3x-per-block repeat glamour emits for several kinds
 // (always on the same row — see the plan's Technical Details) collapses to
 // a single entry per (kind, row) pair. See mdPreviewExtractMarkers.
 type mdPreviewMarkerHit struct {
-	kind   mdPreviewBlockKind
-	row    int
-	midRow bool // true when non-chrome content precedes the marker on its row
+	kind mdPreviewBlockKind
+	row  int
 }
 
 // mdPreviewExtractMarkers scans rendered (with markers still present, i.e.
@@ -193,16 +181,10 @@ func mdPreviewExtractMarkers(rendered string) []mdPreviewMarkerHit {
 	var hits []mdPreviewMarkerHit
 	for row, line := range strings.Split(rendered, "\n") {
 		for _, k := range mdPreviewMarkerKinds {
-			idx := strings.Index(line, mdPreviewMarker(k.id))
-			if idx < 0 {
+			if !strings.Contains(line, mdPreviewMarker(k.id)) {
 				continue
 			}
-			before := xansi.Strip(line[:idx])
-			hits = append(hits, mdPreviewMarkerHit{
-				kind:   k.kind,
-				row:    row,
-				midRow: !mdPreviewIsChrome(before),
-			})
+			hits = append(hits, mdPreviewMarkerHit{kind: k.kind, row: row})
 		}
 	}
 	return hits

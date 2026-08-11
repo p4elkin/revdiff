@@ -52,24 +52,13 @@ func (sm mdPreviewSourceMap) blocks() []mdPreviewBlockAnchor {
 	return sm.anchors
 }
 
-// rowToLine answers "which source line did this rendered row come from?" — the
-// one question the whole feature reduces to. It resolves to the block whose
-// rendered rows contain row, or, for a row that belongs to no block (glamour's
-// top margin aside, that is padding between blocks), to the nearest preceding
-// block. ok is false only when row precedes the first block entirely or the
-// map is not aligned.
-func (sm mdPreviewSourceMap) rowToLine(row int) (line int, ok bool) {
-	i := sm.anchorAtRow(row)
-	if i < 0 {
-		return 0, false
-	}
-	return sm.anchors[i].StartLine, true
-}
-
-// anchorAtRow returns the index of the block owning row (the last block whose
-// Row is at or before it), or -1. Separate from rowToLine because callers that
-// need the block itself — the scroll-following highlight, click-to-annotate —
-// need its row range too, not only its source line.
+// anchorAtRow answers "which block did this rendered row come from?" — the one
+// question the whole feature reduces to, once a caller has the block it can
+// read the source line off it. It returns the index of the block owning row
+// (the last block whose Row is at or before it), or -1. A row that belongs to
+// no block (glamour's top margin aside, that is padding between blocks)
+// resolves to the nearest preceding one; -1 means row precedes the first block
+// entirely, or the map is not aligned.
 func (sm mdPreviewSourceMap) anchorAtRow(row int) int {
 	if !sm.Aligned || len(sm.anchors) == 0 {
 		return -1
@@ -83,21 +72,12 @@ func (sm mdPreviewSourceMap) anchorAtRow(row int) int {
 	return i - 1
 }
 
-// lineToRow is rowToLine's inverse: the rendered row a source line shows up
-// on. A line inside a block resolves to that block's first row; a line no
-// block claims (a blank separator line, a line inside a construct that was
-// folded into an enclosing block) resolves to the nearest preceding block.
-// ok is false only when line precedes the first block or the map is not
-// aligned.
-func (sm mdPreviewSourceMap) lineToRow(line int) (row int, ok bool) {
-	i := sm.anchorAtLine(line)
-	if i < 0 {
-		return 0, false
-	}
-	return sm.anchors[i].Row, true
-}
-
-// anchorAtLine returns the index of the block owning source line line, or -1.
+// anchorAtLine is anchorAtRow's inverse: the index of the block owning source
+// line line, or -1. A line no block claims (a blank separator line, a line
+// inside a construct that was folded into an enclosing block) resolves to the
+// nearest preceding block; -1 means line precedes the first block, or the map
+// is not aligned.
+//
 // Where blocks nest — a code fence inside a blockquote claims lines the quote
 // also spans — the LAST block starting at or before the line wins, which is
 // the innermost one, matching the "deepest block owning a start line wins"
@@ -183,10 +163,12 @@ func mdPreviewRenderWithMap(lines []diff.DiffLine, width int, noColors bool) (st
 // empty SET/RESET SGR pairs stripping one out of an otherwise-empty style
 // prefix leaves behind.
 //
-// In no-colors mode it finishes with ansi.Strip as a net. That mode's promise
-// is zero ANSI in the output (see mdPreviewStyleNoColor), and the markers are
-// ANSI by construction — a marker that somehow escaped the exact-match pass
-// would break the promise in the one mode that states it, so the cheap
+// In no-colors mode it finishes with ansi.Strip as a net. That mode promises
+// zero ANSI in the RENDERED DOCUMENT (see mdPreviewStyleNoColor, which spells
+// out what the promise does and does not cover — annotation rows spliced in
+// later carry their own italic escapes in every mode), and the markers are ANSI
+// by construction — a marker that somehow escaped the exact-match pass would
+// break that promise in the one mode that states it, so the cheap
 // belt-and-braces pass is worth its cost. It is safe there and only there:
 // with colors on, ansi.Strip would remove the render's actual styling.
 func mdPreviewCleanMarkers(rendered string, noColors bool) string {
@@ -407,9 +389,23 @@ func mdPreviewShiftRow(shifts []mdPreviewArtShift, row int) int {
 // the original []diff.DiffLine via origins, and each block's EndRow is closed
 // off at the row before the next block starts (the last block runs to the end
 // of the render).
+//
+// It refuses the whole map — the same all-or-nothing degrade
+// mdPreviewAlignRows applies to rows — when StartLine is not strictly
+// increasing across the targets. mdPreviewAlignRows already enforces that on
+// the RENDER side, and enforcing the same on the SOURCE side is not
+// redundant: the two sequences are produced independently, so a goldmark-side
+// mistake (the block walk resolving two blocks onto one source line) passes
+// the row check untouched. It is not a theoretical class either — consecutive
+// thematic breaks used to do exactly that (see thematicBreakLine,
+// mdpreview_blocks.go), and the consequence was worse than a misplaced
+// comment: two blocks sharing a source line means two annotations sharing
+// annotation.Store's (Line, Type) key, and Add REPLACES on a key collision, so
+// the first reader's comment was silently destroyed by the second.
 func mdPreviewBuildSourceMap(targets []mdPreviewBlockTarget, rows []int, shifts []mdPreviewArtShift,
 	origins []int, rendered string) mdPreviewSourceMap {
 	anchors := make([]mdPreviewBlockAnchor, 0, len(targets))
+	prevLine := -1
 	for i, tg := range targets {
 		start, sok := mdPreviewOriginOf(origins, tg.StartLine)
 		end, eok := mdPreviewOriginOf(origins, tg.EndLine)
@@ -419,6 +415,10 @@ func mdPreviewBuildSourceMap(targets []mdPreviewBlockTarget, rows []int, shifts 
 			// whole map rather than dropping one block out of it.
 			return mdPreviewSourceMap{}
 		}
+		if start <= prevLine {
+			return mdPreviewSourceMap{}
+		}
+		prevLine = start
 		anchors = append(anchors, mdPreviewBlockAnchor{
 			Kind:      tg.Kind,
 			Row:       mdPreviewShiftRow(shifts, rows[i]),

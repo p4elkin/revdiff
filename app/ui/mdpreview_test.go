@@ -670,7 +670,7 @@ func TestPanMarkdownPreview_MultiFileReview_ClampsAgainstTwoPaneWidth(t *testing
 	require.True(t, m.modes.mdPreview)
 
 	rendered := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
-	want := mdPreviewMaxOffset(rendered, m.mdPreviewCutWidth())
+	want := m.mdPreviewMaxOffset(rendered, m.mdPreviewCutWidth())
 	require.Positive(t, want, "fixture sanity: the art must be wider than the two-pane viewport")
 
 	for range 50 {

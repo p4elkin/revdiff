@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,7 +48,7 @@ func TestMdPreviewPaintAnnotations_EveryAnnotationAppearsExactlyOnce(t *testing.
 	rendered, srcMap := mdPreviewRenderWithMap(lines, m.layout.viewport.Width, false)
 	require.True(t, srcMap.Aligned, "fixture sanity: this document must align for the test to prove anything")
 
-	painted := m.mdPreviewPaintAnnotations(rendered, srcMap)
+	painted, _ := m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
 	stripped := ansi.Strip(painted)
 
 	for _, comment := range []string{atBlockStart, midParagraph, blankBetween, lineVanished} {
@@ -71,7 +72,7 @@ func TestMdPreviewPaintAnnotations_MultipleInOneBlock_PaintedInLineOrder(t *test
 	require.True(t, srcMap.Aligned)
 	require.Len(t, srcMap.blocks(), 1, "fixture sanity: three consecutive non-blank lines must be one paragraph block")
 
-	painted := m.mdPreviewPaintAnnotations(rendered, srcMap)
+	painted, _ := m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
 	stripped := ansi.Strip(painted)
 
 	first := strings.Index(stripped, "first comment")
@@ -90,7 +91,7 @@ func TestMdPreviewPaintAnnotations_NoAnnotations_PassesThrough(t *testing.T) {
 	m := mdPreviewTestModel(lines)
 	rendered, srcMap := mdPreviewRenderWithMap(lines, m.layout.viewport.Width, false)
 
-	got := m.mdPreviewPaintAnnotations(rendered, srcMap)
+	got, _ := m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
 
 	assert.Equal(t, rendered, got, "no annotations in the store must leave the render byte-identical")
 }
@@ -108,7 +109,7 @@ func TestMdPreviewPaintAnnotations_RowsByteEqualToDiffView(t *testing.T) {
 	rendered, srcMap := mdPreviewRenderWithMap(lines, m.layout.viewport.Width, false)
 	require.True(t, srcMap.Aligned)
 
-	painted := m.mdPreviewPaintAnnotations(rendered, srcMap)
+	painted, _ := m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
 
 	annotationMap, _ := m.buildAnnotationMap()
 	var want strings.Builder
@@ -133,7 +134,7 @@ func TestMdPreviewPaintAnnotations_FileLevelAlwaysAtTop(t *testing.T) {
 	rendered, srcMap := mdPreviewRenderWithMap(lines, m.layout.viewport.Width, false)
 	require.True(t, srcMap.Aligned)
 
-	painted := m.mdPreviewPaintAnnotations(rendered, srcMap)
+	painted, _ := m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
 	stripped := ansi.Strip(painted)
 
 	noteIdx := strings.Index(stripped, "file note")
@@ -156,7 +157,7 @@ func TestMdPreviewPaintAnnotations_Degraded_ListsAllAtTop(t *testing.T) {
 	rendered := "irrelevant body"
 	unaligned := mdPreviewSourceMap{} // Aligned defaults to false
 
-	painted := m.mdPreviewPaintAnnotations(rendered, unaligned)
+	painted, _ := m.mdPreviewPaintAnnotationsTracked(rendered, unaligned)
 
 	assert.True(t, strings.HasSuffix(painted, rendered),
 		"the original render must survive untouched, appended after the annotation group")
@@ -183,7 +184,7 @@ func TestMdPreviewPaintAnnotations_NoBlocksDegradesLikeUnaligned(t *testing.T) {
 	rendered := "irrelevant body"
 	alignedNoBlocks := mdPreviewSourceMap{Aligned: true} // Aligned but zero anchors
 
-	painted := m.mdPreviewPaintAnnotations(rendered, alignedNoBlocks)
+	painted, _ := m.mdPreviewPaintAnnotationsTracked(rendered, alignedNoBlocks)
 
 	assert.Contains(t, ansi.Strip(painted), "orphaned in an empty document")
 	assert.True(t, strings.HasSuffix(painted, rendered))
@@ -202,12 +203,12 @@ func TestMdPreviewMaxOffset_UnchangedByAnnotationRows(t *testing.T) {
 
 	rendered, srcMap := mdPreviewRenderWithMap(lines, m.layout.viewport.Width, false)
 	require.True(t, srcMap.Aligned)
-	baseOffset := mdPreviewMaxOffset(rendered, m.mdPreviewCutWidth())
+	baseOffset := m.mdPreviewMaxOffset(rendered, m.mdPreviewCutWidth())
 	require.Positive(t, baseOffset, "fixture sanity: the diagram must actually be wider than the pane")
 
 	m.store.Add(annotation.Annotation{File: "plan.md", Line: 1, Type: " ", Comment: "a short note"})
-	painted := m.mdPreviewPaintAnnotations(rendered, srcMap)
-	paintedOffset := mdPreviewMaxOffset(painted, m.mdPreviewCutWidth())
+	painted, _ := m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
+	paintedOffset := m.mdPreviewMaxOffset(painted, m.mdPreviewCutWidth())
 
 	assert.Equal(t, baseOffset, paintedOffset,
 		"annotation rows wrap to the pane width, so they must never widen the pan clamp")
@@ -344,8 +345,12 @@ func TestMdPreviewClickAnnotate_UnalignedIsNoOp(t *testing.T) {
 // the tree/TOC pane focused (reachable while previewing, since nothing in
 // mdPreviewAllowedActions changes m.layout.focus), ActionConfirm must NOT
 // fall through to handleEnterKey's TOC-jump branch — which would realign the
-// viewport to a diff-line coordinate the preview render does not have. It
-// must instead start a preview annotation without touching the offset.
+// viewport to a diff-line coordinate the preview render does not have.
+//
+// It must also not start an annotation from there: annotate_file (A) is gated
+// on diff-pane focus by handleFileAnnotateKey, and the two annotation-creating
+// keys have to agree, or `a` silently opens an input on a block the reader was
+// not aiming at with a pane they were not looking at.
 func TestDispatchAction_PreviewConfirmWithTreeFocus_DoesNotMoveViewport(t *testing.T) {
 	// a long document, not the usual three-line fixture: startPreviewAnnotationAt
 	// restores the offset via the real SetYOffset, which clamps against the
@@ -373,7 +378,15 @@ func TestDispatchAction_PreviewConfirmWithTreeFocus_DoesNotMoveViewport(t *testi
 
 	assert.Equal(t, 5, got.layout.viewport.YOffset,
 		"ActionConfirm in preview must not run the TOC jump's viewport realignment")
-	assert.True(t, got.annot.annotating, "ActionConfirm in preview must start an annotation instead of a TOC jump")
+	assert.False(t, got.annot.annotating,
+		"ActionConfirm in preview must be inert with the tree/TOC pane focused, matching annotate_file")
+
+	// and with the diff pane focused it does start one, so the gate above is a
+	// focus gate rather than the action being dead
+	m.layout.focus = paneDiff
+	focused, _ := m.dispatchAction(keymap.ActionConfirm)
+	assert.True(t, focused.(Model).annot.annotating,
+		"ActionConfirm in preview must start an annotation when the diff pane has focus")
 }
 
 // TestMdPreviewStartAnnotation_SavedAnnotationMatchesSourceView proves the
@@ -589,4 +602,110 @@ func TestDispatchAction_MdPreviewOn_FlushOutputWritesFile(t *testing.T) {
 
 	assert.FileExists(t, path, "O must flush annotations to the output file while previewing")
 	assert.True(t, model.modes.mdPreview, "flushing output must not exit preview")
+}
+
+// TestMdPreviewStartAnnotation_ConsecutiveThematicBreaks_EachKeepsItsComment is
+// the regression for the block walk resolving two blocks onto one source line.
+// On "text\n\n---\n\n---\n\nmore\n" the second thematic break used to anchor to
+// line 1 — the paragraph's own line — because the lower-bound walk bubbled past
+// the first, position-less break instead of resolving it. The visible damage was
+// not a misplaced comment: two blocks on one line means two annotations sharing
+// annotation.Store's (Line, Type) key, and Add replaces on a collision, so
+// annotating all four blocks in document order left three annotations, with the
+// paragraph's comment destroyed by the first rule's.
+func TestMdPreviewStartAnnotation_ConsecutiveThematicBreaks_EachKeepsItsComment(t *testing.T) {
+	doc := "text\n\n---\n\n---\n\nmore\n"
+	m := mdPreviewTestModel(mdLines(doc))
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned, "this document must still align after the fix")
+	blocks := srcMap.blocks()
+	require.Len(t, blocks, 4, "paragraph, hr, hr, paragraph")
+
+	seen := map[int]bool{}
+	for i, b := range blocks {
+		require.False(t, seen[b.StartLine], "block %d (%s) reuses source line %d", i, b.Kind, b.StartLine)
+		seen[b.StartLine] = true
+
+		m.startPreviewAnnotationAt(b.StartLine)
+		require.True(t, m.annot.annotating, "block %d must accept an annotation", i)
+		m.annot.input.SetValue(fmt.Sprintf("comment %d", i))
+		m.saveAnnotation()
+	}
+
+	anns := m.store.Get("plan.md")
+	require.Len(t, anns, 4, "one annotation per block: none may overwrite another")
+	for i, b := range blocks {
+		found := false
+		for _, a := range anns {
+			if a.Line == m.diffLineNum(m.file.lines[b.StartLine]) && a.Comment == fmt.Sprintf("comment %d", i) {
+				found = true
+			}
+		}
+		assert.True(t, found, "block %d (%s) lost its comment", i, b.Kind)
+	}
+}
+
+// TestMdPreviewClickAnnotate_RefusedGuards covers the two states a preview
+// click must leave alone, matching its siblings: a file the render path will
+// not preview (the same markdownPreviewable gate panMarkdownPreview and
+// scrollMarkdownPreview carry), and an annotation input already open — where
+// startAnnotation's clearPendingInputState plus a fresh newAnnotationInput
+// would discard whatever the reader had typed.
+func TestMdPreviewClickAnnotate_RefusedGuards(t *testing.T) {
+	doc := "# Heading\n\nFirst paragraph.\n\nSecond paragraph."
+	base := func(t *testing.T) Model {
+		t.Helper()
+		m := mdPreviewTestModel(mdLines(doc))
+		m.modes.mdPreview = true
+		_, srcMap := m.mdPreviewBody()
+		require.True(t, srcMap.Aligned, "fixture sanity")
+		return m
+	}
+
+	t.Run("not previewable", func(t *testing.T) {
+		m := base(t)
+		m.file.markdownPreviewable = false
+		result, cmd := m.clickPreviewDiff(m.diffTopRow())
+		assert.Nil(t, cmd)
+		assert.False(t, result.(Model).annot.annotating,
+			"a click must not run the markdown pipeline over a file the render path will not preview")
+	})
+
+	t.Run("annotation input already open", func(t *testing.T) {
+		m := base(t)
+		_, srcMap := m.mdPreviewBody()
+		m.startPreviewAnnotationAt(srcMap.blocks()[0].StartLine)
+		require.True(t, m.annot.annotating)
+		m.annot.input.SetValue("half-typed note")
+
+		result, cmd := m.clickPreviewDiff(m.diffTopRow() + srcMap.blocks()[1].Row)
+		assert.Nil(t, cmd)
+		got := result.(Model)
+		assert.Equal(t, srcMap.blocks()[0].StartLine, got.nav.diffCursor, "the open input must keep its target")
+		assert.Equal(t, "half-typed note", got.annot.input.Value(), "a stray click must not discard typed text")
+	})
+}
+
+// TestMdPreviewHighlight_PannedRowReachesPaneEdge covers the ragged-bar case:
+// once the frame is panned, cutMdPreviewLine has cut each row at wherever its
+// own content ended, so a row that does not continue to the right is shorter
+// than the pane and the highlight would stop short of the edge.
+func TestMdPreviewHighlight_PannedRowReachesPaneEdge(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	m.layout.viewport.Width = 40
+	m.layout.scrollX = 5
+
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned, "fixture sanity")
+	bi := m.mdPreviewHighlightAnchor(srcMap)
+	require.GreaterOrEqual(t, bi, 0, "fixture sanity: a block must be marked")
+
+	rows := strings.Split(m.mdPreviewFinalRender(), "\n")
+	bg := mdPreviewHighlightBg(m)
+	row := rows[srcMap.blocks()[bi].Row]
+	require.Contains(t, row, bg, "fixture sanity: the marked row must carry the highlight")
+	assert.Equal(t, m.mdPreviewCutWidth(), ansi.StringWidth(row),
+		"a panned highlighted row must be padded out so the bar reaches the pane edge")
 }

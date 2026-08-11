@@ -9,8 +9,8 @@ import (
 	"github.com/umputun/revdiff/app/diff"
 )
 
-// mdPreviewPaintAnnotations splices this file's annotations onto rendered — a
-// base preview render from mdPreviewBaseRender, still full-width and uncut —
+// mdPreviewPaintAnnotationsTracked splices this file's annotations onto
+// rendered — a base preview render from mdPreviewBaseRender, still uncut —
 // so the result carries the same annotation rows the diff pane would show,
 // positioned under the block each one belongs to. Callers must splice BEFORE
 // applyMdPreviewScroll, never after: an annotation row is ordinary preview
@@ -30,12 +30,8 @@ import (
 // positioned. An aligned map with zero blocks (an empty or all-stripped
 // document) has nowhere to splice a line-level annotation either, and takes
 // the same path.
-func (m Model) mdPreviewPaintAnnotations(rendered string, srcMap mdPreviewSourceMap) string {
-	out, _ := m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
-	return out
-}
-
-// mdPreviewPaintAnnotationsTracked is mdPreviewPaintAnnotations plus the source
+//
+// It also returns the source
 // map re-expressed in the coordinates of the string it returns. Splicing rows
 // into a render moves every row below the splice point, so the map that came
 // out of mdPreviewBaseRender describes the BASE render and stops describing the
@@ -49,10 +45,6 @@ func (m Model) mdPreviewPaintAnnotations(rendered string, srcMap mdPreviewSource
 // EndRow, which is always before block i+1's Row. So block i moves by the
 // file-level row count plus every earlier block's annotation row count, and by
 // nothing else.
-//
-// Same wrapper/implementation split as spliceMermaidArt over
-// spliceMermaidArtTracked: callers that only want the painted string do not
-// have to carry a map they will not read.
 func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPreviewSourceMap) (string, mdPreviewSourceMap) {
 	all := m.store.Get(m.file.name)
 	liveIdx, liveOK := m.mdPreviewLiveInputTarget()
@@ -86,9 +78,13 @@ func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPrevie
 		if a.Line == 0 {
 			continue // file-level: painted separately, always at the very top
 		}
-		bi := m.mdPreviewResolveBlock(srcMap, a)
-		blockRows[bi] = append(blockRows[bi], m.mdPreviewRenderOne(a, annotationMap)...)
-		if idx, ok := m.mdPreviewLineIndex(a.Line, a.Type); liveOK && ok && idx == liveIdx {
+		// resolved once and threaded down: mdPreviewLineIndex is a linear scan
+		// of m.file.lines, and it used to run three times per annotation per
+		// repaint (inside resolve, inside render, and for the liveIdx compare).
+		idx, idxOK := m.mdPreviewLineIndex(a.Line, a.Type)
+		bi := m.mdPreviewResolveBlock(srcMap, idx, idxOK)
+		blockRows[bi] = append(blockRows[bi], m.mdPreviewRenderOne(a, annotationMap, idx, idxOK)...)
+		if liveOK && idxOK && idx == liveIdx {
 			// mdPreviewRenderOne already routed through renderAnnotationOrInput for
 			// this exact idx, which draws the live input in place of the stored
 			// comment (see renderAnnotationOrInput's own annotating/diffCursor
@@ -161,7 +157,8 @@ func (m Model) mdPreviewAnnotateDegraded(rendered string, all []annotation.Annot
 		if a.Line == 0 {
 			continue // already painted above
 		}
-		for _, row := range m.mdPreviewRenderOne(a, annotationMap) {
+		idx, idxOK := m.mdPreviewLineIndex(a.Line, a.Type)
+		for _, row := range m.mdPreviewRenderOne(a, annotationMap, idx, idxOK) {
 			top.WriteString(row)
 			top.WriteString("\n")
 		}
@@ -173,19 +170,23 @@ func (m Model) mdPreviewAnnotateDegraded(rendered string, all []annotation.Annot
 	return group + rendered
 }
 
-// mdPreviewRenderOne renders one line-level annotation's visual rows. When
-// a's line still resolves to a diff-line index (the overwhelmingly common
-// case), it goes through
-// renderAnnotationOrInput exactly as the diff pane would, which is what makes
-// the result byte-identical to source view's own rendering of the same
-// annotation. When a's line no longer resolves to any current diff line — the
-// file changed since the annotation was saved — renderAnnotationOrInput has
-// no index to key off, so this falls back to renderWrappedAnnotation
-// directly: still the same chokepoint (annotationVisualRows), just without
-// the idx-based lookup wrapper.
-func (m Model) mdPreviewRenderOne(a annotation.Annotation, annotationMap map[annotLineKey]string) []string {
+// mdPreviewRenderOne renders one line-level annotation's visual rows. idx/idxOK
+// are a's line resolved through mdPreviewLineIndex by the caller — passed in
+// rather than looked up here, because that lookup is a linear scan and every
+// caller needs the same answer for its own reasons.
+//
+// When a's line still resolves to a diff-line index (the overwhelmingly common
+// case), it goes through renderAnnotationOrInput exactly as the diff pane
+// would, which is what makes the result byte-identical to source view's own
+// rendering of the same annotation. When a's line no longer resolves to any
+// current diff line — the file changed since the annotation was saved —
+// renderAnnotationOrInput has no index to key off, so this falls back to
+// renderWrappedAnnotation directly: still the same chokepoint
+// (annotationVisualRows), just without the idx-based lookup wrapper.
+func (m Model) mdPreviewRenderOne(a annotation.Annotation, annotationMap map[annotLineKey]string,
+	idx int, idxOK bool) []string {
 	var b strings.Builder
-	if idx, ok := m.mdPreviewLineIndex(a.Line, a.Type); ok {
+	if idxOK {
 		m.renderAnnotationOrInput(&b, idx, annotationMap)
 	} else {
 		m.renderWrappedAnnotation(&b, " ", m.annotPrefix(), a.Comment)
@@ -194,23 +195,24 @@ func (m Model) mdPreviewRenderOne(a annotation.Annotation, annotationMap map[ann
 }
 
 // mdPreviewResolveBlock resolves which block a line-level annotation should
-// be spliced under. Caller guarantees len(srcMap.blocks()) > 0.
+// be spliced under. idx/idxOK are the annotation's line already resolved
+// through mdPreviewLineIndex (see mdPreviewRenderOne for why the lookup is the
+// caller's). Caller guarantees len(srcMap.blocks()) > 0.
 //
 // Three outcomes, matching the source map's own resolution rules:
-//   - a's line still exists and anchorAtLine finds a containing block (the
+//   - the line still exists and anchorAtLine finds a containing block (the
 //     block starts exactly there, or the line falls inside a block's span
 //     without being its first line, e.g. a mid-paragraph annotation): that
 //     block.
-//   - a's line still exists but precedes every block (there is nothing to be
+//   - the line still exists but precedes every block (there is nothing to be
 //     "inside", e.g. an annotation on a blank separator line before the very
 //     first block): the first block — the nearest one there is.
-//   - a's line no longer resolves to any current diff line at all (the file
+//   - the line no longer resolves to any current diff line at all (the file
 //     changed since the annotation was saved): the last block, so an orphaned
 //     annotation is never lost, just pinned to the end of the document.
-func (m Model) mdPreviewResolveBlock(srcMap mdPreviewSourceMap, a annotation.Annotation) int {
+func (m Model) mdPreviewResolveBlock(srcMap mdPreviewSourceMap, idx int, idxOK bool) int {
 	anchors := srcMap.blocks()
-	idx, ok := m.mdPreviewLineIndex(a.Line, a.Type)
-	if !ok {
+	if !idxOK {
 		return len(anchors) - 1
 	}
 	if bi := srcMap.anchorAtLine(idx); bi >= 0 {

@@ -53,6 +53,77 @@ type mdPreviewRenderCache struct {
 	valid    bool
 	rendered string
 	srcMap   mdPreviewSourceMap
+
+	scroll mdPreviewScrollCache
+}
+
+// mdPreviewScrollCache memoizes the two whole-document passes
+// applyMdPreviewScroll owes on every repaint: the widest-row grapheme scan the
+// pan clamp is measured against, and the per-row horizontal cut itself.
+//
+// It is keyed on the body string rather than on mdPreviewCacheKey, because the
+// body is the base render PLUS this file's annotation rows — it changes on
+// every annotation edit, which the base render's own key cannot see. Neither
+// pass depends on the vertical offset, so the repaint every j/k keypress now
+// triggers (the block highlight has to move with the viewport) reuses both.
+//
+// The measurement that made this necessary, taken on
+// docs/plans/completed/20260722-markdown-preview-mode.md (983 rendered rows,
+// Apple M2 Max): the width scan alone is ~1.9-2.1ms and ran unconditionally,
+// even at scrollX 0 with nothing to cut; the cut is another ~2.7ms whenever
+// the document is wider than the pane. An earlier version of the repaint
+// benchmark timed the cache lookup instead of the frame, which is how both
+// came to sit unnoticed in every keypress.
+//
+// Comparing the key is not the cost the memo removes: with no annotations
+// painted, mdPreviewPaintAnnotationsTracked returns the base render untouched,
+// so the strings share a backing pointer and the compare is O(1); with
+// annotations it is a memcmp, orders of magnitude cheaper per byte than a
+// grapheme scan.
+type mdPreviewScrollCache struct {
+	body    string
+	bodySet bool
+
+	widest     int
+	haveWidest bool
+
+	offset     int
+	cutWidth   int
+	indicators string // the resolved «/» strings: they carry the theme the cut baked in
+	cut        string
+	haveCut    bool
+}
+
+// forBody drops both memos when the body changes. Everything this cache holds
+// is derived from that one string, so there is nothing to keep across it.
+func (c *mdPreviewScrollCache) forBody(body string) {
+	if c.bodySet && c.body == body {
+		return
+	}
+	*c = mdPreviewScrollCache{body: body, bodySet: true}
+}
+
+// widestOf returns the widest row's display width in body.
+func (c *mdPreviewScrollCache) widestOf(body string) int {
+	c.forBody(body)
+	if !c.haveWidest {
+		c.widest, c.haveWidest = mdPreviewMaxLineWidth(body), true
+	}
+	return c.widest
+}
+
+// cutOf returns body cut to the visible column window, calling compute on a
+// miss. indicators is part of the key, not decoration: the cut bakes the «/»
+// glyphs in with their resolved colors, so a theme change has to miss even
+// though the body, offset and width are unchanged.
+func (c *mdPreviewScrollCache) cutOf(body string, offset, cutWidth int, indicators string, compute func() string) string {
+	c.forBody(body)
+	if c.haveCut && c.offset == offset && c.cutWidth == cutWidth && c.indicators == indicators {
+		return c.cut
+	}
+	c.offset, c.cutWidth, c.indicators = offset, cutWidth, indicators
+	c.cut, c.haveCut = compute(), true
+	return c.cut
 }
 
 // get returns the cached render and source map when key matches the stored
@@ -191,6 +262,17 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 		return rendered
 	}
 
+	// pad the bar out to the pane only on a panned frame. There, cutMdPreviewLine
+	// has cut each row at wherever its own content ended, so a row that does not
+	// continue to the right is shorter than the pane and the bar would stop short
+	// of the edge — ragged, in exactly the mode (a wide diagram or table) panning
+	// exists for. Unpanned, glamour has already padded prose rows to its own wrap
+	// width and padding further would widen every highlighted row past the shape
+	// the rest of the document has.
+	padTo := 0
+	if m.layout.scrollX > 0 {
+		padTo = m.mdPreviewCutWidth()
+	}
 	anchor := srcMap.blocks()[bi]
 	rows := strings.Split(rendered, "\n")
 	painted := false
@@ -198,7 +280,7 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 		if strings.TrimSpace(ansi.Strip(rows[r])) == "" {
 			continue
 		}
-		rows[r] = mdPreviewHighlightRow(rows[r], bg)
+		rows[r] = mdPreviewHighlightRow(rows[r], bg, padTo)
 		painted = true
 	}
 	if !painted {
@@ -208,7 +290,13 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 }
 
 // mdPreviewHighlightRow gives one rendered row the background bg, re-asserting
-// it after every reset the row already contains.
+// it after every reset the row already contains, and first pads it out to
+// width — 0 for no padding, see the caller for when each applies.
+//
+// The padding is what extendLineBg does for the diff cursor line, and it is
+// needed for the same reason: a row shorter than the pane leaves the terminal's
+// default background showing to its right, so the mark stops short of the edge
+// instead of spanning it.
 //
 // Raw ANSI, never lipgloss.Render: this is a styled substring inside a
 // lipgloss-rendered pane, and Render would emit a full "\033[0m" that kills the
@@ -216,9 +304,12 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 // lipgloss"). The re-assertion is what a plain prefix cannot do — a glamour row
 // is full of per-span resets, and each one would end the highlight partway
 // through the row, leaving it striped.
-func mdPreviewHighlightRow(row, bg string) string {
+func mdPreviewHighlightRow(row, bg string, width int) string {
 	if row == "" {
 		return row
+	}
+	if pad := width - ansi.StringWidth(row); pad > 0 {
+		row += strings.Repeat(" ", pad)
 	}
 	out := strings.ReplaceAll(row, "\033[0m", "\033[0m"+bg)
 	out = strings.ReplaceAll(out, "\033[m", "\033[m"+bg)

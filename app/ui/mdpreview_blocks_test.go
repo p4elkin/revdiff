@@ -252,6 +252,47 @@ func TestMdPreviewBlocksHorizontalRuleFirstAndLastLine(t *testing.T) {
 	}
 }
 
+// TestMdPreviewBlocksConsecutiveHorizontalRules pins the case that used to
+// misplace a break onto a previous block's line: a run of thematic breaks with
+// nothing but blank lines between them. A ThematicBreak carries no position of
+// its own, so the second break's lower-bound walk has to resolve the first
+// break rather than bubbling past it (see thematicBreakLowerBound). When it
+// bubbled, "text\n\n---\n\n---\n\nmore\n" put the second break on line 1 —
+// the paragraph's line — and two targets on one source line silently destroy
+// one of two annotations.
+func TestMdPreviewBlocksConsecutiveHorizontalRules(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want []int // expected hr lines, in order
+	}{
+		{"two breaks after a paragraph", "text\n\n---\n\n---\n\nmore\n", []int{3, 5}},
+		{"two breaks opening the document", "---\n\n---\n\ntext\n", []int{1, 3}},
+		{"adjacent breaks, no blank between", "a\n\n---\n---\n\nb\n", []int{3, 4}},
+		{"three in a row", "a\n\n---\n\n---\n\n---\n\nb\n", []int{3, 5, 7}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			targets := mdPreviewBlockTargets(tc.doc)
+			assertNonOverlappingOrdered(t, targets)
+			var got []int
+			for _, tg := range targets {
+				if tg.Kind == mdBlockHR {
+					got = append(got, tg.StartLine)
+				}
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d hr targets %v, want %v (all targets: %+v)", len(got), got, tc.want, targets)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("hr %d = line %d, want %d (all targets: %+v)", i, got[i], tc.want[i], targets)
+				}
+			}
+		})
+	}
+}
+
 func TestMdPreviewBlocksHTMLBlock(t *testing.T) {
 	doc := "before\n\n<div class=\"x\">\n  <p>hello</p>\n</div>\n\nafter\n"
 	targets := mdPreviewBlockTargets(doc)

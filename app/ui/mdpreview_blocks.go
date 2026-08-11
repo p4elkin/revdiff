@@ -25,10 +25,13 @@ import (
 // There is deliberately no generic "heading" value — glamour never emits a
 // marker for it (see the spike's "Decided by the spike" notes), only the
 // level-specific h1..h6 kinds do, so mdPreviewBlockTargets never produces
-// one either. This walk does not need a "task" value (see
-// mdPreviewMarkerKinds' doc comment in mdpreview_marker.go for why the
-// marker side excludes it too) because a task-list item is folded into its
-// enclosing item/enumeration target — see the KindListItem case below.
+// one either. This walk emits no "task" value either, because a task-list
+// item is folded into its enclosing item/enumeration target — see the
+// KindListItem case below. The MARKER side does carry one (mdBlockTask, and
+// see mdPreviewMarkerKinds' doc comment in mdpreview_marker.go for why it has
+// to): glamour renders a checkbox item through Styles.Task and never through
+// Styles.Item, so the two sides are bridged by mdPreviewKindMatches rather
+// than by both excluding it.
 type mdPreviewBlockKind string
 
 const (
@@ -353,15 +356,17 @@ func isMdSpanBoundary(k gast.NodeKind) bool {
 // last child) — nothing else can occupy that gap. Within the gap, the first
 // non-blank line is the break.
 //
-// Known limitation: back-to-back thematic breaks with nothing recoverable
-// between them (a previous sibling that is itself an unresolved
-// ThematicBreak) fall back to whatever the next ancestor level offers as
-// the lower bound, which can misplace the second break if there is other
-// blank-line padding before it. This is rare enough in practice (and absent
-// from the task's required test set) that it is accepted rather than
-// solved recursively here.
+// Back-to-back thematic breaks resolve correctly because the lower-bound walk
+// recurses into an unresolved ThematicBreak sibling rather than bubbling past
+// it — see thematicBreakLowerBound. Bubbling was the original behavior and it
+// was not merely imprecise: on "text\n\n---\n\n---\n\nmore\n" the second break
+// resolved to line 1, the paragraph's own line, which put two targets on one
+// source line. Two annotations then collided on annotation.Store's (Line, Type)
+// key and one was destroyed. mdPreviewBuildSourceMap now also refuses any map
+// whose targets are not strictly increasing in source line, so a future source
+// of the same class degrades instead of overwriting a comment.
 func thematicBreakLine(n gast.Node, idx mdLineIndex, doc string) (line int, ok bool) {
-	lo, hi := thematicBreakLowerBound(n, idx), thematicBreakUpperBound(n, idx)
+	lo, hi := thematicBreakLowerBound(n, idx, doc), thematicBreakUpperBound(n, idx)
 
 	lines := strings.Split(doc, "\n")
 	for l := lo; l <= hi && l <= len(lines); l++ {
@@ -383,7 +388,15 @@ func thematicBreakLine(n gast.Node, idx mdLineIndex, doc string) (line int, ok b
 // jump straight to whatever comes after the break instead of bounding to
 // the true start of the document. Returns 1 if no ancestor level has a
 // previous sibling with a known position — n is the very first block.
-func thematicBreakLowerBound(n gast.Node, idx mdLineIndex) int {
+//
+// A previous sibling that is itself a ThematicBreak carries no position of
+// its own, and is the one case where bubbling up gives an actively wrong
+// answer rather than a merely loose one: the bound then lands before the
+// earlier break, and the first non-blank line found from there is that
+// break's line — or, on "text\n\n---\n\n---\n\nmore\n", the paragraph's.
+// Recursing resolves the earlier break first and bounds this one to the line
+// after it. Recursion depth is the length of the run of consecutive breaks.
+func thematicBreakLowerBound(n gast.Node, idx mdLineIndex, doc string) int {
 	for cur := n; cur != nil; cur = cur.Parent() {
 		prev := cur.PreviousSibling()
 		if prev == nil {
@@ -392,9 +405,13 @@ func thematicBreakLowerBound(n gast.Node, idx mdLineIndex) int {
 		if _, e, ok := blockLineSpan(prev, idx); ok {
 			return e + 1
 		}
-		// prev itself carries no position (e.g. another unresolved
-		// ThematicBreak) — nothing better to try at this level, keep
-		// walking up.
+		if prev.Kind() == gast.KindThematicBreak {
+			if l, ok := thematicBreakLine(prev, idx, doc); ok {
+				return l + 1
+			}
+		}
+		// prev carries no position and is not a break we can resolve —
+		// nothing better to try at this level, keep walking up.
 	}
 	return 1
 }

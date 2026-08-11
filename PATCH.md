@@ -376,12 +376,38 @@ viewport.Width, noColors)`. `loadSeq` is what makes the key safe across an `R`
 reload of the same file at the same width — `renderMarkdownPreview`'s old doc
 comment explicitly declined a cache for exactly this reason before `loadSeq`
 closed it, the same way `globalRenderKey` already relies on it (see
-gotchas.md's per-line render cache note). Measured repaint cost (Apple M2 Max,
-`docs/plans/completed/20260722-markdown-preview-mode.md`, 810 lines, 3 mermaid
-fences): a fresh render is ~112.6ms / 42.9MB / 415k allocs; a cached warm
-repeat is ~523ns / 0B / 0 allocs — about 215,000x, with markdown rendering
-fully absent from the warm path. This is what makes the scroll-following
-highlight (a repaint on every offset change) affordable at all.
+gotchas.md's per-line render cache note).
+
+Two more memos sit beside it on `mdPreviewRenderCache`, both keyed on the
+painted body string rather than on the cache key, because the body is the base
+render PLUS this file's annotation rows and changes on every annotation edit:
+the widest-row width (`ansi.StringWidth` over the whole document, the pan
+clamp's basis) and the horizontal cut itself. Neither depends on the vertical
+offset, so the repaint every `j`/`k` keypress now drives — the block highlight
+has to follow the viewport — reuses both.
+
+Measured on Apple M2 Max against
+`docs/plans/completed/20260722-markdown-preview-mode.md` (810 source lines, 983
+rendered rows, 3 mermaid fences), pane width 80, a resolver carrying a search
+background so the highlight really paints:
+
+| path | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| fresh `mdPreviewRenderWithMap` (what a repaint cost before the cache) | 104,003,012 | 42,925,885 | 415,344 |
+| repaint frame, before the width/cut memos | 6,222,047 | 1,409,447 | 1,092 |
+| repaint frame, current (`mdPreviewFinalRender`) | 124,481 | 671,822 | 21 |
+| cached base-render lookup alone — NOT a repaint | 502.5 | 0 | 0 |
+
+⚠️ **The last row is a cache lookup, not a repaint, and an earlier version of
+this note recorded it as one** (`~523ns`, "about 215,000x"). The benchmark it
+came from timed `mdPreviewBaseRender` — a key comparison and a string return —
+while a repaint is `mdPreviewFinalRender`: cached base render, annotations
+painted in, the horizontal cut, the highlight. Mislabelling it is how a
+full-document width scan came to sit unnoticed in every keypress. The honest
+figure for the repaint the scroll-following highlight actually pays is the
+third row: ~0.12ms, down from ~6.2ms, and ~835x below a fresh render. The
+remaining cost is the highlight's own per-row pass, which cannot be cached
+because it moves with the offset.
 
 **Test-only, mechanical, not part of the feature itself:**
 
@@ -708,10 +734,21 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   anchors to the whole paragraph, not the line or word under the cursor at the moment of wrapping
   — matching how the same paragraph would be commented in source view before this feature existed,
   where the paragraph's block boundary is already the finest resolution.
-- **`d` (delete annotation) is still blocked in preview.** Creating, reading, and flushing
-  annotations all work inside preview after this plan; deleting one still requires leaving preview
-  first. Not on `mdPreviewAllowedActions`' allowlist — see that map and its doc comment in
-  `mdpreview.go`.
+- **Three annotation actions are still blocked in preview: `d`, `@`, and `}`/`{`.** Creating,
+  reading, and flushing annotations all work inside preview after this plan; deleting one, listing
+  them in the `@` popup, and stepping between them all still require leaving preview first (press
+  `P`, act, press `P` again). None of the three are on `mdPreviewAllowedActions`' allowlist — see
+  that map and its doc comment in `mdpreview.go` for the per-action reason. Practical consequence
+  worth stating on its own: **a comment made in preview cannot be undone from inside preview.**
+  Pressing `a` on the same block again pre-fills the existing comment, but clearing the input and
+  confirming runs `cancelAnnotation`, which leaves the stored comment untouched.
+- **A list item whose children are all boundary kinds contributes no target, and degrades the whole
+  document.** `swallowedSpan` aggregates only over a container's own direct content, and a nested
+  list, table, code block, heading or thematic break is excluded because it gets its own target —
+  so an item like `-` followed only by an indented sub-list (`-\n  - deep`) yields no target of its
+  own while glamour still writes its item marker. The length mismatch fails alignment, and the
+  document degrades to read-only in full, the same all-or-nothing way the adjacent-tables case
+  does.
 
 **Preview annotations — corpus measurement (`mdpreview_srcmap_corpus_test.go`, env-gated via
 `REVDIFF_MDPREVIEW_SRCMAP_CORPUS`, same corpus definition the task 1-3 spike used: every file
@@ -725,22 +762,22 @@ its one synthetic handwritten fixture, at pane width 80, colors on):
 |---|---|
 | documents aligned | 57 / 58 (98.3%) |
 | unaligned | `README.md` (multiple tables among other constructs; not root-caused further — falls under the documented table/alignment-mismatch degrade above) |
-| anchors produced across the 57 aligned documents | 9,818 total |
+| anchors produced across the 57 aligned documents | 9,851 total |
 
-Per-kind anchor counts across those 9,818 (confirms per-item granularity at real-corpus scale, not
+Per-kind anchor counts across those 9,851 (confirms per-item granularity at real-corpus scale, not
 just in the unit-test fixtures — `item` alone accounts for two thirds of every anchor produced):
 
 | kind | anchors |
 |---|---|
-| item | 6,733 |
-| paragraph | 1,330 |
+| item | 6,755 |
+| paragraph | 1,339 |
 | h3 | 727 |
 | h2 | 551 |
 | enumeration | 199 |
 | code_block | 153 |
 | h1 | 57 |
 | h4 | 28 |
-| table | 32 |
+| table | 34 |
 | hr | 6 |
 | block_quote | 2 |
 

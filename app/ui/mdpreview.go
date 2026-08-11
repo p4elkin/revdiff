@@ -102,8 +102,9 @@ func joinWithMermaidFences(lines []diff.DiffLine,
 	var fenceChar rune // 0 when outside any fence
 	var fenceLen int   // length of the opening fence marker
 	var fenceLang string
-	var fenceStart int     // index into lines of the opening fence line
-	var fenceBody []string // body lines collected while inside a mermaid fence
+	var fenceStart int         // index into lines of the opening fence line
+	var fenceBody []string     // body lines collected while inside a mermaid fence
+	var fenceBodyOrigins []int // the index into lines each fenceBody entry came from
 
 	writeLine := func(content string, origin int) {
 		out.WriteString(content)
@@ -132,7 +133,7 @@ func joinWithMermaidFences(lines []diff.DiffLine,
 				fenceLang = strings.ToLower(fields[0])
 			}
 			fenceStart = i
-			fenceBody = nil
+			fenceBody, fenceBodyOrigins = nil, nil
 			if fenceLang != "mermaid" {
 				writeLine(content, i)
 			}
@@ -151,13 +152,14 @@ func joinWithMermaidFences(lines []diff.DiffLine,
 			fenceChar = 0
 			fenceLen = 0
 			fenceLang = ""
-			fenceBody = nil
+			fenceBody, fenceBodyOrigins = nil, nil
 			continue
 		}
 
 		if fenceChar != 0 {
 			if fenceLang == "mermaid" {
 				fenceBody = append(fenceBody, content)
+				fenceBodyOrigins = append(fenceBodyOrigins, i)
 			} else {
 				writeLine(content, i)
 			}
@@ -174,7 +176,10 @@ func joinWithMermaidFences(lines []diff.DiffLine,
 	if fenceChar != 0 && fenceLang == "mermaid" {
 		writeLine(lines[fenceStart].Content, fenceStart)
 		for bi, b := range fenceBody {
-			writeLine(b, fenceStart+1+bi)
+			// the recorded index, never fenceStart+1+bi: the loop above skips
+			// ChangeDivider rows, so a divider inside the fence would make the
+			// arithmetic drift and misattribute every body line after it.
+			writeLine(b, fenceBodyOrigins[bi])
 		}
 	}
 
@@ -229,8 +234,15 @@ var mdPreviewStyle = glamourStyles.DarkStyleConfig
 // bold, or underline attributes at all, so it renders as plain text with ASCII
 // markers (e.g. a leading "# " on headings, "**" around bold, "|" table
 // separators) instead of color. Combined with the Ascii color profile in
-// renderMarkdownDocument, it guarantees the no-colors preview emits zero ANSI
+// renderMarkdownDocument, it guarantees the RENDERED DOCUMENT emits zero ANSI
 // escape sequences, honoring --no-colors / REVDIFF_NO_COLORS.
+//
+// The promise covers the document, not the whole frame. Annotation rows spliced
+// into the preview (mdpreview_annotate.go) are painted by the diff pane's own
+// renderAnnotationOrInput, whose style.Renderer.AnnotationInline emits a literal
+// italic pair regardless of the resolver — so a --no-colors preview carrying an
+// annotation does contain escapes. That is the same output source view produces
+// under --no-colors for the same annotation, and matching it is the point.
 var mdPreviewStyleNoColor = glamourStyles.ASCIIStyleConfig
 
 // mdPreviewMinWidth is the floor applied to the requested render width
@@ -579,8 +591,19 @@ func mdPreviewMaxLineWidth(rendered string) int {
 // mdPreviewMaxOffset returns the largest horizontal offset worth showing: the
 // one that puts the widest row's last column at the right edge of the pane.
 // Zero when everything already fits.
-func mdPreviewMaxOffset(rendered string, cutWidth int) int {
-	return max(0, mdPreviewMaxLineWidth(rendered)-cutWidth)
+func (m Model) mdPreviewMaxOffset(rendered string, cutWidth int) int {
+	return max(0, m.mdPreviewWidestRow(rendered)-cutWidth)
+}
+
+// mdPreviewWidestRow is mdPreviewMaxLineWidth through the memo on the render
+// cache (see mdPreviewScrollCache), which is what keeps the full-document
+// grapheme scan off every repaint. Falls back to the direct scan for a Model
+// built without NewModel, where the cache pointer is nil.
+func (m Model) mdPreviewWidestRow(rendered string) int {
+	if m.mdPreviewCache == nil {
+		return mdPreviewMaxLineWidth(rendered)
+	}
+	return m.mdPreviewCache.scroll.widestOf(rendered)
 }
 
 // applyMdPreviewScroll cuts every row of a rendered preview to the visible
@@ -604,12 +627,24 @@ func (m Model) applyMdPreviewScroll(rendered string) string {
 	if cutWidth <= 0 {
 		return rendered // pathologically narrow layout state: leave the render alone
 	}
-	widest := mdPreviewMaxLineWidth(rendered)
+	widest := m.mdPreviewWidestRow(rendered)
 	offset := min(max(0, m.layout.scrollX), max(0, widest-cutWidth))
 	if offset == 0 && widest <= cutWidth {
 		return rendered // nothing hidden in either direction: pass the render through untouched
 	}
 
+	compute := func() string { return m.cutMdPreviewRows(rendered, offset, cutWidth) }
+	if m.mdPreviewCache == nil {
+		return compute() // Model built without NewModel: no cache to memoize into
+	}
+	indicators := m.mdPreviewLeftIndicator() + m.mdPreviewRightIndicator()
+	return m.mdPreviewCache.scroll.cutOf(rendered, offset, cutWidth, indicators, compute)
+}
+
+// cutMdPreviewRows cuts every row of rendered. Split out of
+// applyMdPreviewScroll so the memo (mdPreviewScrollCache) has one function to
+// call on a miss and the clamp/early-return logic stays above it.
+func (m Model) cutMdPreviewRows(rendered string, offset, cutWidth int) string {
 	lines := strings.Split(rendered, "\n")
 	for i, line := range lines {
 		lines[i] = m.cutMdPreviewLine(line, offset, cutWidth)
@@ -722,7 +757,7 @@ func (m *Model) panMarkdownPreview(direction int) {
 		return
 	}
 	body, srcMap := m.mdPreviewBody()
-	maxOffset := mdPreviewMaxOffset(body, m.mdPreviewCutWidth())
+	maxOffset := m.mdPreviewMaxOffset(body, m.mdPreviewCutWidth())
 
 	offset := min(m.layout.scrollX, maxOffset)
 	if direction < 0 {
@@ -773,6 +808,9 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 	}
 	switch action {
 	case keymap.ActionConfirm:
+		if m.layout.focus != paneDiff {
+			return m, nil, true // same focus gate handleFileAnnotateKey applies to A
+		}
 		cmd := m.startPreviewAnnotation()
 		return m, cmd, true
 	case keymap.ActionScrollLeft:
@@ -868,7 +906,10 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     allowlist changes m.layout.focus), where handleEnterKey would run the
 //     TOC jump — reassigning m.nav.diffCursor and the viewport offset in
 //     diff-line coordinates, exactly the class of bug this allowlist exists
-//     to prevent.
+//     to prevent. It carries the same focus gate annotate_file does: with the
+//     tree/TOC pane focused it does nothing, so the two annotation-creating
+//     keys agree on what focus means instead of one of them silently opening
+//     an input the reader was not aiming with.
 //   - quit / discard_quit / help / theme_select / toggle_tree are session and
 //     layout actions that never touch m.nav.diffCursor or the annotation
 //     store (theme_select and help open an overlay; toggle_tree only flips
@@ -914,6 +955,20 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     m.nav.diffCursor and never touches the viewport, so it is safe to let
 //     it fall through unmodified — creating annotations in preview without a
 //     way to flush them out would be half a feature.
+//   - delete_annotation (d) is excluded: deleteAnnotation resolves its target
+//     from m.nav.diffCursor plus m.annot.cursorOnAnnotation, and preview drives
+//     neither — the cursor points at whichever block the last a/click aimed at,
+//     and cursorOnAnnotation is cleared by startPreviewAnnotationAt. To remove
+//     a comment made in preview, press P, delete it in source view, press P
+//     again.
+//   - annot_list (@) is excluded: the overlay's whole purpose is its jump
+//     outcome, and that routes through jumpToAnnotationTarget ->
+//     positionOnAnnotation, which reassigns m.nav.diffCursor and moves the
+//     viewport in diff-line coordinates the preview render does not have. A
+//     popup whose one action is unusable is worse than no popup.
+//   - next_annotation / prev_annotation (} and {) are excluded for exactly
+//     that reason: they ARE the same jump, with the target picked by store
+//     order instead of by the popup.
 //
 // Deliberately NOT included, despite being layout/session actions with no
 // obvious annotation/cursor risk on their own: toggle_pane / focus_tree /

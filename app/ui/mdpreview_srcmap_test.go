@@ -131,10 +131,8 @@ func TestMdPreviewSrcMapEmptyDocument(t *testing.T) {
 	assert.Empty(t, srcMap.blocks())
 	assert.Equal(t, renderMarkdownDocument(mdLines(""), 80, false), rendered)
 
-	_, ok := srcMap.rowToLine(0)
-	assert.False(t, ok, "an empty map answers nothing")
-	_, ok = srcMap.lineToRow(0)
-	assert.False(t, ok)
+	assert.Negative(t, srcMap.anchorAtRow(0), "an empty map answers nothing")
+	assert.Negative(t, srcMap.anchorAtLine(0))
 }
 
 // TestMdPreviewSrcMapOnlyTable is the whole-document-is-one-table case: the
@@ -157,8 +155,7 @@ func TestMdPreviewSrcMapAdjacentTablesDegrade(t *testing.T) {
 	_, srcMap := mdPreviewRenderWithMap(mdLines(doc), 80, false)
 	assert.False(t, srcMap.Aligned)
 	assert.Empty(t, srcMap.blocks(), "an unaligned map exposes no targets at all")
-	_, ok := srcMap.rowToLine(2)
-	assert.False(t, ok)
+	assert.Negative(t, srcMap.anchorAtRow(2))
 }
 
 // TestMdPreviewSrcMapAlignsRealDocument walks a document mixing every tracked
@@ -226,8 +223,8 @@ func TestMdPreviewSrcMapAlignsRealDocument(t *testing.T) {
 }
 
 // TestMdPreviewSrcMapRowLineInverses is the consistency property the two
-// queries owe each other: for every block, rowToLine(block row) is the block's
-// source line and lineToRow(that line) is the block's row again.
+// lookups owe each other: for every block, anchorAtRow(block row) and
+// anchorAtLine(block start line) both name that same block.
 func TestMdPreviewSrcMapRowLineInverses(t *testing.T) {
 	body, err := os.ReadFile("../../docs/plans/20260811-preview-annotations.md")
 	require.NoError(t, err)
@@ -237,28 +234,20 @@ func TestMdPreviewSrcMapRowLineInverses(t *testing.T) {
 	require.NotEmpty(t, srcMap.blocks())
 
 	for i, a := range srcMap.blocks() {
-		line, ok := srcMap.rowToLine(a.Row)
-		require.True(t, ok, "anchor %d: rowToLine(%d)", i, a.Row)
-		assert.Equal(t, a.StartLine, line, "anchor %d (%s)", i, a.Kind)
-
-		row, ok := srcMap.lineToRow(a.StartLine)
-		require.True(t, ok, "anchor %d: lineToRow(%d)", i, a.StartLine)
-		assert.Equal(t, a.Row, row, "anchor %d (%s)", i, a.Kind)
+		assert.Equal(t, i, srcMap.anchorAtRow(a.Row), "anchor %d (%s): anchorAtRow(%d)", i, a.Kind, a.Row)
+		assert.Equal(t, i, srcMap.anchorAtLine(a.StartLine), "anchor %d (%s): anchorAtLine(%d)", i, a.Kind, a.StartLine)
 	}
 
-	// rows and lines inside a block resolve to the block that owns them
+	// rows inside a block resolve to the block that owns them
 	for i, a := range srcMap.blocks() {
 		for row := a.Row; row <= a.EndRow; row++ {
-			line, ok := srcMap.rowToLine(row)
-			require.True(t, ok)
-			assert.Equal(t, a.StartLine, line, "anchor %d (%s): row %d", i, a.Kind, row)
+			assert.Equal(t, i, srcMap.anchorAtRow(row), "anchor %d (%s): row %d", i, a.Kind, row)
 		}
 	}
 
 	// a row before the first block belongs to nobody
 	if first := srcMap.blocks()[0]; first.Row > 0 {
-		_, ok := srcMap.rowToLine(first.Row - 1)
-		assert.False(t, ok)
+		assert.Negative(t, srcMap.anchorAtRow(first.Row-1))
 	}
 }
 
@@ -339,9 +328,9 @@ func TestMdPreviewSrcMapMermaidRowShift(t *testing.T) {
 		"the paragraph after a spliced diagram must anchor below the art, not on the placeholder row")
 
 	// and it must map back to the source line that really holds that text
-	line, ok := srcMap.rowToLine(last.Row)
-	require.True(t, ok)
-	assert.Equal(t, "after the diagram", mdLines(doc)[line].Content)
+	bi := srcMap.anchorAtRow(last.Row)
+	require.GreaterOrEqual(t, bi, 0)
+	assert.Equal(t, "after the diagram", mdLines(doc)[blocks[bi].StartLine].Content)
 }
 
 // TestMdPreviewSrcMapUnalignedExposesNothing pins the degrade contract: an
@@ -352,10 +341,8 @@ func TestMdPreviewSrcMapUnalignedExposesNothing(t *testing.T) {
 	assert.Empty(t, sm.blocks())
 	assert.Equal(t, -1, sm.anchorAtRow(0))
 	assert.Equal(t, -1, sm.anchorAtLine(0))
-	_, ok := sm.rowToLine(5)
-	assert.False(t, ok)
-	_, ok = sm.lineToRow(5)
-	assert.False(t, ok)
+	assert.Equal(t, -1, sm.anchorAtRow(5))
+	assert.Equal(t, -1, sm.anchorAtLine(5))
 }
 
 // TestMdPreviewSrcMapQuoteParagraphCounts pins the input the blockquote fold
@@ -391,4 +378,42 @@ func TestMdPreviewSrcMapShiftRow(t *testing.T) {
 	assert.Equal(t, 26, mdPreviewShiftRow(shifts, 20))
 	assert.Equal(t, 30, mdPreviewShiftRow(shifts, 21))
 	assert.Equal(t, 7, mdPreviewShiftRow(nil, 7))
+}
+
+// TestMdPreviewBuildSourceMapRejectsNonIncreasingLines is the source-side half
+// of the all-or-nothing degrade. mdPreviewAlignRows already refuses a render
+// whose marker rows do not advance; this refuses a block sequence whose SOURCE
+// lines do not, which is a different failure and needs its own check — the two
+// sequences are produced independently, so a goldmark-side mistake passes the
+// row check untouched. Two blocks on one source line means two annotations on
+// one annotation.Store key, and Add replaces rather than appends, so the
+// consequence is a destroyed comment rather than a misplaced one.
+func TestMdPreviewBuildSourceMapRejectsNonIncreasingLines(t *testing.T) {
+	origins := []int{0, 1, 2, 3, 4}
+	rendered := "r0\nr1\nr2\nr3\nr4"
+	good := []mdPreviewBlockTarget{
+		{Kind: mdBlockParagraph, StartLine: 1, EndLine: 1},
+		{Kind: mdBlockHR, StartLine: 3, EndLine: 3},
+	}
+
+	sm := mdPreviewBuildSourceMap(good, []int{0, 2}, nil, origins, rendered)
+	require.True(t, sm.Aligned, "strictly increasing lines must build a map")
+	require.Len(t, sm.blocks(), 2)
+
+	tests := []struct {
+		name    string
+		targets []mdPreviewBlockTarget
+	}{
+		{"backwards", append(append([]mdPreviewBlockTarget{}, good...),
+			mdPreviewBlockTarget{Kind: mdBlockHR, StartLine: 1, EndLine: 1})},
+		{"repeated", append(append([]mdPreviewBlockTarget{}, good...),
+			mdPreviewBlockTarget{Kind: mdBlockHR, StartLine: 3, EndLine: 3})},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mdPreviewBuildSourceMap(tc.targets, []int{0, 2, 4}, nil, origins, rendered)
+			assert.False(t, got.Aligned, "a non-increasing source-line sequence must refuse the whole map")
+			assert.Empty(t, got.blocks())
+		})
+	}
 }
