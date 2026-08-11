@@ -164,21 +164,72 @@ flowchart TD
 
 - [ ] one combined render, no stacked headings
 
-## 7. What is still not fixed
+## 7. Edge labels: no-break spaces and the LR collision retry
+
+New in this change. Two independent defects, both on the arrow-line rendering path: a space
+inside an edge label used to let the arrow's `─` or a crossing edge's `│` bleed through, and a
+decision node with three or more labeled out-edges could put two labels butted together with no
+way to tell which arrow either belongs to.
+
+Fixture one — the label bleed, a crossing edge cutting through a label:
+
+```mermaid
+flowchart TD
+    Entry["Reached a collection: where does the path point?"] --> Where{"Path position?"}
+    Where -->|"nothing left: whole-list write"| IslandGate{"islandHere?"}
+    Where -->|"index or '-': item add/remove/reorder"| IslandGate
+    Where -->|"a field inside one item"| Descend["Resolve that item's model, descend into it"]
+    IslandGate -->|"no"| Allow1["Allow"]
+    IslandGate -->|"yes"| Owns{"Cell already owns this list?"}
+    Owns -->|"yes"| Allow2["Allow — establishes/updates ownership"]
+    Owns -->|"no"| Refuse1["Refuse: UNOWNED_ISLAND"]
+    Descend -->|"bottomed out at a scalar field"| FieldCheck{"islandHere, cell doesn't own it, and no coarser cell inherits a non-empty list?"}
+    FieldCheck -->|"yes"| Refuse2["Refuse: UNOWNED_ISLAND"]
+    FieldCheck -->|"no"| Allow3["Allow"]
+```
+
+- [ ] `index or '-': item add/remove/reorder` reads intact — no `│` cutting through the middle
+- [ ] no other label anywhere in this diagram has a box-drawing character running through it
+
+Fixture two — the label collision, a decision node with three labeled out-edges:
+
+```mermaid
+flowchart TD
+    Start["Resolve schema for the next path segment"] --> Found{"Property exists in the schema?"}
+    Found -->|"no"| Allow1["Allow — not this method's concern"]
+    Found -->|"yes"| Island["islandHere = already inside an island, or this property is i18n"]
+    Island --> Shape{"What kind of property is it?"}
+    Shape -->|"plain scalar"| NoVerdict["No verdict — the caller one level up applies the field-edit rule"]
+    Shape -->|"single composite"| DescendC["Resolve the item's actual model (polymorphic), descend one level"]
+    Shape -->|"collection"| Checkpoint["Go to a checkpoint — see next diagram"]
+    DescendC -.->|"recurse"| Start
+```
+
+- [ ] `single composite` and `collection` each read as one clean label, not butted together
+- [ ] the diagram renders wider than a narrow `single composite`/`collection` collision would —
+      that is the LR retry trading a narrower, broken picture for a wider, readable one, not a
+      regression. That fence's top-down render is 207 columns, so it needed panning before the
+      flip too
+- [ ] a diagram whose top-down render already FITS the pane is never flipped, even when two
+      short labels sit close on one row. The Solution Overview diagram in
+      `docs/plans/20260805-mermaid-edge-label-rendering.md` is the case to check: it must stay
+      on one screen rather than turning into a wide render you have to pan
+
+## 8. What is still not fixed
 
 None is a regression; all are limits of the vendored renderer, recorded in `PATCH.md`.
 
 - [ ] a node fanning out to several targets loses all but one edge label — confirm this still
-      happens rather than silently producing something worse
-- [ ] a space inside a label drawn on top of an arrow line shows as `─`, so
-      `listVariants (strict mode)` reads as `listVariants─(strict─mode)` — the arrow line shows
-      through where the space should be
+      happens rather than silently producing something worse (a different failure mode from the
+      collision retry above: here a label is dropped or merged, not merely crowded)
 - [ ] `erDiagram`, `gantt` and `quadrantChart` still show their raw fence text
 
-## 8. Regression — the paths that must be untouched
+## 9. Regression — the paths that must be untouched
 
 - [ ] a plain `flowchart` with no shapes, no `---` and no directives renders as it always did
 - [ ] a `sequenceDiagram` renders as it always did
+- [ ] a fence with no colliding labels renders byte-identical to before this change — the LR
+      retry never fires on it
 - [ ] preview off is byte-identical to before any of this work
 
 ## Notes

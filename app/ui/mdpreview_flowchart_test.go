@@ -85,7 +85,7 @@ func TestNormalizeFlowchartSource_LinkVariants_BecomePlainArrow(t *testing.T) {
 		{"labeled dotted", "A -. maybe .-> B", "A -->|maybe| B"},
 		{"labeled thick", "A == always ==> B", "A -->|always| B"},
 		{"labeled normal", "A -- plain --> B", "A -->|plain| B"},
-		{"labeled quoted", `A -- "with spaces" --> B`, "A -->|with spaces| B"},
+		{"labeled quoted", `A -- "with spaces" --> B`, "A -->|with" + mermaidNBSP + "spaces| B"},
 		{"pipe label untouched", "A -->|already| B", "A -->|already| B"},
 		{"pipe label on an undirected link", "A ---|late| B", "A -->|late| B"},
 		{"bidirectional kept", "A <--> B", "A <--> B"},
@@ -133,19 +133,37 @@ func TestNormalizeFlowchartSource_QuotedEdgeLabel_LosesItsQuotes(t *testing.T) {
 		{
 			"quoted pipe label",
 			`A -->|"listVariants (strict mode)"| B`,
-			"A -->|listVariants (strict mode)| B",
+			"A -->|listVariants" + mermaidNBSP + "(strict" + mermaidNBSP + "mode)| B",
 		},
-		{"bidirectional", `A <-->|"both ways"| B`, "A <-->|both ways| B"},
+		{"bidirectional", `A <-->|"both ways"| B`, "A <-->|both" + mermaidNBSP + "ways| B"},
 		{"link normalized first", `A ==>|"thick"| B`, "A -->|thick| B"},
 		{"space before the label", `A --> |"spaced"| B`, "A --> |spaced| B"},
 		{"two labeled links on one line", `A -->|"one"| B -->|"two"| C`, "A -->|one| B -->|two| C"},
-		// Nothing below may change. The inline `-- label -->` form is unquoted by
-		// flowchartLinkText and must keep behaving as it does; a label carrying
-		// its own quotes is left whole rather than half-eaten; and a node label
-		// is not an edge label, however much punctuation it holds.
-		{"inline labeled form still unquoted", `A -- "with spaces" --> B`, "A -->|with spaces| B"},
-		{"interior quotes only", `A -->|say "hi" now| B`, `A -->|say "hi" now| B`},
-		{"quoted on both ends, quoted inside", `A -->|"a" and "b"| B`, `A -->|"a" and "b"| B`},
+		// The QUOTE handling below may not change: the inline `-- label -->` form
+		// is still unquoted the same way, and a label carrying its own quotes is
+		// still left whole rather than half-eaten. What DOES change is that every
+		// one of these labels now also has its spaces substituted for no-break
+		// spaces (see normalizeFlowchartEdgeLabel) — including the inline form's
+		// label, which the old unquoteFlowchartEdgeLabel left untouched because it
+		// arrived here already unquoted.
+		{
+			"inline labeled form still unquoted",
+			`A -- "with spaces" --> B`,
+			"A -->|with" + mermaidNBSP + "spaces| B",
+		},
+		{
+			"interior quotes only",
+			`A -->|say "hi" now| B`,
+			`A -->|say` + mermaidNBSP + `"hi"` + mermaidNBSP + `now| B`,
+		},
+		{
+			// Only the UNQUOTING declines here: both quote layers survive,
+			// but the spaces are still substituted, or the label bleeds the
+			// arrow line through exactly like any other.
+			"quoted on both ends, quoted inside",
+			`A -->|"a" and "b"| B`,
+			`A -->|"a"` + mermaidNBSP + `and` + mermaidNBSP + `"b"| B`,
+		},
 		{"unquoted label", "A -->|already| B", "A -->|already| B"},
 		{"empty quoted label", `A -->|""| B`, `A -->|""| B`},
 		{"node label keeps its quotes", `A -->|"go"| B["target"]`, `A -->|go| B["target"]`},
@@ -161,6 +179,75 @@ func TestNormalizeFlowchartSource_QuotedEdgeLabel_LosesItsQuotes(t *testing.T) {
 	}
 }
 
+func TestFlowchartEdgeLabel_SpacesBecomeNoBreakSpaces(t *testing.T) {
+	// Both edge-label spellings converge on normalizeFlowchartEdgeLabel by the
+	// time normalizeFlowchartNodes runs (normalizeFlowchartLine normalizes
+	// links before nodes), so a multi-word label written either way must reach
+	// the renderer with no-break spaces instead of the plain spaces
+	// mergeDrawings would let bleed through (see mdpreview_nbsp.go).
+	tests := []struct{ name, input, want string }{
+		{
+			"inline form: A -- read as fallback --> B",
+			"A -- read as fallback --> B",
+			"A -->|read" + mermaidNBSP + "as" + mermaidNBSP + "fallback| B",
+		},
+		{
+			`piped form: A -->|"read as fallback"| B`,
+			`A -->|"read as fallback"| B`,
+			"A -->|read" + mermaidNBSP + "as" + mermaidNBSP + "fallback| B",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, normalizeFlowchartBody(t, tc.input))
+		})
+	}
+}
+
+func TestFlowchartEdgeLabel_UnchangedCases(t *testing.T) {
+	// The cases normalizeFlowchartEdgeLabel must hand back exactly as it
+	// received them: no label to touch at all, and a label with nothing for
+	// the substitution to do. A label whose own embedded quote makes
+	// unquoting unsafe is NOT one of them — see
+	// TestFlowchartEdgeLabel_InnerQuote_StillSubstituted.
+	tests := []struct{ name, input string }{
+		{"bare arrow with no label", "A --> B"},
+		{"label with no spaces", "A -->|already| B"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.input, normalizeFlowchartBody(t, tc.input))
+		})
+	}
+}
+
+func TestFlowchartEdgeLabel_InnerQuote_StillSubstituted(t *testing.T) {
+	// The inner-quote case declines the UNQUOTING only. Skipping the
+	// substitution too was the defect: the label kept plain spaces and the
+	// arrow line bled through them, which is the exact thing the no-break
+	// space exists to stop.
+	const input = `flowchart TD
+A["n1"] -->|"q" w e "r"| B["n2"]`
+
+	got := normalizeFlowchartSource(input)
+	assert.Contains(t, got, `|"q"`+mermaidNBSP+`w`+mermaidNBSP+`e`+mermaidNBSP+`"r"|`,
+		"both quote layers survive, but every space is substituted")
+
+	art, err := renderMermaidSource(input, 120)
+	require.NoError(t, err)
+	assert.NotContains(t, art, "w│e", "the arrow line must not bleed through the label")
+}
+
+func TestFlowchartEdgeLabel_SurroundingPaddingTrimmed(t *testing.T) {
+	// Spaces around the label are the author's formatting around the `|`
+	// delimiters, not label text. Substituting them would make them
+	// permanent, invisible padding and widen the column the renderer
+	// reserves for the label.
+	assert.Equal(t,
+		"A -->|spaced"+mermaidNBSP+"out| B",
+		normalizeFlowchartBody(t, "A -->|  spaced  out  | B"))
+}
+
 func TestNormalizeFlowchartSource_WellFormedConstructs_NotDisturbed(t *testing.T) {
 	// Everything the corpus scan found working today. Each of these renders
 	// correctly through the vendored parser already, so the normalization pass
@@ -173,7 +260,7 @@ func TestNormalizeFlowchartSource_WellFormedConstructs_NotDisturbed(t *testing.T
 		{"full-line comment", "%% A --- B{not real syntax}"},
 		{"ampersand fan-out", "A --> B & C"},
 		{"node id with a dash", "my-node --> other-node"},
-		{"already normalized edge label", "A -->|does a thing| B[target]"},
+		{"already normalized edge label", "A -->|does" + mermaidNBSP + "a" + mermaidNBSP + "thing| B[target]"},
 		{"quoted label with a colon", `A --> B["GET /api/x: y"]`},
 		// Node ids that merely BEGIN with a dropped directive's keyword, and
 		// nodes named exactly after one. None of these is a directive, so none
@@ -189,7 +276,7 @@ func TestNormalizeFlowchartSource_WellFormedConstructs_NotDisturbed(t *testing.T
 		{"node named exactly click on the right of an arrow", "A --> click"},
 		{"directive keyword inside a node label", "A --> B[style guide]"},
 		{"directive keyword inside a quoted node label", `A --> B["classDef hot fill:#f9f"]`},
-		{"directive keyword inside an edge label", "A -->|classDef hot| B"},
+		{"directive keyword inside an edge label", "A -->|classDef" + mermaidNBSP + "hot| B"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -74,8 +74,25 @@ preview included, published to the user's own fork, never to `origin`.
   renders each subgraph as a separate diagram stacked under its own title. Covers the five-rule
   split decision and the render + stack + fallback workflow.
 - `app/ui/mdpreview_subgraph_test.go` — its tests.
+- `app/ui/mdpreview_nbsp.go` — the shared no-break-space substitution used by every mermaid
+  edge-label call site, replacing spaces so `mergeDrawings` in the vendored renderer treats the
+  cell as opaque instead of letting the arrow line or a crossing edge bleed through (see
+  "Edge-label rendering wiring" below).
+- `app/ui/mdpreview_nbsp_test.go` — its tests.
+- `app/ui/mdpreview_collision.go` — the edge-label collision detector plus the LR-direction
+  retry gate: counts how many distinct labels land too close together on one row of rendered
+  art, and decides whether a second render with the direction flipped to LR is strictly better.
+- `app/ui/mdpreview_collision_test.go` — its tests.
+- `app/ui/mdpreview_wrap.go` — the node-label wrap pass: breaks long node labels over several
+  lines with `<br/>` so a diagram whose art overflows the pane is re-rendered narrower, gated on
+  the art actually overflowing and kept only when it is strictly narrower and no more colliding
+  (see "Long node labels are wrapped" below).
+- `app/ui/mdpreview_wrap_test.go` — its tests.
+- `app/ui/mdpreview_corpus_test.go` — the differential corpus harness used to verify both fixes
+  against a large body of real fences; skipped unless `REVDIFF_MERMAID_CORPUS` is set, so it
+  never runs in `make test` or CI.
 
-A clean rebase never conflicts on these eight files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these fifteen files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -283,6 +300,32 @@ caution, not a safety condition, and it is gone.
 - `mdPreviewAllowedActions` is unchanged. `next_item`/`prev_item` stay blocked — see the expanded
   comment above the map, and the "must leave preview before changing file" limitation below.
 
+**Edge-label rendering wiring (no-break spaces and the LR collision retry, added later — see
+`docs/plans/20260805-mermaid-edge-label-rendering.md`):**
+
+- `app/ui/mdpreview_transpile.go`
+  - `mermaidEdgeLabel` — the `strings.ReplaceAll(s, " ", "·")` substitution and the
+    `mermaidDotRun` collapse were removed; the function now calls `mermaidNBSPSubstitute`
+    (`mdpreview_nbsp.go`) as its sole space-handling step, after `mermaidSafeText` and before
+    the rune/byte cap.
+  - `renderMermaidSource` — after the existing `mermaidcmd.RenderDiagram(toRender, nil)` call,
+    the result is passed through `mermaidRetryLRIfColliding(toRender, rendered, paneWidth,
+    func(s string) (string, error) { return mermaidcmd.RenderDiagram(s, nil) })` before the
+    `return rendered, nil`. `paneWidth` is the same value the transpilers already receive, and
+    the retry needs it to refuse a flip that would push a fitting diagram off the pane. The
+    transpile and subgraph-split paths above that call are untouched — the retry only ever sees
+    the final whole-source (or per-subgraph) render.
+- `app/ui/mdpreview_flowchart.go`
+  - `unquoteFlowchartEdgeLabel` renamed to `normalizeFlowchartEdgeLabel` and restructured so the
+    no-break-space substitution runs on every path that has a label, not only the
+    previously-quoted one; it is now the single chokepoint for both edge-label spellings
+    (`normalizeFlowchartLine` normalizes links before nodes, so an inline `-- label -->` has
+    already become `-->|label|` by the time this function runs).
+
+Both files are already patch-owned (listed under "New files added by the patch" above), so none
+of this carries rebase conflict risk against upstream — recorded here for the call-flow map,
+same reasoning as the "Diagram transpile wiring" and "Horizontal panning wiring" entries above.
+
 **Test-only, mechanical, not part of the feature itself:**
 
 - `app/keymap/keymap_test.go` — asserts `P` resolves to `ActionTogglePreview`
@@ -348,10 +391,12 @@ What `normalizeFlowchartSource` rewrites, and what each one did before:
   the common way, straight after the arrow, matches neither `flowchartLinkPattern` alternative:
   the arrow matches the bare-link alternative and the `|...|` after it was copied through
   untouched. The rewrite happens in the node pass, on each arrow segment that pass already
-  consumes whole (`unquoteFlowchartEdgeLabel`). Exactly one layer comes off, and only when the
-  label opens and closes with a quote and carries none inside — so `|"a" and "b"|` is left whole
-  rather than half-eaten, and the pass stays a fixed point, because what it writes back can never
-  be stripped a second time.
+  consumes whole (`normalizeFlowchartEdgeLabel`). Exactly one layer comes off, and only when the
+  label opens and closes with a quote and carries none inside — so `|"a" and "b"|` keeps both
+  quote layers rather than being half-eaten, and the pass stays a fixed point, because what it
+  writes back can never be stripped a second time. Declining to unquote does NOT decline the
+  no-break-space substitution: the two decisions are independent, and a label that keeps its
+  quotes bleeds `─` through its spaces exactly like any other.
 - **Styling and layout directives → dropped.** `style`, `classDef`, `class`, `linkStyle`, a
   standalone `direction` (the one written inside a `subgraph`), and the interaction directives
   `click` / `href` / `callback`. Each described how the diagram should look or behave, which the
@@ -487,12 +532,242 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   render still wider than the pane: only whole columns move, so a box straddling the edge is
   still cut mid-glyph until you pan past it, and prose (already wrapped to the pane by glamour)
   goes blank once you pan past its end.
-- **Spaces inside an edge label render as `─` (dash) on the arrow line.** When a label like
-  `"listVariants (segment coords)"` is drawn on top of an arrow line, space characters do not
-  paint — the arrow line shows through underneath. This is the vendored `mermaid-ascii`
-  renderer's `drawText` function, not the transpiler or normalizer. Fixing it requires changing
-  the vendored drawing code. Workaround: use non-breaking spaces or replace spaces with other
-  characters when the label must sit on an arrow.
+- ~~**Spaces inside an edge label render as `─` (dash) on the arrow line.**~~ **FIXED — every
+  edge-label space is now a no-break space, not a plain one** (see
+  `docs/plans/20260805-mermaid-edge-label-rendering.md` and `mdpreview_nbsp.go`'s doc comment).
+  U+00A0 is not the byte `" "`, so `mergeDrawings` in the vendored renderer treats the cell as
+  opaque and keeps it instead of letting the arrow line or a crossing edge bleed through, while
+  terminals still draw it as a blank. Four costs are accepted in exchange: art copied out of the
+  terminal carries no-break spaces rather than plain ones; a small number of fonts render U+00A0
+  visibly instead of blank; on the plain-flowchart path a run of spaces inside a label collapses
+  to one, so deliberate spacing is lost; and on that same path the label is one byte per space
+  wider than before, because the vendored renderer reserves an edge label's column width with
+  `len()` and U+00A0 is 2 bytes where a space is 1 (`A -->|"read as fallback"| B` comes out 23
+  columns against 21 for `read_as_fallback`, and is drawn a column left of true centre). The
+  transpiled path pays neither of the last two — it already substituted a 2-byte `·`, and
+  `mermaidSafeText` had already collapsed its whitespace runs. Measured across the corpus (see
+  "Corpus verification result" under Progress Tracking in the plan above): the substitution
+  changed the rendered art of 83 of 231 fences.
+- **A decision node with three or more labeled out-edges can still put two labels where the
+  reader cannot tell them apart, when the diagram's direction cannot be flipped, the flip
+  doesn't help, or the flip would blow a diagram that fitted the pane up to more than three
+  times its width.** The
+  complete fix is in the vendored `drawTextOnLine` (reserve occupied cells, nudge the label
+  along its line), which would mean forking `mermaid-ascii`. Instead, `renderMermaidSource`
+  renders once, counts collisions with `mermaidCollisionCount` (`mdpreview_collision.go`), and
+  keeps a second render with the direction flipped to `LR` only when ALL of: the source has a
+  header `mermaidFlipDirectionToLR` accepts — `TD`, `TB`, or a bare `flowchart`/`graph` with no
+  direction at all, which the renderer lays out top-down and which the flip fixes by inserting
+  the keyword (`RL`/`BT`/`LR` are left alone, and so is a missing or malformed header); the
+  first render collides at least once; the flipped render succeeds and is non-blank; the flip
+  does not blow a diagram that fitted `paneWidth` up to more than `mermaidFlipBlowupRatio`
+  (3.0) times its width (`mermaidFlipWidthAcceptable`, whose rule in columns is
+  `mermaidWidthTradeAcceptable`); the flipped render collides STRICTLY FEWER times than the
+  first. The header is tested before
+  the collision count, so the label scan never runs on a source whose `|...|` is not an edge
+  label at all. Any gate failure keeps the first render, so a fence with no collisions never
+  renders twice and every failure path degrades to today's output — including a panic in the
+  second render, which `mermaidRetryLRIfColliding` catches itself rather than letting it reach
+  `renderMermaidBlock`'s outer recover, whose fallback is the fence's raw source text.
+  **The detector counts two collision shapes**, and needs both: two surviving labels crowded
+  into one corridor, and one label painted over another so neither survives as a word
+  (`collection` over `single composite` leaves `sincollectionite`). The crowded shape is flagged
+  when two distinct labels on one row are closer than the smaller of either label's own length
+  and 8 columns — a label's own length is in the threshold because `no` and `yes` five columns
+  apart read as separate words while `collection` and `single composite` four columns apart do
+  not. The overwriting shape is flagged when a matched label has leftover letters against it
+  that spell part of a different label. A match is otherwise dropped when it overlaps a longer
+  label's span or butts against text unrelated to any label — but that drop is not reliable: see
+  the next entry for the measured case where ordinary node text is caught anyway, because
+  "unrelated to any label" is checked against every OTHER label's text, not against whether the
+  row has an edge label on it at all.
+  **Why the width guard is a ratio and not a fit test.** It used to decline any flip that took
+  a diagram fitting `paneWidth` and made it not fit, and that guarded the wrong thing. The
+  reader can pan (`scroll_left` / `scroll_right` are both on `mdPreviewAllowedActions`), so a
+  wider diagram costs keystrokes, while a diagram whose labels are painted over each other
+  cannot be read at any pane width and panning does not bring it back. The guard exists only to
+  bound the damage when the DETECTOR is wrong — a phantom collision sending a readable diagram
+  off to several times its size for no gain — so it has to trigger on absurdity, not on width.
+  The fit-only form suppressed the feature's headline fix inside a window of pane widths, which
+  is what the ratio replaces it for. Measured on `testdata/mermaid/collision-fitting-td-render.mmd`
+  (the section-1 fence of the author's sample plan) on 2026-08-05:
+
+  | pane width | kept art width | is the label intact? |
+  |---|---|---|
+  | 80, 120 | 238 (flip kept) | yes |
+  | 160, 200 | 150 (first render kept) | NO — the row reads `├◄───collectioningle composite──────────────┤`: `collection` painted over `single composite`, the `s` destroyed |
+  | 240, 300, 400 | 238 (flip kept) | yes |
+
+  At 160 and 200 the top-down render is 150 columns, so it FITS, so the old guard declined the
+  flip and left the wrecked art on screen; below 160 the first render did not fit and above 200
+  the flip did, so both ends were fine and only the middle was broken. That fence widens by
+  238/150 = 1.6x, while the phantom-collision blowup the guard was added for widens by
+  330/71 = 4.6x, so 3.0 separates them with more than a factor of margin on each side
+  (`TestMermaidFlipBlowupRatio_SeparatesTheMeasuredCases` fails if a later edit moves the
+  constant near either).
+  **Measured across the corpus** (15254 markdown files, 233 distinct fences — the list is a live
+  snapshot of the author's disk, 231 when the retry shipped — with the old fit-only gate and the
+  ratio gate run side by side in one binary, same detector over both outputs, on 2026-08-05):
+  at pane width 120, 6 fences still carried a colliding label under the fit-only gate and 3 do
+  under the ratio gate; 3 fences change their kept render, all of them from the first render to
+  the flip: 103 → 150 columns (1.46x, 2 collisions → 0), 100 → 121 (1.21x, 1 → 0) and 59 → 170
+  (2.88x, 1 → 0). Each was checked by eye and each is a real collision, not a phantom: the three
+  first renders carry `├◄ddecision==abortrove`, `├◄──materializeeted` and
+  `an agent acknowledges───────Publish Selected`. No fence in the corpus widens past the ratio
+  as a result of this change — by construction it cannot, since the ratio is the gate. At pane
+  width 160 the same run gives 8 colliding under the fit-only gate against 3 under the ratio
+  gate, with 5 fences changing their kept render (the three above plus 151 → 260 and 142 → 173).
+  The 3 left at either width are 2 that take the subgraph-stacked path, which returns before the
+  retry, and one 115 → 328 fence whose flip collides just as often as its first render, so the
+  strict `flippedCount < firstCount` comparison declines it and the width guard never decides it
+  at all. (An earlier note here counted that fence among "4 declined by the width guard"; that
+  was true of the gate ORDER — the width gate runs first — but only 3 of those 4 were actually
+  held back by width.) Widths on the flips that were already kept before this change, at pane
+  width 120: 137 → 79, 135 → 111, 121 → 112, 155 → 159, 57 → 86, 151 → 260, 148 → 279,
+  207 → 281 (the repo's own `collision-three-branches.mmd` fixture) and 136 → 286.
+  A fence already written `LR`
+  that still collides is not helped — there is no further direction to try. The cost of a fence
+  that DOES collide is two full renders every time it is drawn, and preview has no render cache
+  by design (see `renderMarkdownPreview`'s doc comment), so a pan keypress across such a
+  document pays both.
+- **The collision detector itself is inaccurate in both directions, and this was found and
+  accepted before shipping, across three review rounds that each reproduced it by running the
+  real functions — not discovered later.** It misses real collisions and it invents ones that
+  are not there.
+
+  It misses short labels. `mermaidLabelFragmentMinRunes = 3` treats a leftover overwrite run of
+  two runes or fewer as ordinary node text, not as wreckage, so a short label painted cleanly
+  over another counts zero. A real `flowchart TD` with branch labels `yes`/`no`/`hold` renders
+  the row `│ Is it ready? ├─holdo─┬───┐` — `hold` painted over `no`, leaving only the `o` — and
+  `mermaidCollisionCount` returns 0 for it, so the retry never fires, even though the LR render
+  of that same fence is both collision-free and narrower (30 columns against 43): a strictly
+  better render, silently discarded. Reproduced the same way on `aa`/`bb`/`cc` → `├─ccb─┬──┐`,
+  `aaa`/`bbb`/`ccc` → `├─cccbb┬──┐`, and `aa`/`bb`/`cc`/`dd` → `├─ddb─┬──┐`. A leftover run of 0,
+  1 or 2 runes counts zero every time; one of 3 or more counts one.
+
+  It also misses multi-word labels — exactly the labels the no-break-space half of this change
+  exists for. `mermaidNeighborRun` stops at the first non-word rune, and a multi-word label's own
+  no-break spaces ARE non-word runes, so an overwrite of a multi-word label breaks into runs of
+  0-2 letters on both sides and is indistinguishable from an undamaged draw. `yes` painted over
+  `a b c d` at all five possible offsets (`yes c d`, `ayesc d`, `a yes d`, `a byesd`, `a b yes`)
+  counts zero at every one.
+
+  In the other direction, it invents collisions on rows that carry no edge label at all.
+  `mermaidClassifyHit` calls leftover letters an overwrite whenever they happen to be a substring
+  of some OTHER edge label anywhere in the fence, with no check that the row it is looking at is
+  an edge-label row in the first place. With labels `no` and `nothing to do` present in one
+  fence, the plain art row `│ Queue drained: nothing pending │` counts 1: `no` matches inside
+  `nothing`, and the leftover `thing` happens to be a substring of `nothing to do`. A 10-node
+  diagram with one repeated word reported 9 collisions with zero real ones.
+
+  It is also inconsistent by construction: `mermaidCollisionLimit`'s `min(len(a), len(b), 8)`
+  makes detection sensitivity scale with label length, roughly 8x between the shortest and
+  longest labels measured. Smallest gap still reported CLEAN, measured pair by pair: `a`/`b` at
+  1 column apart, `no`/`yes` at 2, `add`/`del` at 3, `open`/`close` at 4 — against 8 columns for
+  the `collection`/`single composite` pair the cap was built for. Two 2-character branch labels
+  two columns apart in one arrow corridor (`├◄──no──yes──┤`) are reported collision-free.
+
+  Below the reporting bar but worth recording alongside these: `mermaidPipedEdgeLabel`'s
+  character class excludes `"`, so a quote-carrying label such as `|"a" and "b"|` cannot match
+  and is dropped from the label set entirely — if a fence has exactly two labels and one of them
+  is quote-carrying, collision detection is disabled for that whole fence.
+
+  **Blast radius.** A missed collision is not a regression — it leaves today's output exactly as
+  it was before this feature existed. A phantom collision costs one extra vendored render (about
+  9ms, see the corpus note above) and can only ever fire on a fence the detector itself believes
+  collides — a clean fence's bytes never change. Even a wrongly-triggered flip is still bounded by
+  `mermaidFlipWidthAcceptable`: it cannot blow a fence that fit the pane up to more than three
+  times its width, the same guard that bounds a correctly-triggered one. A phantom collision can
+  now cost a fence that fit the pane its fit, up to that ratio — that is the deliberate price of
+  the ratio rule, paid so a real collision inside the same window is fixed rather than left
+  wrecked. What a phantom collision CAN do is win the strict
+  `flippedCount < firstCount` comparison on noise rather than on a real fix, since that comparison
+  is made on counts that can themselves be wrong in either direction.
+
+  **Direction for a real fix.** The detector's premise is "find each label in the art and measure
+  the gap between hits," and that premise is what produces errors in both directions at once: the
+  gap measurement is unreliable for short and multi-word labels, and matching a leftover run
+  against *any* label's text — rather than against evidence that a specific label was actually
+  destroyed — is what lets ordinary node text pass as a collision. Better evidence is that a
+  specific SOURCE label does not appear intact anywhere in the art: that test cannot fire on node
+  text at all, because node text was never a source label to begin with, and it does not depend on
+  how long the label is or how many words it has.
+- **Long node labels are wrapped, but only on a fence whose art already overflows the pane.** A
+  box is as wide as its widest label line, so one long label drags the whole drawing past the
+  pane and the reader has to pan to read a diagram that would otherwise fit. The renderer already
+  honours `<br/>` inside a node label (`newGraphLabel` in the vendored `label.go` splits on it),
+  so `mermaidNarrowIfOverflowing` (`mdpreview_wrap.go`) re-renders the source with long node
+  labels broken over several lines. It runs LAST, after the LR retry, and wraps the source in
+  whichever direction that retry kept — the retry is a correctness pass (labels painted over each
+  other cannot be read at any width), the wrap only a readability one (a wide diagram is readable,
+  it just costs panning), so the wrap must never be able to undo a flip.
+
+  **Why the overflow gate.** Unlike the LR retry, which only fires on a fence the detector already
+  believes is broken, wrapping would otherwise change every diagram carrying a long label,
+  including the great majority that render perfectly today. So the art is measured first and a
+  fence that FITS `paneWidth` returns byte-identical, without a second render
+  (`TestRenderMermaidSource_FittingFenceIsByteIdenticalToTheUnwrappedRender`). Past that gate,
+  each rung of `mermaidWrapTargets` — a quarter of the pane, then an eighth, both clamped into
+  16..34 runes — is rendered widest-first, and a rung's render is kept only when it is STRICTLY
+  narrower than the art it replaces and does not collide MORE times (same `mermaidCollisionCount`
+  the retry is gated on). The first rung that fits the pane wins outright, so the fewest labels
+  are broken; if none fits, the narrowest candidate is kept, since the reader still pans across
+  fewer columns. Two rungs is the whole ladder because each costs a render.
+
+  **What is never wrapped**: a label that already contains an author line break (`<br>` in any
+  spelling, a literal `\n`, a real newline) — that is the author's own line breaking; an EDGE
+  label — the renderer does not honour `<br/>` there, it prints the five characters literally, and
+  the walk consumes each arrow together with its `|label|` before any byte can be read as a node
+  shape; a single word, however long — a broken identifier or path reads worse than a wide box;
+  a subgraph header or an `accTitle`/`accDescr`; and any source whose diagram kind is not
+  `graph`/`flowchart`. Breaks are taken on ASCII space and tab only, never on U+00A0, so an edge
+  label that somehow reached the wrapper could not be broken anyway (`strings.Fields` would split
+  on U+00A0, which is why the split uses its own predicate).
+
+  **Measured on `testdata/mermaid/collision-three-branches.mmd`** at pane 160, where the LR retry
+  has already won and so LR is the direction wrapped. The same target buys back very different
+  width in the two directions, which is why the targets are a ladder rather than one number:
+
+  | target | TD width | LR width |
+  |---|---|---|
+  | none | 207 | 281 |
+  | 40 | 157 | 229 |
+  | 34 | 136 | 212 |
+  | 28 | 122 | 188 |
+  | 22 | 106 | 164 |
+  | 20 | 101 | 150 |
+  | 16 | 90 | 135 |
+
+  In production that fixture goes 281 → 150 columns at pane 160 (the second rung, 20, wins; the
+  first rung's 212 is kept as the running best until it does), 25 → 39 rows, 0 collisions before
+  and after. Height roughly doubles, and that is the intended trade: the preview scrolls
+  vertically for free while sideways it moves one column per arrow-key press. The renderer adds a
+  blank row between label lines (`graphLabelLineGap`), so a two-line label costs three rows.
+
+  **Measured across the corpus** (15254 markdown files, 234 distinct fences, pane width 120, base
+  `681f053` against this change, 2026-08-05): **43 of 234 fences change, all 43 narrower, 0
+  wider**; width delta min 2, median 22, max 146, mean 37.8 columns; 14 fences that overflowed
+  the 120-column pane now fit inside it. **0 fences gain a collision** — the number the feature
+  ships or does not ship on. 0 panics, 0 timeouts, 0 blank renders and the same 24
+  unsupported-diagram-type errors on both builds, and no word visible in the base art disappears
+  from the new art on any of the 43. Of the 102 fences that overflow the pane on the base build,
+  44 have no wrappable label at all (short labels, or the author's own `<br/>` already), 14
+  produce no rung narrower than what they had, and 44 keep a wrapped render — 29 of those on the
+  second rung. The collision veto is not dead code: on one fence the first rung narrowed 277 → 198
+  columns while cramming `nothing left: whole-list write` and `index or '-': item add/remove/reorder`
+  into one corridor, and was declined for it.
+
+  **The cost** is up to two extra vendored renders per overflowing fence, every time the fence is
+  drawn — preview has no render cache by design (see `renderMarkdownPreview`'s doc comment), so a
+  pan keypress across such a document pays them again. A fitting fence pays nothing.
+
+  **Limitations.** A wrap cannot fix a diagram whose width comes from its node COUNT rather than
+  its label lengths: 14 corpus fences overflow with labels short enough that no rung is narrower.
+  A fence whose labels are all single long words (an identifier, a path, a URL) is declined
+  outright. The floor of 16 runes is a real floor — on a very narrow pane the art still overflows,
+  and the pass keeps the narrowest candidate rather than promising a fit. And the height cost is
+  unbounded in principle: a diagram with many long labels can grow past a screenful, which is
+  cheap to scroll but does mean the whole diagram is no longer visible at once.
 - **TOC active-section highlight is stale during preview** — see the `app/ui/view.go` note under
   "Review phase 4 wiring" above.
 - **You must leave preview before changing file.** Preview now works in a multi-file review, but no

@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -160,8 +162,15 @@ func TestRenderMermaidFences_SkipsDividerLines(t *testing.T) {
 // sanity check below) exceeds every narrow width used in this file's tests,
 // so those tests actually exercise the anti-reflow behavior instead of
 // vacuously passing because the diagram happened to already fit.
-const wideMermaidSrc = "graph TD\n    A[This is a moderately long label for node A] --> " +
-	"B[This is a moderately long label for node B]"
+//
+// Each label is one hyphenated word ON PURPOSE, for the same reason
+// mdPreviewWideDoc's are: these tests are about glamour leaving overflowing art
+// alone, and the node-label wrap pass (mdpreview_wrap.go) would otherwise
+// narrow the art at the deliberately narrow widths they render at. A label
+// with no space to break on is declined by that pass, so the art stays the
+// width these tests need.
+const wideMermaidSrc = "graph TD\n    A[This-is-a-moderately-long-label-for-node-A] --> " +
+	"B[This-is-a-moderately-long-label-for-node-B]"
 
 func TestRenderMarkdownDocument_TableRendersWithAlignedBorders(t *testing.T) {
 	doc := "| a | b |\n|---|---|\n| 1 | 2 |\n"
@@ -316,6 +325,121 @@ func TestRenderMarkdownDocument_TwoDiagrams_LandInOrderOnOwnPlaceholders(t *test
 	require.GreaterOrEqual(t, iA, 0, "first diagram art must be present")
 	require.GreaterOrEqual(t, iB, 0, "second diagram art must be present")
 	assert.Less(t, iA, iB, "each diagram's art must land on its own placeholder, in document order")
+}
+
+// readMermaidFixture loads one of the two real-world fences under
+// testdata/mermaid/ — collision-three-branches.mmd and bleed-crossing-edge.mmd,
+// copied verbatim from the user document that motivated both the collision
+// detector (task 4) and the no-break-space substitution (tasks 2-3). The
+// source document itself is a temp file outside the repo and is never
+// referenced from a test, only from this plan's task 6 note; the fixtures
+// here are the durable copy.
+func readMermaidFixture(t *testing.T, name string) string {
+	t.Helper()
+	path := filepath.Join("testdata", "mermaid", name)
+	b, err := os.ReadFile(path) //nolint:gosec // fixed test path
+	require.NoError(t, err)
+	return strings.TrimRight(string(b), "\n")
+}
+
+func TestRenderMarkdownDocument_CollisionFixture_RendersWithZeroCollisions(t *testing.T) {
+	source := readMermaidFixture(t, "collision-three-branches.mmd")
+	doc := "```mermaid\n" + source + "\n```\n"
+
+	got := renderMarkdownDocument(mdLines(doc), 120, false)
+	stripped := xansi.Strip(got)
+
+	toRender := source
+	if transpiled, ok := transpileMermaid(source, 120); ok {
+		toRender = transpiled
+	}
+	collisions := mermaidCollisionCount(toRender, stripped)
+	assert.Equal(t, 0, collisions,
+		"the three-branch fixture must render with zero label collisions after the LR retry\nart:\n%s", stripped)
+
+	// The assertion above uses the same detector the retry is gated on, so on
+	// its own it can only say "the detector is satisfied". This one is
+	// independent of it: the two labels that shared a row in the broken render
+	// must now be readable — either on different rows, or with real space
+	// between them.
+	assertLabelsReadable(t, stripped,
+		mermaidNBSPSubstitute("collection"), mermaidNBSPSubstitute("single composite"))
+}
+
+// assertLabelsReadable checks two edge labels are not crammed into one arrow
+// corridor, without consulting mermaidCollisionCount: it finds every row
+// carrying both labels and requires a visible run of separator between them.
+func assertLabelsReadable(t *testing.T, art, first, second string) {
+	t.Helper()
+	shared := 0
+	for row := range strings.SplitSeq(art, "\n") {
+		i, j := strings.Index(row, first), strings.Index(row, second)
+		if i < 0 || j < 0 {
+			continue
+		}
+		shared++
+		lo, hi := i+len(first), j
+		if j < i {
+			lo, hi = j+len(second), i
+		}
+		assert.GreaterOrEqual(t, hi-lo, mermaidCollisionGap,
+			"%q and %q share a row with only %d columns between them:\n%s", first, second, hi-lo, row)
+	}
+	assert.Equal(t, 0, shared, "the two labels must not share a row at all after the flip:\n%s", art)
+}
+
+// TestRenderMarkdownDocument_FittingTDFixture_LabelSurvivesAtAPaneItFits is the
+// regression pin for the pane-width window the old fit-only width gate opened.
+// This fixture's top-down render is 150 columns wide, so at a 160-column pane it
+// FITS — and the gate used to read that as "leave it alone", throwing away the LR
+// flip and leaving the reader with `collection` painted over `single composite`
+// (`├◄───collectioningle composite──────┤`, the `s` destroyed). Measured at the
+// time: labels intact at panes 80, 120, 240, 300 and 400, wrecked at 160 and 200.
+// The gate now objects on the width RATIO instead (238/150 is 1.59), so the flip
+// is kept at every one of those pane widths.
+func TestRenderMarkdownDocument_FittingTDFixture_LabelSurvivesAtAPaneItFits(t *testing.T) {
+	source := readMermaidFixture(t, "collision-fitting-td-render.mmd")
+	doc := "```mermaid\n" + source + "\n```\n"
+
+	got := renderMarkdownDocument(mdLines(doc), 160, false)
+	stripped := xansi.Strip(got)
+
+	// The no-break-space substitution runs before the render, so the label
+	// reaches the art with U+00A0 where its space was.
+	assert.Contains(t, stripped, mermaidNBSPSubstitute("single composite"),
+		"the `single composite` label must reach the art intact at a pane the top-down render fits\nart:\n%s", stripped)
+	assert.Contains(t, stripped, "collection",
+		"the `collection` label must reach the art intact too\nart:\n%s", stripped)
+}
+
+func TestRenderMarkdownDocument_BleedFixture_LabelReachesArtIntact(t *testing.T) {
+	source := readMermaidFixture(t, "bleed-crossing-edge.mmd")
+	doc := "```mermaid\n" + source + "\n```\n"
+
+	got := renderMarkdownDocument(mdLines(doc), 120, false)
+	stripped := xansi.Strip(got)
+
+	wantLabel := mermaidNBSPSubstitute("index or '-': item add/remove/reorder")
+	assert.Contains(t, stripped, wantLabel,
+		"the crossing-edge label must reach the art with its spaces intact, no character cutting through it")
+	assert.NotContains(t, stripped, "item│add/remove/reorder",
+		"the crossing edge's │ must not bleed through the label")
+}
+
+func TestRenderMarkdownDocument_Fixtures_NoPanicNoBlankRender(t *testing.T) {
+	for _, name := range []string{"collision-three-branches.mmd", "bleed-crossing-edge.mmd", "collision-fitting-td-render.mmd"} {
+		t.Run(name, func(t *testing.T) {
+			source := readMermaidFixture(t, name)
+			doc := "```mermaid\n" + source + "\n```\n"
+
+			var got string
+			assert.NotPanics(t, func() {
+				got = renderMarkdownDocument(mdLines(doc), 120, false)
+			})
+			stripped := xansi.Strip(got)
+			assert.NotEmpty(t, strings.TrimSpace(stripped), "fixture must not render blank")
+		})
+	}
 }
 
 func TestRenderMarkdownPreview_NoColors_ProducesNoANSI(t *testing.T) {
@@ -1340,15 +1464,21 @@ func TestStatusBar_MdPreviewOn_SuppressesHunkAndLineSegments(t *testing.T) {
 // and the normal diff path must keep its own unclamped behavior.
 
 // mdPreviewWideDoc renders to art 99 cells wide — wider than the 80-column
-// viewport mdPreviewTestModel sets up. "alpha start node" sits at the left
-// edge and "omega far right node" at columns 76..97, so it is cut mid-word at
+// viewport mdPreviewTestModel sets up. "alpha-start-node" sits at the left
+// edge and "omega-far-right-node" at columns 76..97, so it is cut mid-word at
 // offset 0 and only fully readable once panned.
+//
+// Every label is a single hyphenated word ON PURPOSE. This fixture is about
+// panning art that is wider than the pane, and art that is wider than the pane
+// is exactly what the node-label wrap pass (mdpreview_wrap.go) tries to narrow
+// — it declines a label with no space to break on, so the art stays as wide as
+// this fixture needs whatever the pane width is.
 const mdPreviewWideDoc = "# Title\n\n" +
 	"```mermaid\n" +
 	"graph LR\n" +
-	"    A[\"alpha start node\"] --> B[\"beta middle node\"]\n" +
-	"    B --> C[\"gamma later node\"]\n" +
-	"    C --> D[\"omega far right node\"]\n" +
+	"    A[\"alpha-start-node\"] --> B[\"beta-middle-node\"]\n" +
+	"    B --> C[\"gamma-later-node\"]\n" +
+	"    C --> D[\"omega-far-right-node\"]\n" +
 	"```\n\nclosing prose\n"
 
 func TestApplyMdPreviewScroll_OffsetZero_ContentThatFits_ByteIdentical(t *testing.T) {
@@ -1505,16 +1635,16 @@ func TestPanMarkdownPreview_RevealsArtPastThePaneEdge(t *testing.T) {
 	m.toggleMarkdownPreview()
 
 	atZero := m.renderMarkdownPreview()
-	require.Contains(t, atZero, "alpha start node", "fixture sanity: the left-hand box is visible at offset 0")
-	require.NotContains(t, atZero, "omega far right node", "fixture sanity: the right-hand box must start off-pane")
+	require.Contains(t, atZero, "alpha-start-node", "fixture sanity: the left-hand box is visible at offset 0")
+	require.NotContains(t, atZero, "omega-far-right-node", "fixture sanity: the right-hand box must start off-pane")
 
 	for range 50 {
 		m.panMarkdownPreview(1)
 	}
 	panned := m.renderMarkdownPreview()
 
-	assert.Contains(t, panned, "omega far right node", "panning right must bring the far box into view")
-	assert.NotContains(t, panned, "alpha start node", "the left-hand box must have scrolled off the left edge")
+	assert.Contains(t, panned, "omega-far-right-node", "panning right must bring the far box into view")
+	assert.NotContains(t, panned, "alpha-start-node", "the left-hand box must have scrolled off the left edge")
 }
 
 func TestDispatchAction_MdPreviewOn_ArrowKeysPanWithoutTouchingCursorOrStore(t *testing.T) {
