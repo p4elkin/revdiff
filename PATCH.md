@@ -7,23 +7,31 @@ playbook: what the patch touches, and how to carry it onto a new upstream releas
 Two different things both get called "master" in this repo, and this file means only the first
 one whenever it says "upstream":
 
-- **upstream** — `origin` = `umputun/revdiff` on GitHub, the real open-source project. This is
-  what `brew`/`go install` ship. The patch NEVER goes here, in any form, ever.
-- **the fork** — `fork` = `p4elkin/revdiff` on GitHub, the personal fork this patch lives in.
-  The local `master` branch tracks `origin/master` (so it can be kept in sync and PR'd from),
-  but it is also where fork-only feature branches (including `md-preview`) get merged together
-  before being pushed to `fork/master` — see "Integrating into the fork's master" below. That
-  push is a normal, expected use of this patch, not an exception to the no-upstream rule.
+- **upstream** — remote `upstream` = `umputun/revdiff` on GitHub, the real open-source project.
+  This is what `brew`/`go install` ship. The patch NEVER goes here, in any form, ever.
+- **the fork** — remote `origin` = `p4elkin/revdiff` on GitHub, the personal fork this patch
+  lives in. The local `master` branch tracks `origin/master`, i.e. the fork, so a bare
+  `git push` from `master` goes to the fork and cannot reach upstream by accident. `master` is
+  also where fork-only feature branches (including `md-preview`) get merged together before
+  being pushed — see "Integrating into the fork's master" below. That push is a normal,
+  expected use of this patch, not an exception to the no-upstream rule.
 
-Because the patch never goes to `origin`, it deliberately leaves every doc that describes the
+To take new upstream work, fetch it explicitly: `git fetch upstream`, then merge or rebase
+`upstream/master`. A plain `git pull` on `master` follows the fork and does not do this.
+
+(These remote names were swapped on 2026-08-11. Before that `origin` was upstream and the fork
+was `fork`, which meant a bare `git push` from `master` aimed at `umputun/revdiff`. Any older
+note or transcript using the old names is describing that layout, not this one.)
+
+Because the patch never goes to upstream, it deliberately leaves every doc that describes the
 released, brew-installed binary alone: `README.md`, `site/index.html`, `site/docs.html`, and
 the plugin reference docs under `.claude-plugin/` and `plugins/`. So the `P` key
 (`toggle_preview`), the `▤` status-bar icon, and the `--preview` flag appear in neither the
 README keybindings/options tables, nor `site/docs.html`, nor any plugin `config.md`/`usage.md`.
 That is on purpose, not an oversight: editing them would describe a feature to people running
 the real upstream binary, which does not have it — true whether those docs live on `md-preview`
-or get merged all the way to `fork/master`, since `fork/master` is still not what those docs are
-about. The `P` binding and `--preview` flag are discoverable at runtime instead, through the
+or get merged all the way to the fork's `master`, since the fork's `master` is still not what
+those docs are about. The `P` binding and `--preview` flag are discoverable at runtime instead, through the
 in-app help overlay (`?`), `--dump-keys`, and `--help`/`--dump-config`, all of which read the
 real keymap/options and so list them automatically in this build.
 
@@ -32,18 +40,18 @@ real keymap/options and so list them automatically in this build.
 `md-preview` rebases onto upstream tags directly (see "Rebase procedure" below) and is not
 itself pushed anywhere upstream. Separately, feature work meant for the fork as a whole —
 whether upstream-portable (like `--no-tree`) or preview-only (like `--preview`) — gets merged
-into the local `master` branch and pushed to `fork/master`:
+into the local `master` branch and pushed to the fork:
 
 ```sh
 git checkout master
-git fetch origin              # master tracks origin/master; re-sync if it has moved
+git fetch origin              # origin is the fork; master tracks origin/master
 git merge --no-ff md-preview  # or a feature branch, if the feature isn't on md-preview yet
 make test && make lint
-git push fork master
+git push origin master
 ```
 
-This is how `fork/master` ends up ahead of `origin/master`: it carries every fork-only feature,
-preview included, published to the user's own fork, never to `origin`.
+This is how the fork's `master` ends up ahead of `upstream/master`: it carries every fork-only
+feature, preview included, published to the user's own fork, never to upstream.
 
 ## Base
 
@@ -89,7 +97,7 @@ preview included, published to the user's own fork, never to `origin`.
 - `app/ui/mdpreview_srcmap_test.go` — its tests.
 - `app/ui/mdpreview_srcmap_corpus_test.go` — the env-gated corpus harness that measures alignment
   success rate and per-kind anchor counts over a real document tree (mirrors
-  `mdpreview_corpus_test.go`'s differential mermaid harness on `master`/`fork/master`, which this
+  `mdpreview_corpus_test.go`'s differential mermaid harness on the fork's `master`, which this
   branch predates — see "Preview annotations" → "Corpus measurement" below).
 - `app/ui/mdpreview_cache.go` — the single-entry render cache (`mdPreviewRenderCache`) that keys
   the base render and its source map on `(file.name, file.loadSeq, viewport.Width, noColors)`, plus
@@ -149,7 +157,7 @@ its site count differs — use the itemized list above as the actual hunk map.
 
 Same reasoning as the `P` binding and `▤` icon above — this is a preview-only option, so it is
 NOT added to `README.md`/`site/docs.html`/plugin `config.md` (which describe the released,
-upstream binary, no preview mode). It IS expected to reach `fork/master` via the merge described
+upstream binary, no preview mode). It IS expected to reach the fork's `master` via the merge described
 in "Integrating into the fork's master" — that section, not this one, is what decides where a
 feature ends up; this section only says why the docs stay untouched. Discoverable via `--help`
 and `--dump-config` in this build.
