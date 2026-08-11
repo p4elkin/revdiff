@@ -3,6 +3,8 @@ package ui
 import (
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/umputun/revdiff/app/annotation"
 	"github.com/umputun/revdiff/app/diff"
 )
@@ -53,25 +55,52 @@ func (m Model) mdPreviewPaintAnnotations(rendered string, srcMap mdPreviewSource
 // have to carry a map they will not read.
 func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPreviewSourceMap) (string, mdPreviewSourceMap) {
 	all := m.store.Get(m.file.name)
-	if len(all) == 0 {
+	liveIdx, liveOK := m.mdPreviewLiveInputTarget()
+	if len(all) == 0 && !liveOK {
 		return rendered, srcMap // nothing spliced, so every row kept its number
 	}
 
 	anchors := srcMap.blocks()
 	if !srcMap.Aligned || len(anchors) == 0 {
 		// the degraded path prepends one group and anchors nothing; there was no
-		// usable map to shift, and there is none to hand back either.
+		// usable map to shift, and there is none to hand back either. A live
+		// input has nowhere to go here either — startPreviewAnnotation and
+		// clickPreviewDiff both already refuse to start one when the map cannot
+		// anchor anything, so liveOK cannot be true in this branch in practice.
 		return m.mdPreviewAnnotateDegraded(rendered, all), mdPreviewSourceMap{}
 	}
 
 	annotationMap, fileComment := m.buildAnnotationMap()
 	blockRows := make([][]string, len(anchors))
+	liveCovered := false
 	for _, a := range all {
 		if a.Line == 0 {
 			continue // file-level: painted separately, always at the very top
 		}
 		bi := m.mdPreviewResolveBlock(srcMap, a)
 		blockRows[bi] = append(blockRows[bi], m.mdPreviewRenderOne(a, annotationMap)...)
+		if idx, ok := m.mdPreviewLineIndex(a.Line, a.Type); liveOK && ok && idx == liveIdx {
+			// mdPreviewRenderOne already routed through renderAnnotationOrInput for
+			// this exact idx, which draws the live input in place of the stored
+			// comment (see renderAnnotationOrInput's own annotating/diffCursor
+			// check) — editing an EXISTING annotation is covered by the loop
+			// above with no separate step needed.
+			liveCovered = true
+		}
+	}
+	// a brand-new annotation (nothing in the store yet for this line) has no
+	// entry in `all` for the loop above to iterate, so renderAnnotationOrInput
+	// was never called for it — without this, the input a reader is actively
+	// typing would stay invisible until the moment it is saved. anchorAtLine
+	// resolves the same containing-block case mdPreviewResolveBlock's own
+	// success path does; the idx==0 fallback only matters for a defensive
+	// out-of-range diffCursor, since every caller of startPreviewAnnotation and
+	// clickPreviewDiff targets an exact block's StartLine.
+	if liveOK && !liveCovered {
+		bi := max(srcMap.anchorAtLine(liveIdx), 0)
+		var b strings.Builder
+		m.renderAnnotationOrInput(&b, liveIdx, annotationMap)
+		blockRows[bi] = append(blockRows[bi], mdPreviewRowsFromBuilder(&b)...)
 	}
 
 	var top strings.Builder
@@ -197,6 +226,74 @@ func (m Model) mdPreviewLineIndex(line int, changeType string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// mdPreviewLiveInputTarget reports the diff-line index a currently-open
+// line-level annotation input targets, and whether one is open at all.
+// Mirrors renderAnnotationOrInput's own gate (m.annot.annotating &&
+// !m.annot.fileAnnotating && idx == m.nav.diffCursor) exactly, so the two
+// agree on what "the line being typed" means — file-level input is handled
+// separately by renderFileAnnotationHeader and has no block to attach to.
+func (m Model) mdPreviewLiveInputTarget() (int, bool) {
+	if !m.annot.annotating || m.annot.fileAnnotating {
+		return 0, false
+	}
+	if m.nav.diffCursor < 0 || m.nav.diffCursor >= len(m.file.lines) {
+		return 0, false
+	}
+	return m.nav.diffCursor, true
+}
+
+// startPreviewAnnotation begins creating a line-level annotation anchored to
+// the block markdown preview is currently highlighting. It calls
+// mdPreviewHighlightAnchor directly — the exact function that decides which
+// block the on-screen highlight marks — rather than computing a second,
+// parallel notion of "the current block": keyboard aim (`a`/enter) and the
+// visible highlight can never disagree about which block gets the comment.
+//
+// Returns nil when there is nothing to anchor to (see mdPreviewHighlightAnchor:
+// an unaligned map, an empty document, or a viewport scrolled above the first
+// block) — annotation creation is simply refused, the same as pressing `a` on
+// a diff divider in source view.
+func (m *Model) startPreviewAnnotation() tea.Cmd {
+	_, srcMap := m.mdPreviewBody()
+	bi := m.mdPreviewHighlightAnchor(srcMap)
+	if bi < 0 {
+		return nil
+	}
+	return m.startPreviewAnnotationAt(srcMap.blocks()[bi].StartLine)
+}
+
+// startPreviewAnnotationAt is the shared core behind startPreviewAnnotation
+// (keyboard aim) and clickPreviewDiff (mouse aim): point the diff cursor at
+// idx — an index into m.file.lines, the same coordinate
+// mdPreviewBlockAnchor.StartLine uses — and run the ordinary startAnnotation
+// path, so a preview annotation is created and saved through the exact same
+// code a source-view one is (see saveAnnotation / m.diffLineNum).
+//
+// startAnnotation calls ensureLineAnnotationInputVisible, which does its own
+// diff-line-coordinate viewport math (cursorViewportY / wrappedLineCount) —
+// meaningless once the viewport shows a whole-document glamour render
+// instead of one row per source line. Saving and restoring
+// viewport.YOffset around the call is what keeps that math from silently
+// repositioning the preview; it is also what makes ActionConfirm safe to
+// dispatch regardless of pane focus (see the mdPreviewAllowedActions comment
+// on the confirm case) — the viewport never moves, so there is nothing for a
+// stale TOC-jump-shaped side effect to have gotten wrong.
+//
+// The content refresh after restoring the offset is what makes the freshly
+// started input actually visible: mdPreviewPaintAnnotationsTracked only draws
+// a live input row for the exact line this Model is currently annotating, so
+// without a fresh SetContent here the viewport would keep showing the
+// pre-annotation frame until the next keystroke's own re-render.
+func (m *Model) startPreviewAnnotationAt(idx int) tea.Cmd {
+	savedOffset := m.layout.viewport.YOffset
+	m.nav.diffCursor = idx
+	m.annot.cursorOnAnnotation = false
+	cmd := m.startAnnotation()
+	m.layout.viewport.SetYOffset(savedOffset)
+	m.layout.viewport.SetContent(m.renderDiff())
+	return cmd
 }
 
 // mdPreviewRowsFromBuilder splits a throwaway builder's accumulated output —

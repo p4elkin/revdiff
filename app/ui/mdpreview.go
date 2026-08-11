@@ -740,9 +740,12 @@ func (m *Model) panMarkdownPreview(direction int) {
 // m.modes.mdPreview is on. The bool reports whether preview handled the
 // action: true means dispatchAction returns immediately (either the action
 // was blocked, or preview ran it here), false means the action is allowed and
-// falls through to the ordinary dispatch. There is no tea.Cmd in the return:
-// nothing preview serves itself is asynchronous — a pan is a pure state
-// change plus a viewport content swap, both done in place.
+// falls through to the ordinary dispatch. The tea.Cmd return exists for
+// exactly one case: ActionConfirm starts an annotation input, whose textinput
+// Focus() returns a cmd that must reach the Update loop the same way
+// handleEnterKey's does in source view. Every other action handled here is a
+// pure state change plus a viewport content swap, done in place — their cmd
+// is always nil.
 //
 // The two pan actions are routed here rather than left to fall through, and
 // that detour is required, not stylistic: scroll_right doubles as the
@@ -764,44 +767,47 @@ func (m *Model) panMarkdownPreview(direction int) {
 // they look like — move the viewport — and are served by shifting YOffset
 // directly. Without this, the only way to read past the first screen was
 // J/K, and every key a reader reaches for first was silently dead.
-func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, bool) {
+func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, bool) {
 	if !mdPreviewActionAllowed(action) {
-		return m, true
+		return m, nil, true
 	}
 	switch action {
+	case keymap.ActionConfirm:
+		cmd := m.startPreviewAnnotation()
+		return m, cmd, true
 	case keymap.ActionScrollLeft:
 		m.panMarkdownPreview(-1)
-		return m, true
+		return m, nil, true
 	case keymap.ActionScrollRight:
 		m.panMarkdownPreview(1)
-		return m, true
+		return m, nil, true
 	case keymap.ActionDown:
 		m.scrollMarkdownPreview(1)
-		return m, true
+		return m, nil, true
 	case keymap.ActionUp:
 		m.scrollMarkdownPreview(-1)
-		return m, true
+		return m, nil, true
 	case keymap.ActionPageDown:
 		m.scrollMarkdownPreview(m.mdPreviewPageStep())
-		return m, true
+		return m, nil, true
 	case keymap.ActionPageUp:
 		m.scrollMarkdownPreview(-m.mdPreviewPageStep())
-		return m, true
+		return m, nil, true
 	case keymap.ActionHalfPageDown:
 		m.scrollMarkdownPreview(max(1, m.mdPreviewPageStep()/2))
-		return m, true
+		return m, nil, true
 	case keymap.ActionHalfPageUp:
 		m.scrollMarkdownPreview(-max(1, m.mdPreviewPageStep()/2))
-		return m, true
+		return m, nil, true
 	case keymap.ActionHome:
 		m.layout.viewport.GotoTop()
-		return m, true
+		return m, nil, true
 	case keymap.ActionEnd:
 		m.layout.viewport.GotoBottom()
-		return m, true
+		return m, nil, true
 	default: // every other allowed action runs through the ordinary dispatch
 	}
-	return m, false
+	return m, nil, false
 }
 
 // mdPreviewPageStep is the row count one page key moves the preview viewport.
@@ -842,13 +848,27 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 // mdPreviewAllowedActions is the fixed allowlist of keymap actions that stay
 // live while markdown preview is on. Every action not in this set is a no-op
 // while previewing (see mdPreviewActionAllowed and its call site in
-// dispatchAction, app/ui/model.go) because it would create, edit, delete, or
-// navigate to an annotation, or move/reposition m.nav.diffCursor — all
-// meaningless once the diff pane shows one whole-document glamour render
-// instead of one row per source line (see this plan's Solution Overview).
+// dispatchAction, app/ui/model.go). Most of the excluded set still shares one
+// reason — it would edit, delete, or navigate to an annotation by index, or
+// move/reposition m.nav.diffCursor in diff-line coordinates the preview
+// render does not have — but that is no longer a blanket rule: ActionConfirm
+// (a/enter) is allowed and DOES create an annotation, anchored to a block
+// through the source map instead of through m.nav.diffCursor's ordinary
+// meaning. Each remaining exclusion is explained on its own below rather than
+// folded into one shared sentence.
 //
 //   - toggle_preview must stay allowed so P can turn the mode back
 //     off — this is the mode's only exit key.
+//   - confirm (a/enter) creates a line-level annotation anchored to the block
+//     the scroll-following highlight currently marks (mdPreviewHighlightAnchor)
+//     — see startPreviewAnnotation, mdpreview_annotate.go. It is routed INSIDE
+//     handleMdPreviewAction above rather than left to fall through: its
+//     ordinary fall-through target, handleEnterKey, branches on pane focus,
+//     and the tree/TOC pane is reachable while previewing (nothing in this
+//     allowlist changes m.layout.focus), where handleEnterKey would run the
+//     TOC jump — reassigning m.nav.diffCursor and the viewport offset in
+//     diff-line coordinates, exactly the class of bug this allowlist exists
+//     to prevent.
 //   - quit / discard_quit / help / theme_select / toggle_tree are session and
 //     layout actions that never touch m.nav.diffCursor or the annotation
 //     store (theme_select and help open an overlay; toggle_tree only flips
@@ -920,6 +940,7 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 // navigate, then press P again on the next markdown file.
 var mdPreviewAllowedActions = map[keymap.Action]bool{
 	keymap.ActionTogglePreview:  true,
+	keymap.ActionConfirm:        true,
 	keymap.ActionQuit:           true,
 	keymap.ActionDiscardQuit:    true,
 	keymap.ActionHelp:           true,

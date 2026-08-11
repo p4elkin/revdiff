@@ -180,8 +180,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil // ignore release and motion while holding
 		}
 		if m.modes.mdPreview {
-			// preview is read-only: a click in either pane only repositions the
-			// source-line cursor (clickDiff / clickTree -> syncDiffToTOCCursor),
+			if zone == hitDiff {
+				return m.clickPreviewDiff(msg.Y)
+			}
+			// every other zone stays read-only in preview: a tree/TOC click would
+			// reposition the source-line cursor (clickTree -> syncDiffToTOCCursor),
 			// which is meaningless once the viewport shows the glamour render.
 			return m, nil
 		}
@@ -502,6 +505,31 @@ func (m *Model) pinDiffCursorTo(newOffset int) bool {
 	m.nav.diffCursor = idx
 	m.annot.cursorOnAnnotation = onAnnot
 	return true
+}
+
+// clickPreviewDiff handles a left-click press in the diff viewport while
+// markdown preview is on. A preview click has no diff cursor to move — it
+// maps the clicked row through the current source map (the same one
+// mdPreviewBody used to paint the frame on screen, so the click and what the
+// reader sees can never disagree) to the block that row belongs to, and
+// starts annotating it: the mouse equivalent of `a` aiming at the highlighted
+// block. anchorAtRow's own fallback resolves a row past the last block's
+// rows to that last block, so a click below the content still lands
+// somewhere sensible rather than doing nothing. A click when the map cannot
+// resolve any block at all (unaligned, or an empty document) is a no-op.
+func (m Model) clickPreviewDiff(y int) (tea.Model, tea.Cmd) {
+	if m.file.name == "" {
+		return m, nil
+	}
+	row := (y - m.diffTopRow()) + m.layout.viewport.YOffset
+	_, srcMap := m.mdPreviewBody()
+	bi := srcMap.anchorAtRow(row)
+	if bi < 0 {
+		return m, nil
+	}
+	m.layout.focus = paneDiff
+	cmd := m.startPreviewAnnotationAt(srcMap.blocks()[bi].StartLine)
+	return m, cmd
 }
 
 // clickDiff handles a left-click press in the diff viewport. the click

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/umputun/revdiff/app/annotation"
+	"github.com/umputun/revdiff/app/keymap"
 )
 
 // annotateFourWayDoc is a document deliberately shaped to exercise all four
@@ -209,4 +210,269 @@ func TestMdPreviewMaxOffset_UnchangedByAnnotationRows(t *testing.T) {
 
 	assert.Equal(t, baseOffset, paintedOffset,
 		"annotation rows wrap to the pane width, so they must never widen the pan clamp")
+}
+
+// TestMdPreviewStartAnnotation_NothingHighlighted_NoOp covers the aim-with-
+// nothing-highlighted case: an empty document has no block for
+// mdPreviewHighlightAnchor to mark, so starting a preview annotation must be
+// a refusal, not a crash or an annotation on a line that does not exist.
+func TestMdPreviewStartAnnotation_NothingHighlighted_NoOp(t *testing.T) {
+	m := mdPreviewTestModel(mdLines(""))
+	m.modes.mdPreview = true
+
+	cmd := m.startPreviewAnnotation()
+
+	assert.Nil(t, cmd)
+	assert.False(t, m.annot.annotating, "with nothing to anchor to, starting a preview annotation must be a no-op")
+}
+
+// TestMdPreviewStartAnnotation_AimMidDocument proves `a` anchors to whatever
+// block the scroll-following highlight currently marks — here the viewport is
+// scrolled so the second of three blocks is topmost, and the resolved
+// StartLine must be that block's, not the first or the last.
+func TestMdPreviewStartAnnotation_AimMidDocument(t *testing.T) {
+	doc := "# Heading\n\nFirst paragraph.\n\nSecond paragraph.\n\nThird paragraph."
+	lines := mdLines(doc)
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	require.GreaterOrEqual(t, len(srcMap.blocks()), 3, "fixture sanity: need at least three distinct blocks")
+	target := srcMap.blocks()[1]
+	// direct field assignment, not SetYOffset: the viewport's own clamp is
+	// against its internal content buffer (populated by SetContent), which
+	// nothing here has set yet — target.Row is a row of the srcMap's own
+	// render, a value the viewport's clamp knows nothing about and would zero
+	// out.
+	m.layout.viewport.YOffset = target.Row
+
+	m.startPreviewAnnotation()
+
+	assert.True(t, m.annot.annotating)
+	assert.Equal(t, target.StartLine, m.nav.diffCursor,
+		"aim must land on the block the highlight currently marks, not the first or last")
+}
+
+// TestMdPreviewStartAnnotation_AimPastLastBlock covers the "past the last
+// block" case: scrolled all the way to the final block, aim must still
+// resolve to it rather than falling off the end of the anchors slice.
+func TestMdPreviewStartAnnotation_AimPastLastBlock(t *testing.T) {
+	doc := "# Heading\n\nFirst paragraph.\n\nSecond paragraph."
+	lines := mdLines(doc)
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	last := srcMap.blocks()[len(srcMap.blocks())-1]
+	m.layout.viewport.YOffset = last.Row // see the AimMidDocument test for why not SetYOffset
+
+	m.startPreviewAnnotation()
+
+	assert.True(t, m.annot.annotating)
+	assert.Equal(t, last.StartLine, m.nav.diffCursor,
+		"aim scrolled to the last block must anchor there, not lose the block entirely")
+}
+
+// TestMdPreviewClickAnnotate_InsideBlockResolvesToIt covers "a click inside a
+// block resolves to it": clicking exactly on a block's first row must anchor
+// the new annotation to that block's source line.
+func TestMdPreviewClickAnnotate_InsideBlockResolvesToIt(t *testing.T) {
+	doc := "# Heading\n\nFirst paragraph.\n\nSecond paragraph."
+	lines := mdLines(doc)
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	require.GreaterOrEqual(t, len(srcMap.blocks()), 2, "fixture sanity: need at least two distinct blocks")
+	target := srcMap.blocks()[1]
+
+	result, _ := m.clickPreviewDiff(m.diffTopRow() + target.Row)
+	got := result.(Model)
+
+	assert.True(t, got.annot.annotating)
+	assert.Equal(t, target.StartLine, got.nav.diffCursor,
+		"a click inside a block must anchor the annotation to that block's source line")
+}
+
+// TestMdPreviewClickAnnotate_BelowLastRowResolvesToLastBlock covers "a click
+// below the last row resolves to the last block": a click far past every
+// rendered row must still land on the document's final block rather than
+// being a no-op.
+func TestMdPreviewClickAnnotate_BelowLastRowResolvesToLastBlock(t *testing.T) {
+	doc := "# Heading\n\nFirst paragraph.\n\nSecond paragraph."
+	lines := mdLines(doc)
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	last := srcMap.blocks()[len(srcMap.blocks())-1]
+
+	result, _ := m.clickPreviewDiff(100000)
+	got := result.(Model)
+
+	assert.True(t, got.annot.annotating)
+	assert.Equal(t, last.StartLine, got.nav.diffCursor,
+		"a click below every block's rows must resolve to the last block")
+}
+
+// TestMdPreviewClickAnnotate_UnalignedIsNoOp proves a click cannot start an
+// annotation when the map gave up: with no trustworthy row-to-line mapping,
+// there is nothing to safely resolve the click against.
+func TestMdPreviewClickAnnotate_UnalignedIsNoOp(t *testing.T) {
+	lines := mdLines("| a | b |\n|---|---|\n| 1 | 2 |\n\n| c | d |\n|---|---|\n| 3 | 4 |")
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	require.False(t, srcMap.Aligned,
+		"fixture sanity: two tables separated only by a blank line must fail alignment (see the plan's Technical Details)")
+
+	result, cmd := m.clickPreviewDiff(m.diffTopRow())
+	got := result.(Model)
+
+	assert.Nil(t, cmd)
+	assert.False(t, got.annot.annotating, "a click against an unaligned map must be a no-op")
+}
+
+// TestDispatchAction_PreviewConfirmWithTreeFocus_DoesNotMoveViewport is the
+// checklist's "enter with tree focus does not move the viewport" case: with
+// the tree/TOC pane focused (reachable while previewing, since nothing in
+// mdPreviewAllowedActions changes m.layout.focus), ActionConfirm must NOT
+// fall through to handleEnterKey's TOC-jump branch — which would realign the
+// viewport to a diff-line coordinate the preview render does not have. It
+// must instead start a preview annotation without touching the offset.
+func TestDispatchAction_PreviewConfirmWithTreeFocus_DoesNotMoveViewport(t *testing.T) {
+	// a long document, not the usual three-line fixture: startPreviewAnnotationAt
+	// restores the offset via the real SetYOffset, which clamps against the
+	// viewport's own content buffer — a short document that fits inside the
+	// viewport has nowhere to legitimately scroll to, so the interesting offset
+	// (5) needs a document tall enough to make it a real, non-clamped position.
+	parts := make([]string, 0, 82)
+	parts = append(parts, "# Title", "")
+	for range 40 {
+		parts = append(parts, "Paragraph text.", "")
+	}
+	lines := mdLines(strings.Join(parts, "\n"))
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+	m.layout.focus = paneTree
+	require.NotNil(t, m.file.mdTOC, "fixture sanity: the TOC jump branch must be reachable for this test to have teeth")
+	m.layout.viewport.SetContent(m.renderMarkdownPreview())
+	require.Greater(t, m.layout.viewport.TotalLineCount(), m.layout.viewport.Height+5,
+		"fixture sanity: the document must render taller than the viewport for offset 5 to be a real, non-clamped position")
+	m.layout.viewport.SetYOffset(5)
+	require.Equal(t, 5, m.layout.viewport.YOffset, "fixture sanity: the offset must actually take before dispatch")
+
+	model, _ := m.dispatchAction(keymap.ActionConfirm)
+	got := model.(Model)
+
+	assert.Equal(t, 5, got.layout.viewport.YOffset,
+		"ActionConfirm in preview must not run the TOC jump's viewport realignment")
+	assert.True(t, got.annot.annotating, "ActionConfirm in preview must start an annotation instead of a TOC jump")
+}
+
+// TestMdPreviewStartAnnotation_SavedAnnotationMatchesSourceView proves the
+// annotation a preview `a` press produces is indistinguishable from one made
+// in source view: same File, Line, Type, Comment — created through the exact
+// same saveAnnotation/saveComment path, just aimed at a different starting
+// cursor.
+func TestMdPreviewStartAnnotation_SavedAnnotationMatchesSourceView(t *testing.T) {
+	doc := "# Title\n\nSome text."
+	lines := mdLines(doc)
+
+	preview := mdPreviewTestModel(lines)
+	preview.modes.mdPreview = true
+	_, srcMap := preview.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	idx := srcMap.blocks()[0].StartLine
+
+	preview.startPreviewAnnotationAt(idx)
+	require.True(t, preview.annot.annotating)
+	preview.annot.input.SetValue("a note on the title")
+	preview.saveAnnotation()
+
+	source := mdPreviewTestModel(lines)
+	source.nav.diffCursor = idx
+	source.startAnnotation()
+	source.annot.input.SetValue("a note on the title")
+	source.saveAnnotation()
+
+	previewAnns := preview.store.Get("plan.md")
+	sourceAnns := source.store.Get("plan.md")
+	require.Len(t, previewAnns, 1)
+	require.Len(t, sourceAnns, 1)
+	assert.Equal(t, sourceAnns[0], previewAnns[0],
+		"a preview-created annotation must be indistinguishable from one made in source view")
+}
+
+// TestMdPreviewStartAnnotation_TwoItemsInTightList_BothSurvive is the named
+// regression test the orchestrator called out explicitly: it is the case that
+// rejected the alternative design (a whole tight list as one anchor), so it
+// is the case that must prove this one. Annotating two DIFFERENT items of one
+// TIGHT bullet list (no blank line between them) through the real creation
+// path must leave two distinct annotations in the store, with different Line
+// values and both comments intact — not one replacing the other via
+// annotation.Store.Add's same-key overwrite.
+func TestMdPreviewStartAnnotation_TwoItemsInTightList_BothSurvive(t *testing.T) {
+	doc := "- item one\n- item two"
+	lines := mdLines(doc)
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	require.Len(t, srcMap.blocks(), 2, "fixture sanity: a tight two-item list must yield two distinct block targets")
+	first := srcMap.blocks()[0].StartLine
+	second := srcMap.blocks()[1].StartLine
+	require.NotEqual(t, first, second, "fixture sanity: the two items must be distinct source lines")
+
+	m.startPreviewAnnotationAt(first)
+	require.True(t, m.annot.annotating)
+	m.annot.input.SetValue("comment on item one")
+	m.saveAnnotation()
+
+	m.startPreviewAnnotationAt(second)
+	require.True(t, m.annot.annotating)
+	m.annot.input.SetValue("comment on item two")
+	m.saveAnnotation()
+
+	anns := m.store.Get("plan.md")
+	require.Len(t, anns, 2, "both list-item annotations must survive as distinct entries, not replace each other")
+
+	byLine := map[int]string{}
+	for _, a := range anns {
+		byLine[a.Line] = a.Comment
+	}
+	assert.Equal(t, "comment on item one", byLine[m.diffLineNum(m.file.lines[first])])
+	assert.Equal(t, "comment on item two", byLine[m.diffLineNum(m.file.lines[second])])
+}
+
+// TestMdPreviewPaintAnnotations_LiveInputVisibleForNewAnnotation proves the
+// gap startPreviewAnnotationAt closes: mdPreviewPaintAnnotationsTracked only
+// ever iterated the store, so a BRAND NEW annotation (nothing saved yet for
+// its line) had no entry for that loop to find, and the input a reader is
+// actively typing would never reach the screen until the moment it is saved.
+// This is what the mdPreviewLiveInputTarget branch exists to fix.
+func TestMdPreviewPaintAnnotations_LiveInputVisibleForNewAnnotation(t *testing.T) {
+	doc := "# Title\n\nSome text."
+	lines := mdLines(doc)
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	idx := srcMap.blocks()[0].StartLine
+
+	m.startPreviewAnnotationAt(idx)
+	require.True(t, m.annot.annotating)
+	m.annot.input.SetValue("typing now")
+
+	rendered := m.renderMarkdownPreview()
+
+	assert.Contains(t, ansi.Strip(rendered), "typing now",
+		"the annotation currently being typed must be visible in the preview before it is saved")
 }

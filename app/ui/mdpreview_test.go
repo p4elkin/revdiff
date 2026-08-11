@@ -725,17 +725,21 @@ func pressKey(t *testing.T, m Model, key string) Model {
 }
 
 func TestDispatchAction_MdPreviewOn_AnnotationKeysAreInert(t *testing.T) {
-	// covers every unsafe action identified in the Task 5 investigation:
-	// starting/editing an annotation (Enter, 'a' -> ActionConfirm), starting a
-	// file-level annotation ('A'), deleting an annotation ('d'), and opening
-	// the annotation-list jump ('@'). A real annotation is pre-seeded on the
-	// cursor's line so "delete_annotation" has something to (fail to) delete
-	// — otherwise that subtest would trivially pass with no guard at all.
+	// covers the unsafe actions identified in the Task 5 investigation that
+	// remain inert after Task 7: starting a file-level annotation ('A'),
+	// deleting an annotation ('d'), and opening the annotation-list jump
+	// ('@'). Confirm (Enter/'a' -> ActionConfirm) is deliberately NOT in this
+	// list anymore — Task 7 makes it create a line-level annotation anchored
+	// through the source map instead of the ordinary cursor-based path; see
+	// startPreviewAnnotation and its tests (mdpreview_annotate.go,
+	// mdpreview_annotate_test.go). A real annotation is
+	// pre-seeded on the cursor's line so "delete_annotation" has something to
+	// (fail to) delete — otherwise that subtest would trivially pass with no
+	// guard at all.
 	tests := []struct {
 		name string
 		key  string
 	}{
-		{"confirm (start/edit annotation)", "enter"},
 		{"annotate_file", "A"},
 		{"delete_annotation", "d"},
 		{"annot_list", "@"},
@@ -1098,23 +1102,35 @@ func mdPreviewMouseModel(t *testing.T, lines []diff.DiffLine) Model {
 	return m
 }
 
-func TestHandleMouse_MdPreviewOn_ClickInDiffDoesNotMoveCursor(t *testing.T) {
-	// preview is read-only: a left-click in the diff pane computes a diff-line
-	// index from a preview-render row and (without the guard) reassigns the
-	// source cursor. clickDiff must be inert while previewing.
+func TestHandleMouse_MdPreviewOn_ClickInDiffAnchorsToBlockThroughSourceMap(t *testing.T) {
+	// Task 7 replaced the old blanket "click in the diff pane is inert while
+	// previewing" behavior with a click-to-annotate mapping (clickPreviewDiff,
+	// mouse.go): the clicked row is resolved through the source map to the
+	// block it belongs to, NOT through clickDiff's raw pixel-row-to-diff-line
+	// math, and an annotation input opens on that block's StartLine.
 	m := mdPreviewMouseModel(t, mdPreviewMouseLines())
 	m.nav.diffCursor = 20
 	m.toggleMarkdownPreview()
 	require.True(t, m.modes.mdPreview)
-	m.layout.viewport.SetYOffset(0) // deterministic click math regardless of toggle-time scroll
+	m.layout.viewport.SetYOffset(0) // deterministic click math
 
-	// y=12, diffTopRow=2, YOffset=0 -> row 10; without the guard clickDiff would
-	// move the cursor to diff line 10.
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned, "fixture sanity: this document must align for the test to prove anything")
+	row := (12 - m.diffTopRow()) + m.layout.viewport.YOffset
+	wantBI := srcMap.anchorAtRow(row)
+	require.GreaterOrEqual(t, wantBI, 0, "fixture sanity: the clicked row must resolve to a real block")
+	want := srcMap.blocks()[wantBI].StartLine
+
+	// y=12, diffTopRow=2, YOffset=0 -> row 10 (the same row clickDiff's own
+	// math would have produced); the assertion below is what proves the two
+	// paths no longer share a destination.
 	result, _ := m.Update(leftPressAt(60, 12))
 	model := result.(Model)
 
-	assert.Equal(t, 20, model.nav.diffCursor,
-		"a click in the diff pane must not move the source cursor while previewing")
+	assert.Equal(t, want, model.nav.diffCursor,
+		"a click in the diff pane during preview must anchor to the block owning the clicked row")
+	assert.True(t, model.annot.annotating,
+		"a click in the diff pane during preview must start an annotation, not just move the cursor")
 }
 
 func TestHandleMouse_MdPreviewOn_ClickInTOCDoesNotMoveCursor(t *testing.T) {

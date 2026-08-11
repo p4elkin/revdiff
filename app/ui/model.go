@@ -1092,17 +1092,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // passes through — handleKey's direct path and handleChordSecond's chord
 // path both call it. Markdown preview renders the whole document through
 // glamour, which reflows text, so a rendered row no longer maps to a source
-// line — every action that would create/edit/delete/navigate to an
-// annotation or move m.nav.diffCursor must be a no-op while previewing. See
-// handleMdPreviewAction and mdPreviewActionAllowed (mdpreview.go) for the
-// fixed allowlist of what stays live and for the two pan actions preview
-// serves itself. The guard is kept in this thin wrapper, rather than inline in
-// dispatchResolvedAction's own switch, purely to keep that already-large
-// function's cyclomatic complexity (gocyclo) unchanged.
+// line — most actions that would edit/delete/navigate to an annotation or
+// move m.nav.diffCursor must be a no-op while previewing. Annotation
+// CREATION is the one exception: ActionConfirm is allowed and anchors through
+// the source map instead (see the ActionConfirm case in
+// handleMdPreviewAction). See handleMdPreviewAction and mdPreviewActionAllowed
+// (mdpreview.go) for the fixed allowlist of what stays live. The guard is
+// kept in this thin wrapper, rather than inline in dispatchResolvedAction's
+// own switch, purely to keep that already-large function's cyclomatic
+// complexity (gocyclo) unchanged.
 func (m Model) dispatchAction(action keymap.Action) (tea.Model, tea.Cmd) {
 	if m.modes.mdPreview {
-		if model, handled := m.handleMdPreviewAction(action); handled {
-			return model, nil
+		if model, cmd, handled := m.handleMdPreviewAction(action); handled {
+			return model, cmd
 		}
 	}
 	return m.dispatchResolvedAction(action)

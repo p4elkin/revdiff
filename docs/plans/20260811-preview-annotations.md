@@ -324,14 +324,14 @@ hunk expansion today, and populating it differently would break that promise.
 
 **Model:** sonnet
 
-- [ ] `a` anchors to the highlighted block, falling back to the topmost-visible block when nothing is highlighted yet
-- [ ] ⚠️ route `ActionConfirm` **inside** `handleMdPreviewAction` rather than only allowlisting it — its fall-through target branches on pane focus, and the tree pane is reachable while previewing, where it would run the TOC jump in diff-line coordinates
-- [ ] `startPreviewAnnotation` sets `m.nav.diffCursor` to the resolved line and calls the existing `startAnnotation`, saving and restoring `viewport.YOffset` around it so `ensureLineAnnotationInputVisible`'s diff-line maths cannot move the view
-- [ ] map a diff-pane click through `rowToLine` so clicking a block annotates it
-- [ ] rewrite `mdPreviewAllowedActions`' doc comment: its blanket reason is no longer true, and each remaining exclusion needs its own
-- [ ] write the named regression test: **annotate two items in one tight bullet list and confirm two distinct annotations survive in the store**
-- [ ] write tests: aim with nothing highlighted, mid-document, past the last block; a click inside a block resolves to it; a click below the last row resolves to the last block; `enter` with tree focus does not move the viewport; the saved annotation is byte-equal to the source view's for the same line
-- [ ] run `go test ./app/ui -run 'TestMdPreview|TestDispatchAction|TestMouse'` then `go test ./app/ui` — both must pass before the next task
+- [x] `a` anchors to the highlighted block, falling back to the topmost-visible block when nothing is highlighted yet
+- [x] ⚠️ route `ActionConfirm` **inside** `handleMdPreviewAction` rather than only allowlisting it — its fall-through target branches on pane focus, and the tree pane is reachable while previewing, where it would run the TOC jump in diff-line coordinates
+- [x] `startPreviewAnnotation` sets `m.nav.diffCursor` to the resolved line and calls the existing `startAnnotation`, saving and restoring `viewport.YOffset` around it so `ensureLineAnnotationInputVisible`'s diff-line maths cannot move the view
+- [x] map a diff-pane click through `rowToLine` so clicking a block annotates it
+- [x] rewrite `mdPreviewAllowedActions`' doc comment: its blanket reason is no longer true, and each remaining exclusion needs its own
+- [x] write the named regression test: **annotate two items in one tight bullet list and confirm two distinct annotations survive in the store**
+- [x] write tests: aim with nothing highlighted, mid-document, past the last block; a click inside a block resolves to it; a click below the last row resolves to the last block; `enter` with tree focus does not move the viewport; the saved annotation is byte-equal to the source view's for the same line
+- [x] run `go test ./app/ui -run 'TestMdPreview|TestDispatchAction|TestMouse'` then `go test ./app/ui` — both must pass before the next task
 
 ### Task 8: File-level annotations and flush
 
