@@ -15,13 +15,13 @@ func TestMdPreviewMarkerZeroWidth(t *testing.T) {
 	for _, k := range mdPreviewMarkerKinds {
 		m := mdPreviewMarker(k.id)
 		if w := xansi.StringWidth(m); w != 0 {
-			t.Errorf("kind %s: marker %q has width %d, want 0", k.name, m, w)
+			t.Errorf("kind %s: marker %q has width %d, want 0", k.kind, m, w)
 		}
 		// also zero-width when surrounded by real content on the row, not
 		// just in isolation.
 		line := "prefix " + m + " suffix"
 		if w := xansi.StringWidth(line); w != len("prefix  suffix") {
-			t.Errorf("kind %s: marker changed surrounding line width: got %d, want %d", k.name, w, len("prefix  suffix"))
+			t.Errorf("kind %s: marker changed surrounding line width: got %d, want %d", k.kind, w, len("prefix  suffix"))
 		}
 	}
 }
@@ -31,22 +31,22 @@ func TestMdPreviewMarkerZeroWidth(t *testing.T) {
 // mdPreviewStripMarkers' exact-match removal and mdPreviewExtractMarkers'
 // per-kind strings.Index scan to never cross-match a different kind.
 func TestMdPreviewMarkerDistinctBytes(t *testing.T) {
-	seen := map[string]string{}
+	seen := map[string]mdPreviewBlockKind{}
 	for _, k := range mdPreviewMarkerKinds {
 		m := mdPreviewMarker(k.id)
 		if other, ok := seen[m]; ok {
-			t.Fatalf("kind %s and %s share marker %q", k.name, other, m)
+			t.Fatalf("kind %s and %s share marker %q", k.kind, other, m)
 		}
-		seen[m] = k.name
+		seen[m] = k.kind
 	}
 	for _, a := range mdPreviewMarkerKinds {
 		for _, b := range mdPreviewMarkerKinds {
-			if a.name == b.name {
+			if a.kind == b.kind {
 				continue
 			}
 			ma, mb := mdPreviewMarker(a.id), mdPreviewMarker(b.id)
 			if strings.Contains(ma, mb) {
-				t.Errorf("marker for %s (%q) contains marker for %s (%q)", a.name, ma, b.name, mb)
+				t.Errorf("marker for %s (%q) contains marker for %s (%q)", a.kind, ma, b.kind, mb)
 			}
 		}
 	}
@@ -59,7 +59,7 @@ func TestMdPreviewMarkerDistinctBytes(t *testing.T) {
 // "task", and "text" — see mdPreviewMarkerKinds' doc comment for why. A
 // change here is a scope change to this feature, not routine maintenance.
 func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
-	want := map[string]string{
+	want := map[mdPreviewBlockKind]string{
 		"paragraph":   "Paragraph.Prefix",
 		"h1":          "H1.Prefix",
 		"h2":          "H2.Prefix",
@@ -79,19 +79,19 @@ func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
 		t.Fatalf("got %d kinds, want %d", len(mdPreviewMarkerKinds), len(want))
 	}
 	for _, k := range mdPreviewMarkerKinds {
-		field, ok := want[k.name]
+		field, ok := want[k.kind]
 		if !ok {
-			t.Errorf("unexpected kind %q in table (excluded kinds: heading, list, document, task, text)", k.name)
+			t.Errorf("unexpected kind %q in table (excluded kinds: heading, list, document, task, text)", k.kind)
 			continue
 		}
 		if k.styleField != field {
-			t.Errorf("kind %s: styleField = %q, want %q", k.name, k.styleField, field)
+			t.Errorf("kind %s: styleField = %q, want %q", k.kind, k.styleField, field)
 		}
 	}
 	for name := range want {
 		found := false
 		for _, k := range mdPreviewMarkerKinds {
-			if k.name == name {
+			if k.kind == name {
 				found = true
 				break
 			}
@@ -100,9 +100,9 @@ func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
 			t.Errorf("missing kind %q from table", name)
 		}
 	}
-	for _, excluded := range []string{"heading", "list", "document", "task", "text"} {
+	for _, excluded := range []mdPreviewBlockKind{"heading", "list", "document", "task", "text"} {
 		for _, k := range mdPreviewMarkerKinds {
-			if k.name == excluded {
+			if k.kind == excluded {
 				t.Errorf("kind %q must not be in the table (see doc comment)", excluded)
 			}
 		}
@@ -116,7 +116,7 @@ func TestMdPreviewMarkerStripExactAndTotal(t *testing.T) {
 	var b strings.Builder
 	for _, k := range mdPreviewMarkerKinds {
 		b.WriteString("before-")
-		b.WriteString(k.name)
+		b.WriteString(string(k.kind))
 		b.WriteString(mdPreviewMarker(k.id))
 		b.WriteString("-after\n")
 	}
@@ -129,7 +129,7 @@ func TestMdPreviewMarkerStripExactAndTotal(t *testing.T) {
 	var wantB strings.Builder
 	for _, k := range mdPreviewMarkerKinds {
 		wantB.WriteString("before-")
-		wantB.WriteString(k.name)
+		wantB.WriteString(string(k.kind))
 		wantB.WriteString("-after\n")
 	}
 	if stripped != wantB.String() {
@@ -139,7 +139,7 @@ func TestMdPreviewMarkerStripExactAndTotal(t *testing.T) {
 	// total: not a single marker byte sequence remains, for any kind.
 	for _, k := range mdPreviewMarkerKinds {
 		if strings.Contains(stripped, mdPreviewMarker(k.id)) {
-			t.Errorf("kind %s: marker still present after strip", k.name)
+			t.Errorf("kind %s: marker still present after strip", k.kind)
 		}
 	}
 
@@ -220,15 +220,15 @@ func TestMdPreviewMarkerStylePreservesExistingPrefix(t *testing.T) {
 
 // mdPreviewMarkerKindByName looks up a kind by name for test setup, failing
 // the test immediately if it is not in the table.
-func mdPreviewMarkerKindByName(t *testing.T, name string) mdPreviewBlockKind {
+func mdPreviewMarkerKindByName(t *testing.T, name mdPreviewBlockKind) mdPreviewMarkerKind {
 	t.Helper()
 	for _, k := range mdPreviewMarkerKinds {
-		if k.name == name {
+		if k.kind == name {
 			return k
 		}
 	}
 	t.Fatalf("no kind named %q", name)
-	return mdPreviewBlockKind{}
+	return mdPreviewMarkerKind{}
 }
 
 // TestMdPreviewMarkerExtractDedupesRepeats proves a kind whose marker

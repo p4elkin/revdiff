@@ -12,13 +12,23 @@ import (
 )
 
 // mdPreviewBlockKind identifies one of the block kinds this feature can
-// anchor an annotation to. Values match the kind names used by the marker
-// table (see the plan's marker spike): "paragraph", "h1".."h6", "item",
-// "enumeration", "code_block", "block_quote", "table", "hr", "html_block".
+// anchor an annotation to. It is the SINGLE shared vocabulary between this
+// file's goldmark block walk and mdpreview_marker.go's marker table
+// (mdPreviewMarkerKind.kind field) — one type, not a pair of enums with a
+// mapping between them, because the two sides track the same block kinds by
+// construction: this walk decides which lines a comment on "the h2" or "the
+// table" covers, the marker table decides which rendered row glamour put
+// that same h2/table on, and task 3's alignment is a direct kind-for-kind
+// comparison between the two, which only works cleanly if both read from
+// one enum. Values: "paragraph", "h1".."h6", "item", "enumeration",
+// "code_block", "block_quote", "table", "hr", "html_block".
 // There is deliberately no generic "heading" value — glamour never emits a
 // marker for it (see the spike's "Decided by the spike" notes), only the
 // level-specific h1..h6 kinds do, so mdPreviewBlockTargets never produces
-// one either.
+// one either. This walk does not need a "task" value (see
+// mdPreviewMarkerKinds' doc comment in mdpreview_marker.go for why the
+// marker side excludes it too) because a task-list item is folded into its
+// enclosing item/enumeration target — see the KindListItem case below.
 type mdPreviewBlockKind string
 
 const (
