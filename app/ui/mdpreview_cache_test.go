@@ -3,10 +3,16 @@ package ui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/umputun/revdiff/app/annotation"
+	"github.com/umputun/revdiff/app/ui/style"
 )
 
 func TestMdPreviewRenderCache_MissWhenEmpty(t *testing.T) {
@@ -183,4 +189,272 @@ func BenchmarkMdPreviewRepaint(b *testing.B) {
 			sink = rendered
 		}
 	})
+}
+
+// highlightDoc is a plain multi-block document: several short paragraphs, so
+// every block is a couple of rows tall and a viewport of 20 rows holds a handful
+// of them at once. Deliberately free of tables and mermaid fences — this file's
+// tests are about which block the highlight lands on, not about alignment.
+const highlightDoc = "# Title\n\n" +
+	"First paragraph.\n\n" +
+	"Second paragraph.\n\n" +
+	"Third paragraph.\n\n" +
+	"Fourth paragraph.\n\n" +
+	"Fifth paragraph.\n\n" +
+	"Sixth paragraph.\n\n" +
+	"Seventh paragraph.\n\n" +
+	"Eighth paragraph.\n\n" +
+	"Ninth paragraph.\n\n" +
+	"Tenth paragraph.\n\n" +
+	"Eleventh paragraph.\n\n" +
+	"Twelfth paragraph."
+
+// mdPreviewHighlightModel loads highlightDoc into mdPreviewTestModel with
+// preview turned on and a resolver that actually carries a search
+// background — the two things every test below needs. testModel uses
+// style.PlainResolver, whose every color is empty — the highlight is a
+// documented no-op there, so a test built on it could never see one.
+func mdPreviewHighlightModel(t *testing.T) Model {
+	t.Helper()
+	m := mdPreviewTestModel(mdLines(highlightDoc))
+	res := style.NewResolver(style.Colors{DiffBg: "#112233", SearchBg: "#5f00af", Normal: "#cccccc"})
+	m.resolver = res
+	m.renderer = style.NewRenderer(res)
+	m.modes.mdPreview = true
+	return m
+}
+
+// mdPreviewHighlightBg returns the background escape the highlight paints with,
+// so a test can look for it in a frame.
+func mdPreviewHighlightBg(m Model) string {
+	return string(m.resolver.Color(style.ColorKeySearchBg))
+}
+
+// TestMdPreviewHighlightAnchor_FollowsTopmostFullyVisibleBlock is the task's
+// central behavior: as the offset changes, the mark moves to the topmost block
+// that is WHOLLY on screen. Scrolling one row into a block must hand the mark to
+// the next block, not keep it on the one now half off the top — that difference
+// is the whole point of "fully visible", and the only assertion here that a
+// simpler "block at the top row" rule would fail.
+func TestMdPreviewHighlightAnchor_FollowsTopmostFullyVisibleBlock(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned, "fixture sanity: this document must align")
+	anchors := srcMap.blocks()
+	require.GreaterOrEqual(t, len(anchors), 4, "fixture sanity: need several blocks to scroll between")
+
+	for i := range anchors[:len(anchors)-1] {
+		m.layout.viewport.YOffset = anchors[i].Row
+		assert.Equal(t, i, m.mdPreviewHighlightAnchor(srcMap),
+			"with block %d's first row at the top, block %d must be the highlighted one", i, i)
+	}
+
+	// one row further down, block 1's own first row is off the top, so the mark
+	// must move on to the next whole block.
+	require.Greater(t, anchors[1].EndRow, anchors[1].Row, "fixture sanity: block 1 must span more than one row")
+	m.layout.viewport.YOffset = anchors[1].Row + 1
+	assert.Equal(t, 2, m.mdPreviewHighlightAnchor(srcMap),
+		"a block scrolled partly off the top must hand the mark to the next fully visible block")
+}
+
+// TestMdPreviewHighlightAnchor_FallsBackWhenNothingFits covers the case a
+// "topmost fully visible" rule alone cannot answer: a viewport too short to hold
+// any whole block. The mark falls back to the block filling the screen rather
+// than disappearing.
+func TestMdPreviewHighlightAnchor_FallsBackWhenNothingFits(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	anchors := srcMap.blocks()
+	require.GreaterOrEqual(t, len(anchors), 3)
+
+	m.layout.viewport.Height = 1
+	m.layout.viewport.YOffset = anchors[2].Row + 1
+
+	assert.Equal(t, 2, m.mdPreviewHighlightAnchor(srcMap),
+		"with no block fitting entirely, the block owning the top row must keep the mark")
+}
+
+// TestMdPreviewHighlightAnchor_NoAnchorAboveFirstBlockOrUnaligned pins the two
+// "nothing to mark" answers.
+func TestMdPreviewHighlightAnchor_NoAnchorAboveFirstBlockOrUnaligned(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	require.Positive(t, srcMap.blocks()[0].Row, "fixture sanity: glamour's top margin must leave a row above block 0")
+
+	m.layout.viewport.Height = 1
+	m.layout.viewport.YOffset = 0
+	assert.Equal(t, -1, m.mdPreviewHighlightAnchor(srcMap), "a viewport above the first block marks nothing")
+
+	m.layout.viewport.Height = 20
+	assert.Equal(t, -1, m.mdPreviewHighlightAnchor(mdPreviewSourceMap{}), "an unaligned map marks nothing")
+}
+
+// TestMdPreviewFinalRender_PaintsHighlightOnTheAnchoredBlockOnly proves the
+// styling actually lands, and lands only on the marked block's own rows.
+func TestMdPreviewFinalRender_PaintsHighlightOnTheAnchoredBlockOnly(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+	anchors := srcMap.blocks()
+	require.GreaterOrEqual(t, len(anchors), 4)
+
+	m.layout.viewport.YOffset = anchors[2].Row
+	require.Equal(t, 2, m.mdPreviewHighlightAnchor(srcMap), "fixture sanity: block 2 must be the marked one")
+
+	rows := strings.Split(m.mdPreviewFinalRender(), "\n")
+	bg := mdPreviewHighlightBg(m)
+	require.NotEmpty(t, bg, "fixture sanity: the resolver must carry a search background")
+
+	assert.Contains(t, rows[anchors[2].Row], bg, "the marked block's first row must carry the highlight background")
+	assert.NotContains(t, rows[anchors[3].Row], bg, "a block that is not marked must be left alone")
+	assert.NotContains(t, rows[anchors[1].Row], bg, "a block above the mark must be left alone")
+}
+
+// TestMdPreviewFinalRender_HighlightPreservesVisualShape checks the highlight is
+// pure styling: same rows, same stripped text, same per-row display width as the
+// unhighlighted frame. Byte comparison is not available on this path at all (see
+// the plan's Technical Details), so visual identity is the assertion.
+func TestMdPreviewFinalRender_HighlightPreservesVisualShape(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	body, srcMap := m.mdPreviewBody()
+	m.layout.viewport.YOffset = srcMap.blocks()[2].Row
+
+	plain := strings.Split(m.applyMdPreviewScroll(body), "\n")
+	marked := strings.Split(m.mdPreviewFinalRender(), "\n")
+
+	require.Len(t, marked, len(plain), "the highlight must not add or drop rows")
+	for i := range plain {
+		assert.Equal(t, ansi.Strip(plain[i]), ansi.Strip(marked[i]), "row %d text must be unchanged", i)
+		assert.Equal(t, ansi.StringWidth(plain[i]), ansi.StringWidth(marked[i]), "row %d width must be unchanged", i)
+	}
+}
+
+// TestMdPreviewFinalRender_HighlightDisabled_IdenticalToAnnotationsOnly is the
+// task's "with the highlight disabled the render is identical to task 5's"
+// checkbox. Two ways the highlight is off, both byte-compared against the
+// base-plus-annotations frame task 5 produces.
+func TestMdPreviewFinalRender_HighlightDisabled_IdenticalToAnnotationsOnly(t *testing.T) {
+	t.Run("no-colors mode", func(t *testing.T) {
+		m := mdPreviewHighlightModel(t)
+		m.cfg.noColors = true // the mode that promises zero ANSI in the preview
+		m.store.Add(annotation.Annotation{File: "plan.md", Line: 1, Type: " ", Comment: "a comment"})
+
+		base, srcMap := m.mdPreviewBaseRender()
+		want := m.applyMdPreviewScroll(m.mdPreviewPaintAnnotations(base, srcMap))
+
+		assert.Equal(t, want, m.mdPreviewFinalRender(), "no-colors must render exactly the task-5 frame")
+	})
+
+	t.Run("unaligned map", func(t *testing.T) {
+		m := mdPreviewHighlightModel(t)
+		frame := m.applyMdPreviewScroll(mustBody(t, m))
+
+		assert.Equal(t, frame, m.mdPreviewHighlight(frame, mdPreviewSourceMap{}),
+			"a map that failed alignment must leave the frame untouched")
+	})
+}
+
+// mustBody returns the uncut preview body for a model.
+func mustBody(t *testing.T, m Model) string {
+	t.Helper()
+	body, _ := m.mdPreviewBody()
+	return body
+}
+
+// TestMdPreviewPaintAnnotationsTracked_ShiftsAnchorsOntoPaintedRows is the
+// invariant the highlight depends on: splicing annotation rows moves every row
+// below them, so the map handed back must point at the SAME text in the painted
+// render that the original map pointed at in the base render. Without it the
+// highlight would mark a block one or more rows away from the one it names.
+func TestMdPreviewPaintAnnotationsTracked_ShiftsAnchorsOntoPaintedRows(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 1, Type: " ", Comment: "on the title"})
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 5, Type: " ", Comment: "on the second paragraph"})
+
+	base, baseMap := m.mdPreviewBaseRender()
+	require.True(t, baseMap.Aligned, "fixture sanity: this document must align")
+
+	painted, paintedMap := m.mdPreviewPaintAnnotationsTracked(base, baseMap)
+	require.True(t, paintedMap.Aligned, "painting must hand back a usable map")
+	require.Len(t, paintedMap.blocks(), len(baseMap.blocks()), "painting must not add or drop blocks")
+	require.Greater(t, len(strings.Split(painted, "\n")), len(strings.Split(base, "\n")),
+		"fixture sanity: the annotations must actually have added rows")
+
+	baseRows := strings.Split(base, "\n")
+	paintedRows := strings.Split(painted, "\n")
+	for i, a := range baseMap.blocks() {
+		shifted := paintedMap.blocks()[i]
+		require.Less(t, shifted.Row, len(paintedRows), "block %d's shifted row must exist", i)
+		assert.Equal(t, ansi.Strip(baseRows[a.Row]), ansi.Strip(paintedRows[shifted.Row]),
+			"block %d's shifted row must hold the same text as before painting", i)
+	}
+}
+
+// TestMdPreviewWheelBurst_RepaintsOnceForTheWholeBurst is the task's
+// "one wheel burst repaints once rather than per event" checkbox. The preview
+// repaint rides the existing wheelState debounce (gen / renderPending /
+// tickInFlight, see .claude/rules/gotchas.md) rather than bringing a second one:
+// a burst of wheel events schedules exactly one tick, repaints nothing while it
+// runs, and lands its single repaint when the burst flushes.
+func TestMdPreviewWheelBurst_RepaintsOnceForTheWholeBurst(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	m.layout.viewport.SetContent(m.renderMarkdownPreview())
+	require.Greater(t, m.layout.viewport.TotalLineCount(), m.layout.viewport.Height,
+		"fixture sanity: the document must be scrollable")
+
+	scheduled := 0
+	var model tea.Model = m
+	for range 5 {
+		var cmd tea.Cmd
+		model, cmd = model.(Model).handleWheel(hitDiff, 2)
+		if cmd != nil {
+			scheduled++
+		}
+	}
+	m = model.(Model)
+
+	assert.Equal(t, 1, scheduled, "only the first wheel of a burst may schedule a tick")
+	require.True(t, m.wheel.renderPending, "the burst must still owe exactly one repaint")
+	require.True(t, m.wheel.tickInFlight, "the one scheduled tick must still be the only one in flight")
+
+	duringBurst := m.layout.viewport.View()
+	m.flushWheelPending()
+	afterFlush := m.layout.viewport.View()
+
+	assert.NotEqual(t, duringBurst, afterFlush, "the burst's single repaint must land at flush time, not during it")
+	assert.Contains(t, afterFlush, mdPreviewHighlightBg(m), "after the flush the mark must be on a visible block")
+	assert.False(t, m.wheel.renderPending, "the flush must clear the owed repaint")
+	assert.False(t, m.wheel.tickInFlight, "the flush must clear the in-flight tick")
+}
+
+// TestScrollMarkdownPreview_RepaintsSoTheMarkFollows covers the keyboard half:
+// j/k and the page keys repaint immediately (a key press is one event, not a
+// burst), so the mark is on the new topmost block as soon as the key lands.
+func TestScrollMarkdownPreview_RepaintsSoTheMarkFollows(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	m.layout.viewport.SetContent(m.renderMarkdownPreview())
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.Aligned)
+
+	before := m.layout.viewport.View()
+	m.scrollMarkdownPreview(srcMap.blocks()[3].Row)
+
+	after := m.layout.viewport.View()
+	assert.NotEqual(t, before, after, "a keyboard scroll must repaint")
+	assert.Contains(t, after, mdPreviewHighlightBg(m), "the mark must be on screen after the scroll")
+}
+
+// TestScrollMarkdownPreview_AtEdgeDoesNotRepaint pins the no-op: a scroll that
+// cannot move the offset leaves the mark, and the content, exactly as they were.
+func TestScrollMarkdownPreview_AtEdgeDoesNotRepaint(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	m.layout.viewport.SetContent(m.renderMarkdownPreview())
+	before := m.layout.viewport.View()
+
+	m.scrollMarkdownPreview(-1) // already at the top
+
+	assert.Equal(t, 0, m.layout.viewport.YOffset)
+	assert.Equal(t, before, m.layout.viewport.View(), "a scroll that cannot move must not repaint")
 }

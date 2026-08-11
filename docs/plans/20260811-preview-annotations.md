@@ -305,13 +305,13 @@ hunk expansion today, and populating it differently would break that promise.
 
 **Model:** opus
 
-- [ ] highlight the topmost fully-visible block by giving its rows a background from the resolver, the way the diff cursor line is drawn
-- [ ] ⚠️ **coalesce through the EXISTING `wheelState`** (`gen` / `renderPending` / `tickInFlight`, documented in `.claude/rules/gotchas.md`) — that machinery exists because a wheel burst once drove one render per event, 4201 redundant repaints from a single 4609-event burst. Writing a second debounce beside it is the mistake this checkbox exists to prevent
-- [ ] write a test that the highlight follows the topmost fully-visible block as the offset changes
-- [ ] write a test that one wheel burst repaints once rather than per event
-- [ ] write a test that with the highlight disabled the render is identical to task 5's
-- [ ] ⚠️ this task touches shared scroll paths: run the wider `go test ./app/ui` before commit
-- [ ] run `go test ./app/ui -run 'TestMdPreview|TestWheel'` then `go test ./app/ui` — both must pass before the next task
+- [x] highlight the topmost fully-visible block by giving its rows a background from the resolver, the way the diff cursor line is drawn
+- [x] ⚠️ **coalesce through the EXISTING `wheelState`** (`gen` / `renderPending` / `tickInFlight`, documented in `.claude/rules/gotchas.md`) — that machinery exists because a wheel burst once drove one render per event, 4201 redundant repaints from a single 4609-event burst. Writing a second debounce beside it is the mistake this checkbox exists to prevent
+- [x] write a test that the highlight follows the topmost fully-visible block as the offset changes
+- [x] write a test that one wheel burst repaints once rather than per event
+- [x] write a test that with the highlight disabled the render is identical to task 5's
+- [x] ⚠️ this task touches shared scroll paths: run the wider `go test ./app/ui` before commit
+- [x] run `go test ./app/ui -run 'TestMdPreview|TestWheel'` then `go test ./app/ui` — both must pass before the next task
 
 ### Task 7: Create an annotation, by keyboard and by mouse
 

@@ -526,13 +526,16 @@ func (m *Model) toggleMarkdownPreview() {
 // at the same width: reload bumps it even though the file name and width do
 // not change, so a stale render can never satisfy a post-reload lookup.
 //
-// A pan keypress does NOT go through here — panMarkdownPreview calls
-// mdPreviewBaseRender itself, because it needs the uncut render to compute
-// the clamp and would otherwise cut a second copy of the same render to draw
-// the same thing.
+// The frame it returns is the composed one — base render, this file's
+// annotations painted under the blocks they belong to, and the scroll-following
+// block highlight — assembled by mdPreviewFinalRender (mdpreview_cache.go),
+// which owns the order those three steps run in.
+//
+// A pan keypress does NOT go through here — panMarkdownPreview composes the
+// frame itself, because it needs the uncut body to compute the clamp and would
+// otherwise cut a second copy of the same render to draw the same thing.
 func (m Model) renderMarkdownPreview() string {
-	rendered, _ := m.mdPreviewBaseRender()
-	return m.applyMdPreviewScroll(rendered)
+	return m.mdPreviewFinalRender()
 }
 
 // mdPreviewCutWidth returns how many columns of a rendered preview row are
@@ -696,9 +699,10 @@ func (m Model) mdPreviewRightIndicator() string {
 // left when direction < 0 and right otherwise, and pushes the re-cut render
 // into the viewport. Mirrors handleHorizontalScroll's shape for the diff pane.
 //
-// It calls mdPreviewBaseRender itself instead of going through renderDiff:
-// the clamp needs the widest rendered row, and the same render then supplies
-// the rows to cut. Going through the cache (mdpreview_cache.go) means a pan
+// It composes the frame itself (mdPreviewBody + the same cut and highlight
+// mdPreviewFinalRender applies) instead of going through renderDiff: the clamp
+// needs the widest row of the uncut body, and that same body then supplies the
+// rows to cut. Going through the cache (mdpreview_cache.go) means a pan
 // keypress only pays for a fresh glamour+mermaid pass on the first call at a
 // given file/width/color state — every pan step after that, and every
 // renderMarkdownPreview call in between, reuses the same cached render.
@@ -717,8 +721,8 @@ func (m *Model) panMarkdownPreview(direction int) {
 	if !m.file.markdownPreviewable {
 		return
 	}
-	rendered, _ := m.mdPreviewBaseRender()
-	maxOffset := mdPreviewMaxOffset(rendered, m.mdPreviewCutWidth())
+	body, srcMap := m.mdPreviewBody()
+	maxOffset := mdPreviewMaxOffset(body, m.mdPreviewCutWidth())
 
 	offset := min(m.layout.scrollX, maxOffset)
 	if direction < 0 {
@@ -728,7 +732,7 @@ func (m *Model) panMarkdownPreview(direction int) {
 	}
 	m.layout.scrollX = min(max(0, offset), maxOffset)
 
-	m.layout.viewport.SetContent(m.applyMdPreviewScroll(rendered))
+	m.layout.viewport.SetContent(m.mdPreviewHighlight(m.applyMdPreviewScroll(body), srcMap))
 }
 
 // handleMdPreviewAction is the preview-mode gate every keymap-resolved action
@@ -808,13 +812,31 @@ func (m Model) mdPreviewPageStep() int {
 }
 
 // scrollMarkdownPreview shifts the preview viewport by delta rows, clamped to
-// the content. It deliberately does NOT go through scrollDiffViewportLine (the
+// the content, and repaints so the block highlight lands on the block that is
+// now topmost. It deliberately does NOT go through scrollDiffViewportLine (the
 // J/K path): that helper follows the shift with pinDiffCursorTo, which is a
 // no-op under preview only because of an explicit mdPreview guard in mouse.go.
 // Preview has no cursor to pin, so it calls the pure shifter directly and the
 // guard stays a backstop for the wheel rather than load-bearing here.
+//
+// The repaint is immediate rather than deferred, and that is the one place this
+// path differs from the wheel. A key press is one event; the wheel arrives in
+// bursts of hundreds, which is what wheelState's debounce exists for (see
+// .claude/rules/gotchas.md), and the wheel keeps using it — flushWheelPending
+// repaints preview once at burst end. Repainting here costs a cached base render
+// plus two per-row passes, not a glamour render, so a held-down j does not need
+// its own debounce beside that one.
+//
+// A no-op scroll (already at an edge) repaints nothing: the offset did not move,
+// so neither did the highlight.
 func (m *Model) scrollMarkdownPreview(delta int) {
-	m.scrollDiffViewportBy(delta)
+	if !m.scrollDiffViewportBy(delta) {
+		return
+	}
+	if !m.file.markdownPreviewable {
+		return // preview stuck on for a file renderDiff will not preview; see panMarkdownPreview
+	}
+	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 }
 
 // mdPreviewAllowedActions is the fixed allowlist of keymap actions that stay

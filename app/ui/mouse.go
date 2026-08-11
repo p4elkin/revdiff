@@ -423,6 +423,18 @@ func (m *Model) flushWheelPending() {
 	if !m.wheel.renderPending {
 		return
 	}
+	// markdown preview owes a repaint the pin cannot ask for. pinDiffCursorTo is
+	// an unconditional no-op while previewing (there is no cursor to pin), so
+	// without this branch the deferred SetContent below never runs and the
+	// scroll-following block highlight would stay frozen on the block that was
+	// topmost when the burst started. The repaint rides this same debounce
+	// rather than bringing its own: one repaint per burst, not per wheel event.
+	if m.modes.mdPreview {
+		m.layout.viewport.SetContent(m.renderDiff())
+		m.wheel.renderPending = false
+		m.wheel.tickInFlight = false
+		return
+	}
 	if m.pinDiffCursorTo(m.layout.viewport.YOffset) {
 		m.syncTOCActiveSection()
 		m.layout.viewport.SetContent(m.renderDiff())

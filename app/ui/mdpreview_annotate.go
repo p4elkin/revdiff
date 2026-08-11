@@ -29,14 +29,39 @@ import (
 // document) has nowhere to splice a line-level annotation either, and takes
 // the same path.
 func (m Model) mdPreviewPaintAnnotations(rendered string, srcMap mdPreviewSourceMap) string {
+	out, _ := m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
+	return out
+}
+
+// mdPreviewPaintAnnotationsTracked is mdPreviewPaintAnnotations plus the source
+// map re-expressed in the coordinates of the string it returns. Splicing rows
+// into a render moves every row below the splice point, so the map that came
+// out of mdPreviewBaseRender describes the BASE render and stops describing the
+// painted one the moment a single annotation row is inserted. Anything that
+// reads a row number off the painted render — the scroll-following block
+// highlight, and later the click-to-block mapping — must use the map this
+// returns, not the one it was handed.
+//
+// The accounting is exact rather than estimated: file-level rows are prepended
+// ahead of every block, and block i's own annotation rows are inserted at its
+// EndRow, which is always before block i+1's Row. So block i moves by the
+// file-level row count plus every earlier block's annotation row count, and by
+// nothing else.
+//
+// Same wrapper/implementation split as spliceMermaidArt over
+// spliceMermaidArtTracked: callers that only want the painted string do not
+// have to carry a map they will not read.
+func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPreviewSourceMap) (string, mdPreviewSourceMap) {
 	all := m.store.Get(m.file.name)
 	if len(all) == 0 {
-		return rendered
+		return rendered, srcMap // nothing spliced, so every row kept its number
 	}
 
 	anchors := srcMap.blocks()
 	if !srcMap.Aligned || len(anchors) == 0 {
-		return m.mdPreviewAnnotateDegraded(rendered, all)
+		// the degraded path prepends one group and anchors nothing; there was no
+		// usable map to shift, and there is none to hand back either.
+		return m.mdPreviewAnnotateDegraded(rendered, all), mdPreviewSourceMap{}
 	}
 
 	annotationMap, fileComment := m.buildAnnotationMap()
@@ -51,9 +76,22 @@ func (m Model) mdPreviewPaintAnnotations(rendered string, srcMap mdPreviewSource
 
 	var top strings.Builder
 	m.renderFileAnnotationHeader(&top, fileComment)
+	topRows := mdPreviewRowsFromBuilder(&top)
+
+	// shifted anchors are a copy, never an in-place edit: srcMap's backing array
+	// belongs to the render cache (mdpreview_cache.go) and is handed to every
+	// later repaint.
+	shifted := make([]mdPreviewBlockAnchor, len(anchors))
+	delta := len(topRows)
+	for i := range anchors {
+		shifted[i] = anchors[i]
+		shifted[i].Row += delta
+		shifted[i].EndRow += delta
+		delta += len(blockRows[i])
+	}
 
 	rows := strings.Split(rendered, "\n")
-	out := mdPreviewRowsFromBuilder(&top)
+	out := topRows
 	bi := 0
 	for i, line := range rows {
 		out = append(out, line)
@@ -68,7 +106,7 @@ func (m Model) mdPreviewPaintAnnotations(rendered string, srcMap mdPreviewSource
 	for ; bi < len(anchors); bi++ {
 		out = append(out, blockRows[bi]...)
 	}
-	return strings.Join(out, "\n")
+	return strings.Join(out, "\n"), mdPreviewSourceMap{Aligned: true, anchors: shifted}
 }
 
 // mdPreviewAnnotateDegraded lists every one of this file's annotations —
