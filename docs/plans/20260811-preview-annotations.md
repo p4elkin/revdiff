@@ -203,14 +203,14 @@ hunk expansion today, and populating it differently would break that promise.
 **Model:** sonnet
 **Wave:** map
 
-- [ ] read the spike harness at `/private/tmp/claude-501/-Users-sasha-dev-oss-revdiff/3ca44ced-2e51-4dbb-97e0-c4e65cb65f87/scratchpad/marker_spike_harness.go.txt` first and lift `zzMarker`, `zzKinds`, `zzStyleWith`, `zzStripMarkers`, `zzDropEmptySGRPairs`, `zzRowsWithMarker`, `zzChromeRe` rather than rewriting them
-- [ ] create the marker encoding (a single-parameter SGR sequence outside every defined range, so it is inert and zero-width) with a doc comment giving the rationale the harness records
-- [ ] create the kind table covering `paragraph`, `h1`..`h6`, `item`, `enumeration`, `code_block`, `block_quote`, `table`, `hr`, `html_block` — **not** the generic `heading`, which never emits — each with the style field it prepends to
-- [ ] implement style cloning that prepends markers without discarding an existing prefix (`item`'s block prefix is `"• "`)
-- [ ] implement extraction returning kind and row per marker, **deduped by row**, and classifying a marker as row-start or mid-row against the chrome pattern
-- [ ] implement stripping by exact byte match plus the empty-SGR post-pass
-- [ ] write tests: marker is zero-width under `ansi.StringWidth`; stripping is exact and total; an existing prefix survives; dedupe collapses the 3x repeat; mid-row markers are classified as such
-- [ ] run `go test ./app/ui -run 'TestMdPreviewMarker|TestMarker'` — must pass before the next task
+- [x] read the spike harness at `/private/tmp/claude-501/-Users-sasha-dev-oss-revdiff/3ca44ced-2e51-4dbb-97e0-c4e65cb65f87/scratchpad/marker_spike_harness.go.txt` first and lift `zzMarker`, `zzKinds`, `zzStyleWith`, `zzStripMarkers`, `zzDropEmptySGRPairs`, `zzRowsWithMarker`, `zzChromeRe` rather than rewriting them
+- [x] create the marker encoding (a single-parameter SGR sequence outside every defined range, so it is inert and zero-width) with a doc comment giving the rationale the harness records
+- [x] create the kind table covering `paragraph`, `h1`..`h6`, `item`, `enumeration`, `code_block`, `block_quote`, `table`, `hr`, `html_block` — **not** the generic `heading`, which never emits — each with the style field it prepends to
+- [x] implement style cloning that prepends markers without discarding an existing prefix (`item`'s block prefix is `"• "`)
+- [x] implement extraction returning kind and row per marker, **deduped by row**, and classifying a marker as row-start or mid-row against the chrome pattern
+- [x] implement stripping by exact byte match plus the empty-SGR post-pass
+- [x] write tests: marker is zero-width under `ansi.StringWidth`; stripping is exact and total; an existing prefix survives; dedupe collapses the 3x repeat; mid-row markers are classified as such
+- [x] run `go test ./app/ui -run 'TestMdPreviewMarker|TestMarker'` — must pass before the next task
 
 ### Task 2: goldmark block walk
 
@@ -221,13 +221,13 @@ hunk expansion today, and populating it differently would break that promise.
 **Model:** sonnet
 **Wave:** map
 
-- [ ] parse the placeholder document with goldmark configured to match glamour's extension set (the table extension in particular, or block boundaries will disagree with the render)
-- [ ] walk the AST in pre-order emitting one entry per tracked kind with its source line span, derived from each node's `Lines()` byte segments
-- [ ] fold task-list items into their enclosing list item, and emit a table as one entry covering the whole table
-- [ ] implement target selection: the deepest block owning a start line wins, targets are non-overlapping and in document order
-- [ ] write tests for tight list, loose list, nested list, ordered list, table, fenced code, blockquote, headings of every level, and a document mixing them
-- [ ] write tests for the folding rules: a task item resolves to its list item; a table yields exactly one target
-- [ ] run `go test ./app/ui -run 'TestMdPreviewBlocks|TestBlockWalk'` — must pass before the next task
+- [x] parse the placeholder document with goldmark configured to match glamour's extension set (the table extension in particular, or block boundaries will disagree with the render)
+- [x] walk the AST in pre-order emitting one entry per tracked kind with its source line span, derived from each node's `Lines()` byte segments
+- [x] fold task-list items into their enclosing list item, and emit a table as one entry covering the whole table
+- [x] implement target selection: the deepest block owning a start line wins, targets are non-overlapping and in document order
+- [x] write tests for tight list, loose list, nested list, ordered list, table, fenced code, blockquote, headings of every level, and a document mixing them
+- [x] write tests for the folding rules: a task item resolves to its list item; a table yields exactly one target
+- [x] run `go test ./app/ui -run 'TestMdPreviewBlocks|TestBlockWalk'` — must pass before the next task
 
 ### Task 3: Alignment and the source map
 
