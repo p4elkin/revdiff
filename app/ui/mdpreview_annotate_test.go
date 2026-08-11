@@ -6,11 +6,13 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/umputun/revdiff/app/annotation"
+	"github.com/umputun/revdiff/app/diff"
 	"github.com/umputun/revdiff/app/keymap"
 )
 
@@ -340,6 +342,47 @@ func TestMdPreviewClickAnnotate_UnalignedIsNoOp(t *testing.T) {
 	assert.False(t, got.annot.annotating, "a click against an unaligned map must be a no-op")
 }
 
+// TestMdPreviewStartAnnotation_RefusalIsNotSilent pins the feedback half of a
+// refused preview annotation. Before this, pressing `a` on a document whose
+// source map did not align produced a byte-identical frame with every transient
+// hint empty — the reader could not tell "this document cannot be anchored"
+// from "the key is not bound". outputState/compactState set the precedent for
+// saying so in the status bar, and the hint clears on the next key like theirs.
+func TestMdPreviewStartAnnotation_RefusalIsNotSilent(t *testing.T) {
+	unalignedDoc := "| a | b |\n|---|---|\n| 1 | 2 |\n\n| c | d |\n|---|---|\n| 3 | 4 |"
+
+	base := func(t *testing.T) Model {
+		t.Helper()
+		m := mdPreviewTestModel(mdLines(unalignedDoc))
+		m.modes.mdPreview = true
+		_, srcMap := m.mdPreviewBody()
+		require.False(t, srcMap.Aligned,
+			"fixture sanity: two tables separated only by a blank line must fail alignment")
+		return m
+	}
+
+	t.Run("unaligned document explains itself", func(t *testing.T) {
+		m := base(t)
+		before := m.statusBarText()
+
+		got := pressKey(t, m, "a")
+
+		require.False(t, got.annot.annotating, "an unaligned document still refuses to anchor")
+		assert.NotEmpty(t, got.preview.hint, "a refused annotation must not be silent")
+		assert.Contains(t, got.statusBarText(), got.preview.hint, "the hint must reach the status bar")
+		assert.NotEqual(t, before, got.statusBarText(), "the status bar must change, or the refusal is invisible")
+	})
+
+	t.Run("hint clears on the next key", func(t *testing.T) {
+		refused := pressKey(t, base(t), "a")
+		require.NotEmpty(t, refused.preview.hint)
+
+		next := pressKey(t, refused, "j")
+
+		assert.Empty(t, next.preview.hint, "the hint is transient, like reload/output/compact")
+	})
+}
+
 // TestDispatchAction_PreviewConfirmWithTreeFocus_DoesNotMoveViewport is the
 // checklist's "enter with tree focus does not move the viewport" case: with
 // the tree/TOC pane focused (reachable while previewing, since nothing in
@@ -347,10 +390,16 @@ func TestMdPreviewClickAnnotate_UnalignedIsNoOp(t *testing.T) {
 // fall through to handleEnterKey's TOC-jump branch — which would realign the
 // viewport to a diff-line coordinate the preview render does not have.
 //
-// It must also not start an annotation from there: annotate_file (A) is gated
-// on diff-pane focus by handleFileAnnotateKey, and the two annotation-creating
-// keys have to agree, or `a` silently opens an input on a block the reader was
-// not aiming at with a pane they were not looking at.
+// It must also not start an annotation from that press: annotate_file (A) is
+// gated on diff-pane focus by handleFileAnnotateKey, and the two
+// annotation-creating keys have to agree, or `a` silently opens an input on a
+// block the reader was not aiming at with a pane they were not looking at.
+//
+// What it must do instead is TAKE focus, so the second press annotates — the
+// same progression handleEnterKey's own paneTree branch gives source view.
+// Returning a bare no-op here left `a` and `A` permanently dead in every
+// multi-file review, since paneTree is the focus a review starts in and preview
+// blocks every focus-moving action.
 func TestDispatchAction_PreviewConfirmWithTreeFocus_DoesNotMoveViewport(t *testing.T) {
 	// a long document, not the usual three-line fixture: startPreviewAnnotationAt
 	// restores the offset via the real SetYOffset, which clamps against the
@@ -379,14 +428,64 @@ func TestDispatchAction_PreviewConfirmWithTreeFocus_DoesNotMoveViewport(t *testi
 	assert.Equal(t, 5, got.layout.viewport.YOffset,
 		"ActionConfirm in preview must not run the TOC jump's viewport realignment")
 	assert.False(t, got.annot.annotating,
-		"ActionConfirm in preview must be inert with the tree/TOC pane focused, matching annotate_file")
+		"the first ActionConfirm must not annotate with the tree/TOC pane focused, matching annotate_file")
+	assert.Equal(t, paneDiff, got.layout.focus,
+		"the first ActionConfirm must take focus, or a/A stay dead with no keyboard way back")
 
-	// and with the diff pane focused it does start one, so the gate above is a
-	// focus gate rather than the action being dead
-	m.layout.focus = paneDiff
-	focused, _ := m.dispatchAction(keymap.ActionConfirm)
-	assert.True(t, focused.(Model).annot.annotating,
-		"ActionConfirm in preview must start an annotation when the diff pane has focus")
+	// the second press, on the model the first one returned, annotates: the gate
+	// is a self-healing focus step and not the action being dead
+	second, _ := got.dispatchAction(keymap.ActionConfirm)
+	assert.True(t, second.(Model).annot.annotating,
+		"the second ActionConfirm must start an annotation, now that focus has moved to the diff pane")
+	assert.Equal(t, 5, second.(Model).layout.viewport.YOffset,
+		"starting the annotation must still leave the preview viewport where the reader left it")
+}
+
+// TestDispatchAction_PreviewAnnotate_MultiFileReviewThroughRealLoadPath is the
+// entry-path test the focus gate needed and did not have. Every other test here
+// reaches preview through mdPreviewTestModel, which assigns m.layout.focus =
+// paneDiff by hand — the one state in which the gate is invisible. This one
+// assigns focus nowhere and builds the model the way a running session does
+// (WindowSizeMsg, then filesLoadedMsg, then fileLoadedMsg) for a MULTI-FILE
+// review, which is where handleFilesLoaded leaves focus on paneTree: only
+// single-file mode flips it to paneDiff (loaders.go).
+//
+// That is the shape in which `a` was permanently dead: the gate returned
+// handled with no state change, and preview blocks toggle_pane / focus_tree /
+// focus_diff, so no key could recover. Press `P` then `a` twice and an input
+// must open.
+func TestDispatchAction_PreviewAnnotate_MultiFileReviewThroughRealLoadPath(t *testing.T) {
+	mdDoc := "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n"
+	diffs := map[string][]diff.DiffLine{
+		"plan.md": mdLines(mdDoc),
+		"other.go": {
+			{ChangeType: diff.ChangeAdd, Content: "package main", NewNum: 1},
+		},
+	}
+	m := testModel([]string{"plan.md", "other.go"}, diffs)
+
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = result.(Model)
+	result, _ = m.Update(filesLoadedMsg{entries: []diff.FileEntry{{Path: "plan.md"}, {Path: "other.go"}}})
+	m = result.(Model)
+	result, _ = m.Update(m.loadFileDiff("plan.md")())
+	m = result.(Model)
+
+	require.False(t, m.file.singleFile, "fixture sanity: this must be a multi-file review, where focus stays on the tree")
+	require.Equal(t, paneTree, m.layout.focus, "fixture sanity: the real load path must leave focus on the tree pane")
+	require.True(t, m.file.markdownPreviewable, "fixture sanity: a full-context markdown file in a multi-file review is previewable")
+
+	m = pressKey(t, m, "P")
+	require.True(t, m.modes.mdPreview, "P must turn preview on")
+
+	m = pressKey(t, m, "a")
+	assert.Equal(t, paneDiff, m.layout.focus, "the first `a` must take focus")
+	assert.False(t, m.annot.annotating, "the first `a` must not annotate yet")
+
+	m = pressKey(t, m, "a")
+	assert.True(t, m.annot.annotating,
+		"the second `a` must open an annotation input — this is the press that was dead in every multi-file review")
+	assert.False(t, m.annot.fileAnnotating, "`a` must start a LINE-level annotation")
 }
 
 // TestMdPreviewStartAnnotation_SavedAnnotationMatchesSourceView proves the
@@ -515,6 +614,11 @@ func TestDispatchAction_MdPreviewOn_AnnotateFileStartsAnnotation(t *testing.T) {
 // is gated on the diff pane having focus, in preview exactly as in source
 // view, so allowing annotate_file to fall through unmodified needs no
 // preview-specific focus guard of its own.
+//
+// The second half is what makes that gate acceptable rather than a dead key:
+// `a` is the recovery, taking focus on its first press, after which `A` works.
+// Without it there would be no keyboard route out of tree focus in preview at
+// all — toggle_pane, focus_tree and focus_diff are all excluded.
 func TestDispatchAction_MdPreviewOn_AnnotateFileNoOpWhenTreeFocused(t *testing.T) {
 	lines := mdLines("# Title\n\nSome text.")
 	m := mdPreviewTestModel(lines)
@@ -525,6 +629,14 @@ func TestDispatchAction_MdPreviewOn_AnnotateFileNoOpWhenTreeFocused(t *testing.T
 	model := pressKey(t, m, "A")
 
 	assert.False(t, model.annot.annotating, "A must stay a no-op while the tree pane has focus")
+
+	recovered := pressKey(t, model, "a")
+	require.Equal(t, paneDiff, recovered.layout.focus, "`a` must be the way back to diff focus in preview")
+	require.False(t, recovered.annot.annotating, "the focus-taking press must not itself annotate")
+
+	afterRecovery := pressKey(t, recovered, "A")
+	assert.True(t, afterRecovery.annot.annotating, "A must work once `a` has handed focus to the diff pane")
+	assert.True(t, afterRecovery.annot.fileAnnotating, "and it must still be a FILE-level annotation")
 }
 
 // TestDispatchAction_MdPreviewOn_AnnotateFileSavedAnnotationPaintsAboveRowZero
@@ -692,19 +804,33 @@ func TestMdPreviewClickAnnotate_RefusedGuards(t *testing.T) {
 // once the frame is panned, cutMdPreviewLine has cut each row at wherever its
 // own content ended, so a row that does not continue to the right is shorter
 // than the pane and the highlight would stop short of the edge.
+//
+// The fixture has to be WIDER than the pane or the scenario never happens:
+// applyMdPreviewScroll returns the render untouched when the widest row already
+// fits (offset == 0 && widest <= cutWidth), and the widest row of highlightDoc
+// at width 40 is 38 — so this test used to pass on the padTo branch alone,
+// never reaching a ragged cut. A fenced block of 120 columns is what makes the
+// cut real, while the marked block stays a short one that needs the padding.
 func TestMdPreviewHighlight_PannedRowReachesPaneEdge(t *testing.T) {
-	m := mdPreviewHighlightModel(t)
+	m := mdPreviewStyledModel(t, widePanDoc)
 	m.layout.viewport.Width = 40
 	m.layout.scrollX = 5
 
-	_, srcMap := m.mdPreviewBody()
+	body, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.Aligned, "fixture sanity")
+	require.Greater(t, m.mdPreviewWidestRow(body), m.mdPreviewCutWidth(),
+		"fixture sanity: the document must be wider than the pane, or applyMdPreviewScroll returns the render untouched")
 	bi := m.mdPreviewHighlightAnchor(srcMap)
 	require.GreaterOrEqual(t, bi, 0, "fixture sanity: a block must be marked")
 
+	markedRow := srcMap.blocks()[bi].Row
+	cut := strings.Split(m.applyMdPreviewScroll(body), "\n")
+	require.Less(t, ansi.StringWidth(cut[markedRow]), m.mdPreviewCutWidth(),
+		"fixture sanity: the marked row must come out of the cut SHORT, or there is no ragged bar to pad")
+
 	rows := strings.Split(m.mdPreviewFinalRender(), "\n")
 	bg := mdPreviewHighlightBg(m)
-	row := rows[srcMap.blocks()[bi].Row]
+	row := rows[markedRow]
 	require.Contains(t, row, bg, "fixture sanity: the marked row must carry the highlight")
 	assert.Equal(t, m.mdPreviewCutWidth(), ansi.StringWidth(row),
 		"a panned highlighted row must be padded out so the bar reaches the pane edge")

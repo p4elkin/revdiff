@@ -235,6 +235,16 @@ const highlightDoc = "# Title\n\n" +
 	"Eleventh paragraph.\n\n" +
 	"Twelfth paragraph."
 
+// widePanDoc is highlightDoc's counterpart for the ragged-cut case: a fenced
+// code block far wider than any pane these tests use, so applyMdPreviewScroll
+// really cuts instead of taking its "nothing hidden in either direction"
+// early return. The short blocks around it are what the highlight lands on, and
+// they are the rows the cut leaves ragged.
+var widePanDoc = "# Wide\n\n" +
+	"Short paragraph.\n\n" +
+	"```\n" + strings.Repeat("x", 120) + "\n```\n\n" +
+	"Another short paragraph.\n"
+
 // mdPreviewHighlightModel loads highlightDoc into mdPreviewTestModel with
 // preview turned on and a resolver that actually carries a search
 // background — the two things every test below needs. testModel uses
@@ -242,7 +252,15 @@ const highlightDoc = "# Title\n\n" +
 // documented no-op there, so a test built on it could never see one.
 func mdPreviewHighlightModel(t *testing.T) Model {
 	t.Helper()
-	m := mdPreviewTestModel(mdLines(highlightDoc))
+	return mdPreviewStyledModel(t, highlightDoc)
+}
+
+// mdPreviewStyledModel is mdPreviewHighlightModel for any document: preview on,
+// with a resolver that carries a real search background so the highlight is
+// visible at all.
+func mdPreviewStyledModel(t *testing.T, doc string) Model {
+	t.Helper()
+	m := mdPreviewTestModel(mdLines(doc))
 	res := style.NewResolver(style.Colors{DiffBg: "#112233", SearchBg: "#5f00af", Normal: "#cccccc"})
 	m.resolver = res
 	m.renderer = style.NewRenderer(res)

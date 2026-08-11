@@ -397,7 +397,7 @@ func mdPreviewShiftRow(shifts []mdPreviewArtShift, row int) int {
 // redundant: the two sequences are produced independently, so a goldmark-side
 // mistake (the block walk resolving two blocks onto one source line) passes
 // the row check untouched. It is not a theoretical class either — consecutive
-// thematic breaks used to do exactly that (see thematicBreakLine,
+// thematic breaks used to do exactly that (see mdBreakResolver,
 // mdpreview_blocks.go), and the consequence was worse than a misplaced
 // comment: two blocks sharing a source line means two annotations sharing
 // annotation.Store's (Line, Type) key, and Add REPLACES on a key collision, so

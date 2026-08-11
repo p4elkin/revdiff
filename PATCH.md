@@ -368,6 +368,24 @@ neither reads or assigns `m.nav.diffCursor` (a file-level annotation's `Line`
 is always 0, which `mdPreviewPaintAnnotationsTracked` already paints ahead of
 every block unconditionally) and neither touches the viewport.
 
+⚠️ **The `ActionConfirm` focus branch takes focus rather than doing nothing.**
+With the tree/TOC pane focused it assigns `m.layout.focus = paneDiff` and
+returns, so the second press annotates — the same progression
+`handleEnterKey`'s own `paneTree` branch gives source view. A bare no-op there
+made `a` and `A` permanently dead in every **multi-file** review: `paneTree` is
+the focus `NewModel` starts in (only single-file mode flips it to `paneDiff`,
+in `handleFilesLoaded`), and `toggle_pane` / `focus_tree` / `focus_diff` are all
+excluded from the allowlist, so no key could hand focus back. `A` keeps its own
+unmodified diff-pane-only gate and becomes reachable once `a` has moved focus.
+
+A refused preview annotation is not silent either: `startPreviewAnnotation` sets
+`m.preview.hint` (an `mdPreviewState`, the same shape as `outputState` /
+`compactState`, rendered by `transientHint` and cleared on the next key or mouse
+event) when `mdPreviewHighlightAnchor` returns -1. That is the unaligned-document
+case — `README.md` is one — where the frame is otherwise byte-identical and the
+reader cannot tell "this document cannot be anchored" from "the key is not
+bound".
+
 The render cache (`mdpreview_cache.go`) is a single entry, not a map — the
 preview shows one file at a time, so there is never more than one base render
 worth keeping warm (same shape as `diffRenderCache`'s own per-line, not
@@ -742,6 +760,20 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   worth stating on its own: **a comment made in preview cannot be undone from inside preview.**
   Pressing `a` on the same block again pre-fills the existing comment, but clearing the input and
   confirming runs `cancelAnnotation`, which leaves the stored comment untouched.
+- **A thematic break (`---`) has no position of its own and is recovered by a gap scan.** goldmark
+  appends nothing to a `ThematicBreak`'s `Lines()`, so `mdBreakResolver` (`mdpreview_blocks.go`)
+  bounds it between the nearest siblings that DO carry a position and takes the first line in that
+  gap which looks like a rule (`looksLikeThematicBreak` — three or more matching `-`/`*`/`_`,
+  ignoring leading whitespace and any `>` quote markers). The candidate test is what makes the gap
+  scan correct on ordinary documents rather than only on isolated breaks: `Lines()` on a fenced code
+  block covers the CONTENT only, so a `---` after a fence has the closing ``` inside its gap, and a
+  break inside a blockquote has a bare `>` continuation in its. The earlier "first non-blank line"
+  rule anchored to those, with `Aligned=true` — a wrong source line in the `-o` output and nothing
+  to warn on. Resolved lines memoize per node, because a run of consecutive breaks resolves each
+  break through the one before it (800 consecutive breaks took seconds without the memo, on the
+  bubbletea `Update` goroutine). A break whose gap holds no rule-looking line resolves to nothing,
+  which fails alignment and degrades the whole document — the correct outcome, since the alternative
+  is anchoring to a line that is not the break.
 - **A list item whose children are all boundary kinds contributes no target, and degrades the whole
   document.** `swallowedSpan` aggregates only over a container's own direct content, and a nested
   list, table, code block, heading or thematic break is excluded because it gets its own target —

@@ -71,20 +71,31 @@ func TestMdPreviewMarkerKindsCoverage(t *testing.T) {
 	if len(mdPreviewMarkerKinds) != len(want) {
 		t.Fatalf("got %d kinds, want %d", len(mdPreviewMarkerKinds), len(want))
 	}
+	// behavioral stand-in for the string field label this table used to carry.
+	// Two properties, and the second is the one that matters: every kind's apply
+	// func must write SOMETHING into the style config, and no two kinds may
+	// write the same thing. A kind wired to the wrong field (h3's marker landing
+	// in Styles.H2.Prefix, say) leaves two kinds producing an identical config,
+	// which "apply wrote something" alone cannot see.
+	applied := make(map[mdPreviewBlockKind]ansi.StyleConfig, len(mdPreviewMarkerKinds))
 	for _, k := range mdPreviewMarkerKinds {
 		if !want[k.kind] {
 			t.Errorf("unexpected kind %q in table (excluded kinds: heading, list, document, text)", k.kind)
 			continue
 		}
-		// behavioral stand-in for the string field label this table used to
-		// carry: every kind's apply func must actually write into the style
-		// config, so a kind cannot sit in the table marking nothing.
 		var sc ansi.StyleConfig
 		before := sc
 		k.apply(&sc, "MARK")
 		if reflect.DeepEqual(before, sc) {
 			t.Errorf("kind %s: apply wrote nothing into the style config", k.kind)
+			continue
 		}
+		for other, prev := range applied {
+			if reflect.DeepEqual(prev, sc) {
+				t.Errorf("kinds %s and %s write their marker into the same style field", other, k.kind)
+			}
+		}
+		applied[k.kind] = sc
 	}
 	for name := range want {
 		found := false

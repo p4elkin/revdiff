@@ -591,6 +591,7 @@ type Model struct {
 	compact     compactState      // applicability + transient hint for compact diff mode
 	editorState editorState       // transient hint state for source-file editor launches
 	output      outputState       // transient hint state for the O in-session output flush
+	preview     mdPreviewState    // transient hint state for markdown preview refusals
 	keys        keyState          // chord-pending state and transient hint for leader-chord keybindings
 	vim         vimState          // count accumulator, pending letter leader, and transient hint for vim-motion preset
 	wheel       wheelState        // diff-pane mouse wheel coalescing (debounced render via wheelDebounceMsg)
@@ -1027,6 +1028,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.reload.hint = ""
 	m.output.hint = ""
 	m.compact.hint = ""
+	m.preview.hint = ""
 	m.editorState.hint = ""
 	m.keys.hint = ""
 	m.vim.hint = ""

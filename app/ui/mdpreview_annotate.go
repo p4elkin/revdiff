@@ -264,15 +264,35 @@ func (m Model) mdPreviewLiveInputTarget() (int, bool) {
 //
 // Returns nil when there is nothing to anchor to (see mdPreviewHighlightAnchor:
 // an unaligned map, an empty document, or a viewport scrolled above the first
-// block) — annotation creation is simply refused, the same as pressing `a` on
-// a diff divider in source view.
+// block) — annotation creation is refused, the same as pressing `a` on a diff
+// divider in source view.
+//
+// A refusal sets a transient status-bar hint rather than being silent. A reader
+// who presses `a` on a document whose source map did not align (README.md is
+// one, by design — see mdPreviewBuildSourceMap) otherwise gets a byte-identical
+// frame back, with no way to tell "this document cannot be anchored" from "the
+// key is not bound". The hint is the same mechanism outputState and
+// compactState use for their own refusals, and clears on the next key press.
 func (m *Model) startPreviewAnnotation() tea.Cmd {
 	_, srcMap := m.mdPreviewBody()
 	bi := m.mdPreviewHighlightAnchor(srcMap)
 	if bi < 0 {
+		m.preview.hint = mdPreviewRefusalHint(srcMap)
 		return nil
 	}
 	return m.startPreviewAnnotationAt(srcMap.blocks()[bi].StartLine)
+}
+
+// mdPreviewRefusalHint is the status-bar message for a refused preview
+// annotation, split by which of mdPreviewHighlightAnchor's two reasons applies.
+// An unaligned map is a property of the document and never resolves, so the
+// hint names the way out (press P, annotate in source view); a map that aligned
+// but resolved no block is positional and the reader can scroll out of it.
+func mdPreviewRefusalHint(srcMap mdPreviewSourceMap) string {
+	if !srcMap.Aligned || len(srcMap.blocks()) == 0 {
+		return "Preview cannot anchor this document — press P to annotate in source view"
+	}
+	return "No block in view to annotate"
 }
 
 // startPreviewAnnotationAt is the shared core behind startPreviewAnnotation

@@ -99,6 +99,7 @@ func mdPreviewBlockTargets(doc string) []mdPreviewBlockTarget {
 	src := []byte(doc)
 	root := mdBlockMarkdown.Parser().Parse(gtext.NewReader(src))
 	idx := newMdLineIndex(doc)
+	breaks := newMdBreakResolver(doc, idx)
 
 	var targets []mdPreviewBlockTarget
 	add := func(kind mdPreviewBlockKind, start, end int, ok bool) {
@@ -173,7 +174,7 @@ func mdPreviewBlockTargets(doc string) []mdPreviewBlockTarget {
 			return gast.WalkSkipChildren, nil
 
 		case gast.KindThematicBreak:
-			line, ok := thematicBreakLine(n, idx, doc)
+			line, ok := breaks.line(n)
 			add(mdBlockHR, line, line, ok)
 			return gast.WalkContinue, nil
 
@@ -258,7 +259,7 @@ func (idx mdLineIndex) lastLine() int {
 // containers to find the leaves that do carry one.
 //
 // ok is false only when the whole subtree carries no position at all: an
-// empty node, or a ThematicBreak (see thematicBreakLine — it is the one
+// empty node, or a ThematicBreak (see mdBreakResolver — it is the one
 // tracked kind with zero text and so zero Lines() anywhere in its subtree).
 func blockLineSpan(n gast.Node, idx mdLineIndex) (start, end int, ok bool) {
 	if n.Type() == gast.TypeBlock {
@@ -340,73 +341,103 @@ func isMdSpanBoundary(k gast.NodeKind) bool {
 	}
 }
 
-// thematicBreakLine locates a ThematicBreak's one source line. Unlike every
-// other tracked kind, goldmark records no text.Segment for it at all — see
-// vendor/.../goldmark/parser/thematic_break.go's Open, which returns a bare
-// ast.NewThematicBreak() with nothing ever appended to its Lines() because
-// the node carries no text (verified empirically: Lines().Len() == 0 for
-// every ThematicBreak, with an experiment run against this project's
-// vendored goldmark before writing this function).
+// mdBreakResolver locates the source line of every ThematicBreak in one
+// document. Unlike every other tracked kind, goldmark records no text.Segment
+// for a thematic break at all — see vendor/.../goldmark/parser/thematic_break.go's
+// Open, which returns a bare ast.NewThematicBreak() with nothing ever appended
+// to its Lines() because the node carries no text (verified empirically:
+// Lines().Len() == 0 for every ThematicBreak, with an experiment run against
+// this project's vendored goldmark before writing this).
 //
 // The line is recovered from context instead: a thematic break is always
-// exactly one line, and it must fall strictly between the end of the
-// nearest previous sibling with a known position (or the start of the
-// parent, if it is the first child) and the start of the nearest next
-// sibling with a known position (or the end of the document, if it is the
-// last child) — nothing else can occupy that gap. Within the gap, the first
-// non-blank line is the break.
+// exactly one line, and it must fall between the end of the nearest previous
+// sibling with a known position (or the start of the document, if there is
+// none) and the start of the nearest next sibling with a known position (or
+// the end of the document). Within that gap, the break is the first line that
+// LOOKS like a rule — see looksLikeThematicBreak.
 //
-// Back-to-back thematic breaks resolve correctly because the lower-bound walk
-// recurses into an unresolved ThematicBreak sibling rather than bubbling past
-// it — see thematicBreakLowerBound. Bubbling was the original behavior and it
-// was not merely imprecise: on "text\n\n---\n\n---\n\nmore\n" the second break
-// resolved to line 1, the paragraph's own line, which put two targets on one
-// source line. Two annotations then collided on annotation.Store's (Line, Type)
-// key and one was destroyed. mdPreviewBuildSourceMap now also refuses any map
-// whose targets are not strictly increasing in source line, so a future source
-// of the same class degrades instead of overwriting a comment.
-func thematicBreakLine(n gast.Node, idx mdLineIndex, doc string) (line int, ok bool) {
-	lo, hi := thematicBreakLowerBound(n, idx, doc), thematicBreakUpperBound(n, idx)
+// "Looks like a rule" rather than "is not blank", and that difference is the
+// whole correctness of this type on ordinary documents. goldmark's Lines() on
+// a fenced code block covers the CONTENT lines only, never the fences, so a
+// "---" after a code fence has the closing ``` sitting inside its gap: the
+// not-blank rule anchored the break to the fence line, and annotating the rule
+// then wrote the fence's line number into the -o output. A break inside a
+// blockquote had the same shape, anchoring to a bare ">" continuation line. A
+// closing fence and a lone ">" are both non-blank and neither can be a rule,
+// so testing the candidate directly fixes both without needing each container
+// kind's real source extent.
+//
+// Resolved lines are memoized per node because the lower bound recurses into
+// an unresolved ThematicBreak sibling (see lowerBound): without the memo, every
+// break in a run of consecutive breaks re-walked the whole run before it, and
+// re-split the document at each level — measurably quadratic-plus on the
+// bubbletea Update goroutine (800 consecutive breaks took seconds). The
+// document is split into lines once, when the resolver is built.
+type mdBreakResolver struct {
+	idx   mdLineIndex
+	lines []string
+	memo  map[gast.Node]int // resolved 1-based line; 0 means "resolved to nothing"
+}
 
-	lines := strings.Split(doc, "\n")
-	for l := lo; l <= hi && l <= len(lines); l++ {
-		if strings.TrimSpace(lines[l-1]) != "" {
+func newMdBreakResolver(doc string, idx mdLineIndex) *mdBreakResolver {
+	return &mdBreakResolver{idx: idx, lines: strings.Split(doc, "\n"), memo: make(map[gast.Node]int)}
+}
+
+// line returns the 1-based source line of thematic break n, and whether one
+// was found at all. A break whose gap holds no rule-looking line resolves to
+// nothing: mdPreviewBlockTargets then emits no target for it, the marker
+// sequence and the block sequence disagree on length, and mdPreviewBuildSourceMap
+// degrades the whole document to Aligned=false. Refusing to anchor is the
+// correct outcome there — the alternative is anchoring to a line that is not
+// the break.
+func (r *mdBreakResolver) line(n gast.Node) (int, bool) {
+	if l, seen := r.memo[n]; seen {
+		return l, l > 0
+	}
+	// memoize the failure first: recursion below only ever targets strictly
+	// earlier nodes, so this cannot be read back for n itself, but it keeps a
+	// future change from looping.
+	r.memo[n] = 0
+
+	lo, hi := r.lowerBound(n), r.upperBound(n)
+	for l := lo; l <= hi && l <= len(r.lines); l++ {
+		if looksLikeThematicBreak(r.lines[l-1]) {
+			r.memo[n] = l
 			return l, true
 		}
 	}
 	return 0, false
 }
 
-// thematicBreakLowerBound returns the earliest line thematicBreakLine may
-// search from: the line right after the end of the nearest preceding
-// sibling of n, searching upward through ancestors when a level has no
-// previous sibling of its own (n's parent's parent's previous sibling, and
-// so on) — bubbling up rather than falling back to the immediate parent's
-// own aggregate span, which would be wrong here: a parent's blockLineSpan
-// aggregates over EVERY resolved descendant regardless of document order,
-// so on a document that opens with an unresolved ThematicBreak it would
-// jump straight to whatever comes after the break instead of bounding to
-// the true start of the document. Returns 1 if no ancestor level has a
-// previous sibling with a known position — n is the very first block.
+// lowerBound returns the earliest line line() may search from: the line right
+// after the end of the nearest preceding sibling of n, searching upward through
+// ancestors when a level has no previous sibling of its own (n's parent's
+// parent's previous sibling, and so on) — bubbling up rather than falling back
+// to the immediate parent's own aggregate span, which would be wrong here: a
+// parent's blockLineSpan aggregates over EVERY resolved descendant regardless
+// of document order, so on a document that opens with an unresolved
+// ThematicBreak it would jump straight to whatever comes after the break
+// instead of bounding to the true start of the document. Returns 1 if no
+// ancestor level has a previous sibling with a known position — n is the very
+// first block.
 //
 // A previous sibling that is itself a ThematicBreak carries no position of
 // its own, and is the one case where bubbling up gives an actively wrong
 // answer rather than a merely loose one: the bound then lands before the
-// earlier break, and the first non-blank line found from there is that
-// break's line — or, on "text\n\n---\n\n---\n\nmore\n", the paragraph's.
-// Recursing resolves the earlier break first and bounds this one to the line
-// after it. Recursion depth is the length of the run of consecutive breaks.
-func thematicBreakLowerBound(n gast.Node, idx mdLineIndex, doc string) int {
+// earlier break, and the first rule-looking line found from there is that
+// break's line. Recursing resolves the earlier break first and bounds this one
+// to the line after it.
+func (r *mdBreakResolver) lowerBound(n gast.Node) int {
 	for cur := n; cur != nil; cur = cur.Parent() {
 		prev := cur.PreviousSibling()
 		if prev == nil {
 			continue
 		}
-		if _, e, ok := blockLineSpan(prev, idx); ok {
+		if _, e, ok := blockLineSpan(prev, r.idx); ok {
 			return e + 1
 		}
 		if prev.Kind() == gast.KindThematicBreak {
-			if l, ok := thematicBreakLine(prev, idx, doc); ok {
+			if l, ok := r.line(prev); ok {
 				return l + 1
 			}
 		}
@@ -416,19 +447,59 @@ func thematicBreakLowerBound(n gast.Node, idx mdLineIndex, doc string) int {
 	return 1
 }
 
-// thematicBreakUpperBound is the mirror of thematicBreakLowerBound: the
-// line right before the start of the nearest following sibling, bubbling up
-// through ancestors the same way, or the last line of the document if none
-// exists.
-func thematicBreakUpperBound(n gast.Node, idx mdLineIndex) int {
+// upperBound is the mirror of lowerBound: the line right before the start of
+// the nearest following sibling, bubbling up through ancestors the same way, or
+// the last line of the document if none exists.
+func (r *mdBreakResolver) upperBound(n gast.Node) int {
 	for cur := n; cur != nil; cur = cur.Parent() {
 		next := cur.NextSibling()
 		if next == nil {
 			continue
 		}
-		if s, _, ok := blockLineSpan(next, idx); ok {
+		if s, _, ok := blockLineSpan(next, r.idx); ok {
 			return s - 1
 		}
 	}
-	return idx.lastLine()
+	return r.idx.lastLine()
+}
+
+// looksLikeThematicBreak reports whether one source line could be the rule
+// itself: three or more of the same "-", "*" or "_" character, with nothing
+// else on the line but spaces and tabs. That is CommonMark's own definition of
+// a thematic break, minus the indentation limit — leading whitespace and any
+// number of blockquote ">" markers are stripped first and never counted,
+// because a break nested in a list item or a quote carries that container's
+// prefix on its source line and would otherwise never match.
+//
+// Being permissive about the prefix is safe: this only ever runs on lines
+// inside a gap goldmark has already told us contains exactly one break.
+func looksLikeThematicBreak(line string) bool {
+	s := line
+	for {
+		t := strings.TrimLeft(s, " \t")
+		if !strings.HasPrefix(t, ">") {
+			s = t
+			break
+		}
+		s = t[1:]
+	}
+	s = strings.TrimRight(s, " \t\r")
+	if s == "" {
+		return false
+	}
+	marker := s[0]
+	if marker != '-' && marker != '*' && marker != '_' {
+		return false
+	}
+	count := 0
+	for i := range len(s) {
+		switch s[i] {
+		case marker:
+			count++
+		case ' ', '\t':
+		default:
+			return false
+		}
+	}
+	return count >= 3
 }

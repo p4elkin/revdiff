@@ -19,6 +19,14 @@ import (
 	"github.com/umputun/revdiff/app/ui/style"
 )
 
+// mdPreviewState holds markdown preview's own transient runtime state. Only a
+// status-bar hint today, following outputState / compactState: preview refuses
+// to annotate a document whose source map did not align, and a refusal with no
+// message on screen is indistinguishable from an unbound key.
+type mdPreviewState struct {
+	hint string // transient status-bar message; cleared on next key press
+}
+
 // mdFencePrefix returns the fence character ('`' or '~') and the count of leading
 // consecutive occurrences at the start of s. It returns (0, 0) when s does not
 // start with backticks or tildes.
@@ -809,7 +817,15 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 	switch action {
 	case keymap.ActionConfirm:
 		if m.layout.focus != paneDiff {
-			return m, nil, true // same focus gate handleFileAnnotateKey applies to A
+			// self-heal, exactly the way source view does: handleEnterKey's
+			// paneTree branch moves focus to the diff pane, so the first press
+			// takes focus and the second annotates. A bare no-op here is not a
+			// milder version of the same thing — it is a dead key: the default
+			// focus IS paneTree (NewModel, model.go) for every multi-file
+			// review, and preview blocks toggle_pane / focus_tree / focus_diff,
+			// so nothing on the keyboard could ever hand focus back.
+			m.layout.focus = paneDiff
+			return m, nil, true
 		}
 		cmd := m.startPreviewAnnotation()
 		return m, cmd, true
@@ -906,10 +922,16 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     allowlist changes m.layout.focus), where handleEnterKey would run the
 //     TOC jump — reassigning m.nav.diffCursor and the viewport offset in
 //     diff-line coordinates, exactly the class of bug this allowlist exists
-//     to prevent. It carries the same focus gate annotate_file does: with the
-//     tree/TOC pane focused it does nothing, so the two annotation-creating
-//     keys agree on what focus means instead of one of them silently opening
-//     an input the reader was not aiming with.
+//     to prevent. With the tree/TOC pane focused it does not annotate — it
+//     takes focus and returns, so the second press annotates, which is exactly
+//     what handleEnterKey's own paneTree branch does in source view. A bare
+//     no-op there would have been a dead key rather than a stricter gate:
+//     paneTree is the focus every multi-file review starts in (NewModel,
+//     model.go — only single-file mode assigns paneDiff), and toggle_pane /
+//     focus_tree / focus_diff are all excluded below, so nothing on the
+//     keyboard could hand focus back. Taking focus on the first press is also
+//     what makes annotate_file (A) reachable, since it keeps its own
+//     diff-pane-only gate unmodified.
 //   - quit / discard_quit / help / theme_select / toggle_tree are session and
 //     layout actions that never touch m.nav.diffCursor or the annotation
 //     store (theme_select and help open an overlay; toggle_tree only flips

@@ -242,9 +242,14 @@ exception: none of this section applies there — see item 9.6.
       supported); leave preview with `P` to delete it from source view instead
 - [ ] same for `@` and `}`/`{` — all three annotation actions are blocked in preview; press `P`
       first
-- [ ] move focus to the file-tree/TOC pane FIRST, then press `P` (focus cannot be changed while
-      previewing) and press `a` — confirm nothing happens, the same as `A` there. Aiming only works
-      with the diff pane focused
+- [ ] move focus to the file-tree/TOC pane FIRST, then press `P` and press `a` — the first press
+      does not annotate, it hands focus to the diff pane; press `a` again and the input opens. This
+      is the only way back to diff focus while previewing, since `tab`, `h` and `l` are all blocked
+- [ ] do the same in a MULTI-FILE review that contains a markdown file (open the review, move to the
+      markdown file, press `P` without touching focus) — `a` must reach an input in two presses.
+      A multi-file review starts with the tree focused, so this is the ordinary path, not a corner
+- [ ] press `a` on a document that cannot be anchored (README.md is one) — the status bar says so
+      rather than the key doing nothing visible
 
 ### 9.6 `--no-colors`
 

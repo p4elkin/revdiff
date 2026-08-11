@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"strings"
 	"testing"
+	"time"
 )
 
 // findTarget returns the first target of kind k, failing the test if none
@@ -256,7 +258,7 @@ func TestMdPreviewBlocksHorizontalRuleFirstAndLastLine(t *testing.T) {
 // misplace a break onto a previous block's line: a run of thematic breaks with
 // nothing but blank lines between them. A ThematicBreak carries no position of
 // its own, so the second break's lower-bound walk has to resolve the first
-// break rather than bubbling past it (see thematicBreakLowerBound). When it
+// break rather than bubbling past it (see mdBreakResolver.lowerBound). When it
 // bubbled, "text\n\n---\n\n---\n\nmore\n" put the second break on line 1 —
 // the paragraph's line — and two targets on one source line silently destroy
 // one of two annotations.
@@ -290,6 +292,120 @@ func TestMdPreviewBlocksConsecutiveHorizontalRules(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMdPreviewBlocksHorizontalRuleAfterUnpositionedLines is the second half of
+// the same family, and the one the consecutive-break fix did not cover: a break
+// whose gap contains a non-blank line that is not the break. goldmark's Lines()
+// on a fenced code block covers only its CONTENT, so the closing ``` sits inside
+// the gap; a bare ">" continuation inside a blockquote does the same. The
+// "first non-blank line in the gap" rule anchored the break to those lines, and
+// annotating the rule then wrote the wrong source line into the -o output — with
+// Aligned=true, so nothing degraded and nothing warned. The candidate now has to
+// look like a rule (see looksLikeThematicBreak).
+func TestMdPreviewBlocksHorizontalRuleAfterUnpositionedLines(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want []int
+	}{
+		{
+			"break after a fenced code block",
+			"# Plan\n\nIntro prose.\n\n```go\nfunc main() {}\n```\n\n---\n\n## Next\n\nMore prose.\n",
+			[]int{9},
+		},
+		{
+			"break after a fence with no info string",
+			"a\n\n```\nx\n```\n\n---\n\nb\n",
+			[]int{7},
+		},
+		{
+			"breaks inside a blockquote",
+			"> a\n>\n> ---\n>\n> ---\n",
+			[]int{3, 5},
+		},
+		{
+			"starred rule after a fence",
+			"a\n\n```\nx\n```\n\n***\n\nb\n",
+			[]int{7},
+		},
+		{
+			"spaced rule after a fence",
+			"a\n\n```\nx\n```\n\n- - -\n\nb\n",
+			[]int{7},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			targets := mdPreviewBlockTargets(tc.doc)
+			assertNonOverlappingOrdered(t, targets)
+			var got []int
+			for _, tg := range targets {
+				if tg.Kind == mdBlockHR {
+					got = append(got, tg.StartLine)
+				}
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d hr targets %v, want %v (all targets: %+v)", len(got), got, tc.want, targets)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("hr %d = line %d, want %d (all targets: %+v)", i, got[i], tc.want[i], targets)
+				}
+			}
+		})
+	}
+}
+
+// TestLooksLikeThematicBreak pins the candidate test the gap scan now uses.
+// Permissive about the prefix (a break nested in a quote or a list item carries
+// that container's markers on its source line), strict about the rest — a
+// closing code fence and a bare ">" are the two lines that used to be taken for
+// a rule.
+func TestLooksLikeThematicBreak(t *testing.T) {
+	// "-- -" is a real thematic break: CommonMark counts three matching
+	// characters with any spaces between them, not three adjacent ones.
+	yes := []string{"---", "***", "___", "- - -", "-- -", "  ---", "---   ", "> ---", ">---", "> > ---", "    ***", "-----"}
+	no := []string{"", "   ", "--", "```", ">", ">  ", "---x", "| --- |", "***bold***", "- item", "===", "* * a", "-*-"}
+	for _, s := range yes {
+		if !looksLikeThematicBreak(s) {
+			t.Errorf("looksLikeThematicBreak(%q) = false, want true", s)
+		}
+	}
+	for _, s := range no {
+		if looksLikeThematicBreak(s) {
+			t.Errorf("looksLikeThematicBreak(%q) = true, want false", s)
+		}
+	}
+}
+
+// TestMdPreviewBlocksLongThematicBreakRunIsLinear guards the cost of the
+// lower-bound recursion. Each break's bound resolves the break before it, so
+// without the per-node memo (and with the document re-split at every level) a
+// run of breaks was superlinear enough to stall the bubbletea Update goroutine:
+// 800 breaks measured in seconds. The assertion is deliberately loose — it is
+// there to catch a return to that shape, not to pin a number.
+func TestMdPreviewBlocksLongThematicBreakRunIsLinear(t *testing.T) {
+	const n = 800
+	doc := "text\n\n" + strings.Repeat("---\n\n", n) + "more\n"
+
+	start := time.Now()
+	targets := mdPreviewBlockTargets(doc)
+	elapsed := time.Since(start)
+
+	hrs := 0
+	for _, tg := range targets {
+		if tg.Kind == mdBlockHR {
+			hrs++
+		}
+	}
+	if hrs != n {
+		t.Fatalf("got %d hr targets, want %d", hrs, n)
+	}
+	assertNonOverlappingOrdered(t, targets)
+	if elapsed > time.Second {
+		t.Errorf("%d consecutive thematic breaks took %v — the per-node memo is gone", n, elapsed)
 	}
 }
 
