@@ -348,13 +348,13 @@ hunk expansion today, and populating it differently would break that promise.
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] verify every requirement in Overview is implemented
-- [ ] verify each failure mode degrades: alignment mismatch, a kind with no marker, a mermaid fence, a table, an empty document, `--no-colors`
-- [ ] confirm both named tests exist and pass: every-annotation-painted-once, and two annotations in one tight list
-- [ ] run full test suite: `make test`
-- [ ] run `make lint` — must report 0 issues
-- [ ] run `make build`
-- [ ] verify `app/ui` coverage has not dropped
+- [x] verify every requirement in Overview is implemented
+- [x] verify each failure mode degrades: alignment mismatch, a kind with no marker, a mermaid fence, a table, an empty document, `--no-colors`
+- [x] confirm both named tests exist and pass: every-annotation-painted-once, and two annotations in one tight list
+- [x] run full test suite: `make test`
+- [x] run `make lint` — must report 0 issues
+- [x] run `make build`
+- [x] verify `app/ui` coverage has not dropped
 
 ### Task 10: [Final] Documentation and corpus measurement
 
