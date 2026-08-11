@@ -365,12 +365,12 @@ hunk expansion today, and populating it differently would break that promise.
 
 **Model:** sonnet
 
-- [ ] run the corpus measurement over the real `.md` corpus and report alignment success rate and the granularity actually achieved per kind
-- [ ] record those numbers in PATCH.md — do not leave a figure you did not measure
-- [ ] record the limitations: a table is one target, task items fold into their list item, block granularity rather than character-exact, `d` requires leaving preview
-- [ ] record the nondeterministic-render finding, since it invalidates byte-identity tests on this path generally, not just for this feature
-- [ ] add a manual test plan section covering highlight, keyboard aim, click aim and painted annotations
-- [ ] move this plan to `docs/plans/completed/`
+- [x] run the corpus measurement over the real `.md` corpus and report alignment success rate and the granularity actually achieved per kind
+- [x] record those numbers in PATCH.md — do not leave a figure you did not measure
+- [x] record the limitations: a table is one target, task items fold into their list item, block granularity rather than character-exact, `d` requires leaving preview
+- [x] record the nondeterministic-render finding, since it invalidates byte-identity tests on this path generally, not just for this feature
+- [x] add a manual test plan section covering highlight, keyboard aim, click aim and painted annotations
+- [x] move this plan to `docs/plans/completed/` (skipped — the harness moves the plan after all phases finish; moving it mid-run would break later review/finalize/stats phases that read this file by path)
 
 ## Post-Completion
 
