@@ -610,6 +610,13 @@ type Model struct {
 	// NewModel initializes this; direct Model{} construction is unsupported.
 	renderCache *diffRenderCache
 
+	// mdPreviewCache memoizes the base markdown-preview render and its source map
+	// (see mdpreview_cache.go). Held behind a pointer for the same reason
+	// renderCache is: renderMarkdownPreview has a value receiver, so a plain field
+	// would memoize into a Model copy the method throws away. NewModel initializes
+	// this; direct Model{} construction is unsupported.
+	mdPreviewCache *mdPreviewRenderCache
+
 	discarded        bool // true when user chose to discard annotations and quit
 	inConfirmDiscard bool // true when showing discard confirmation prompt
 
@@ -932,6 +939,7 @@ func NewModel(cfg ModelConfig) (Model, error) {
 		compact:              compactState{applicable: cfg.CompactApplicable},
 		annot:                annotationState{rowCache: make(map[annotCacheKey][]string)},
 		renderCache:          &diffRenderCache{},
+		mdPreviewCache:       &mdPreviewRenderCache{},
 		loadUntracked:        cfg.LoadUntracked,
 		loadUntrackedRenames: cfg.LoadUntrackedRenames,
 		activeThemeName:      cfg.ActiveThemeName,

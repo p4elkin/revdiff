@@ -517,17 +517,22 @@ func (m *Model) toggleMarkdownPreview() {
 
 // renderMarkdownPreview renders the currently loaded file as a markdown
 // preview at the current viewport width, cut to the visible column window at
-// the current horizontal offset (see applyMdPreviewScroll). It re-renders on
-// every call, with no cache: the render only fires on a P toggle, a pan, or a
-// viewport content refresh, never per frame, so the one saved glamour+mermaid
-// pass is not worth the staleness risk of a file+width-keyed cache surviving
-// an R reload of the same file at the same width.
+// the current horizontal offset (see applyMdPreviewScroll). The base render
+// goes through mdPreviewBaseRender (mdpreview_cache.go), keyed on
+// file/loadSeq/width/noColors, so a repaint at an unchanged state (the
+// scroll-following highlight repainting on every offset change, in a later
+// task) reuses the last glamour+mermaid pass instead of paying for a fresh
+// one. loadSeq is what makes the key safe across an R reload of the same file
+// at the same width: reload bumps it even though the file name and width do
+// not change, so a stale render can never satisfy a post-reload lookup.
 //
-// A pan keypress does NOT go through here — panMarkdownPreview renders the
-// document itself, because it needs the uncut render to compute the clamp and
-// would otherwise pay for a second glamour pass to draw the same thing.
+// A pan keypress does NOT go through here — panMarkdownPreview calls
+// mdPreviewBaseRender itself, because it needs the uncut render to compute
+// the clamp and would otherwise cut a second copy of the same render to draw
+// the same thing.
 func (m Model) renderMarkdownPreview() string {
-	return m.applyMdPreviewScroll(renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors))
+	rendered, _ := m.mdPreviewBaseRender()
+	return m.applyMdPreviewScroll(rendered)
 }
 
 // mdPreviewCutWidth returns how many columns of a rendered preview row are
@@ -691,9 +696,12 @@ func (m Model) mdPreviewRightIndicator() string {
 // left when direction < 0 and right otherwise, and pushes the re-cut render
 // into the viewport. Mirrors handleHorizontalScroll's shape for the diff pane.
 //
-// It renders the document itself instead of going through renderDiff so a
-// keypress costs one glamour+mermaid pass, not two: the clamp needs the
-// widest rendered row, and the same render then supplies the rows to cut.
+// It calls mdPreviewBaseRender itself instead of going through renderDiff:
+// the clamp needs the widest rendered row, and the same render then supplies
+// the rows to cut. Going through the cache (mdpreview_cache.go) means a pan
+// keypress only pays for a fresh glamour+mermaid pass on the first call at a
+// given file/width/color state — every pan step after that, and every
+// renderMarkdownPreview call in between, reuses the same cached render.
 //
 // The stored offset is folded through the current clamp before the step is
 // applied, so an offset left over from a wider layout converges back into
@@ -709,7 +717,7 @@ func (m *Model) panMarkdownPreview(direction int) {
 	if !m.file.markdownPreviewable {
 		return
 	}
-	rendered := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
+	rendered, _ := m.mdPreviewBaseRender()
 	maxOffset := mdPreviewMaxOffset(rendered, m.mdPreviewCutWidth())
 
 	offset := min(m.layout.scrollX, maxOffset)

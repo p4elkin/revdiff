@@ -113,6 +113,21 @@ behaviour the task text says so and requires the wider `go test ./app/ui` before
 - update plan if implementation deviates from original scope
 - keep plan in sync with actual work done
 
+**Task 4 repaint-cost measurement** (`BenchmarkMdPreviewRepaint`, `app/ui/mdpreview_cache_test.go`,
+run on the fence-heavy corpus document `docs/plans/completed/20260722-markdown-preview-mode.md`, 3
+mermaid fences, 810 lines, Apple M2 Max, `go test ./app/ui -run '^$' -bench
+'BenchmarkMdPreviewRepaint' -benchtime=50x -benchmem`):
+
+| repaint path | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| before (fresh `mdPreviewRenderWithMap` every repaint) | 112,619,951 | 42,911,769 | 415,342 |
+| after (cached, warm) | 523.3 | 0 | 0 |
+
+A repeat repaint at an unchanged file/width/color state drops from ~113ms to ~0.5us — about a
+215,000x reduction, and markdown rendering (all 415k allocations) is fully absent from the warm
+path. This is a clear pass: the cache removes markdown rendering from the repaint path, which is
+exactly what task 6's scroll-following highlight needs to be affordable.
+
 ## Solution Overview
 
 `mdPreviewStyle` is a copy of glamour's `DarkStyleConfig` — a plain data struct this fork owns, and
@@ -254,15 +269,15 @@ hunk expansion today, and populating it differently would break that promise.
 
 **Model:** sonnet
 
-- [ ] cache the base render and its map on `(file.name, file.loadSeq, viewport.Width, noColors)`
-- [ ] update `renderMarkdownPreview`'s doc comment, which currently declines a cache because a
+- [x] cache the base render and its map on `(file.name, file.loadSeq, viewport.Width, noColors)`
+- [x] update `renderMarkdownPreview`'s doc comment, which currently declines a cache because a
       file-plus-width key could survive an `R` reload — `loadSeq` closes that, as `globalRenderKey`
       already relies on
-- [ ] write a test proving staleness is impossible: an `R` reload at the same width must miss the cache
-- [ ] write a test that a width change misses the cache and a repeat at the same width hits it
-- [ ] **measure repaint cost before and after** on a fence-heavy plan document and record both numbers in this plan's Progress Tracking — the cache's whole claim is that a repaint stops paying for markdown rendering, so show it
-- [ ] ⚠️ this task edits shared render entry points: run the wider `go test ./app/ui` before commit, not only the narrow pattern
-- [ ] run `go test ./app/ui -run 'TestMdPreview'` then `go test ./app/ui` — both must pass before the next task
+- [x] write a test proving staleness is impossible: an `R` reload at the same width must miss the cache
+- [x] write a test that a width change misses the cache and a repeat at the same width hits it
+- [x] **measure repaint cost before and after** on a fence-heavy plan document and record both numbers in this plan's Progress Tracking — the cache's whole claim is that a repaint stops paying for markdown rendering, so show it
+- [x] ⚠️ this task edits shared render entry points: run the wider `go test ./app/ui` before commit, not only the narrow pattern
+- [x] run `go test ./app/ui -run 'TestMdPreview'` then `go test ./app/ui` — both must pass before the next task
 
 ### Task 5: Paint existing annotations
 

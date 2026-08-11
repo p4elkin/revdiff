@@ -445,6 +445,13 @@ func TestRenderDiff_MarkdownPreviewOff_RendersNormalDiff(t *testing.T) {
 }
 
 func TestRenderDiff_MarkdownPreviewOn_RendersPreview(t *testing.T) {
+	// out goes through the cached, marker-laden path (mdPreviewBaseRender ->
+	// mdPreviewRenderWithMap) since task 4 wired renderMarkdownPreview to it;
+	// want is the plain, unmarked render. The two are visually identical but
+	// not byte-identical (see mdPreviewRenderWithMap's doc comment and this
+	// plan's Technical Details), so this asserts ansi.Strip equality, row
+	// count, and per-row display width rather than byte equality — the same
+	// pattern TestMdPreviewSrcMapVisualIdentity already established.
 	m := mdPreviewTestModel(mdLines("# Title\n\nSome text."))
 	m.toggleMarkdownPreview()
 	require.True(t, m.modes.mdPreview)
@@ -452,7 +459,12 @@ func TestRenderDiff_MarkdownPreviewOn_RendersPreview(t *testing.T) {
 	out := m.renderDiff()
 
 	want := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
-	assert.Equal(t, want, out, "renderDiff must dispatch to the markdown preview render")
+	assert.Equal(t, xansi.Strip(want), xansi.Strip(out), "text content must be identical")
+	wantRows, gotRows := strings.Split(want, "\n"), strings.Split(out, "\n")
+	require.Len(t, gotRows, len(wantRows), "row count must be identical")
+	for i := range wantRows {
+		assert.Equal(t, xansi.StringWidth(wantRows[i]), xansi.StringWidth(gotRows[i]), "row %d display width", i)
+	}
 	assert.NotContains(t, xansi.Strip(out), "# Title", "glamour must style away the raw '#' heading marker")
 }
 
@@ -1165,8 +1177,12 @@ func TestHandleMouse_MdPreviewOn_WheelOverDiffScrollsButCursorUnchanged(t *testi
 func TestRenderMarkdownPreview_ReflectsChangedLinesUnderSameFileAndWidth(t *testing.T) {
 	// reload staleness (the R keep-open loop): the same file re-loaded at the
 	// same width used to be served from a render cache keyed on file+width only,
-	// returning the pre-edit render. With the cache gone, renderMarkdownPreview
-	// re-renders from the current lines every time.
+	// returning the pre-edit render. Task 4's cache closes this by adding
+	// loadSeq to the key (mdPreviewCacheKey, mdpreview_cache.go): a real R
+	// reload always bumps m.file.loadSeq (triggerReload, app/ui/loaders.go)
+	// before new content lands, so the bump is simulated here too — mutating
+	// file.lines alone, with no seq bump, is not a scenario production code
+	// ever produces, and is no longer what this test is guarding against.
 	m := mdPreviewTestModel(mdLines("# One\n\noriginal body text"))
 	m.toggleMarkdownPreview()
 	require.True(t, m.modes.mdPreview)
@@ -1174,7 +1190,8 @@ func TestRenderMarkdownPreview_ReflectsChangedLinesUnderSameFileAndWidth(t *test
 	first := xansi.Strip(m.renderMarkdownPreview())
 	require.Contains(t, first, "original body text", "fixture sanity: the initial render must contain the initial content")
 
-	// simulate an R reload: same file name, same width, new content.
+	// simulate an R reload: same file name, same width, new content, bumped loadSeq.
+	m.file.loadSeq++
 	m.file.lines = mdLines("# One\n\ncompletely different body")
 
 	second := xansi.Strip(m.renderMarkdownPreview())
