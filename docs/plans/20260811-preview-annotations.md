@@ -287,14 +287,14 @@ hunk expansion today, and populating it differently would break that promise.
 
 **Model:** sonnet
 
-- [ ] paint annotations by calling the existing `renderAnnotationOrInput` and `renderFileAnnotationHeader` into a throwaway `strings.Builder` and splitting into rows — **never write a parallel painter**, so `annotationVisualRows` stays the single source of truth
-- [ ] insert each annotation's rows after the last rendered row of its block; splice before `applyMdPreviewScroll` so they pan and get cut like every other row
-- [ ] handle several annotations in one block, painted in line order
-- [ ] handle an annotation whose line is not a block start by resolving to the innermost containing block, and one matching no block by attaching to the nearest preceding block
-- [ ] when `Aligned` is false, list every annotation as a group at the top rather than hiding any
-- [ ] write the named invariant test: **every annotation of the current file appears exactly once in the painted preview**
-- [ ] write tests: visual identity with no annotations; painted rows byte-equal to what the diff view emits for the same annotation; the horizontal pan clamp is unchanged by annotation rows
-- [ ] run `go test ./app/ui -run 'TestMdPreview'` — must pass before the next task
+- [x] paint annotations by calling the existing `renderAnnotationOrInput` and `renderFileAnnotationHeader` into a throwaway `strings.Builder` and splitting into rows — **never write a parallel painter**, so `annotationVisualRows` stays the single source of truth
+- [x] insert each annotation's rows after the last rendered row of its block; splice before `applyMdPreviewScroll` so they pan and get cut like every other row
+- [x] handle several annotations in one block, painted in line order
+- [x] handle an annotation whose line is not a block start by resolving to the innermost containing block, and one matching no block by attaching to the nearest preceding block
+- [x] when `Aligned` is false, list every annotation as a group at the top rather than hiding any
+- [x] write the named invariant test: **every annotation of the current file appears exactly once in the painted preview**
+- [x] write tests: visual identity with no annotations; painted rows byte-equal to what the diff view emits for the same annotation; the horizontal pan clamp is unchanged by annotation rows
+- [x] run `go test ./app/ui -run 'TestMdPreview'` — must pass before the next task
 
 ### Task 6: Scroll-following block highlight
 
