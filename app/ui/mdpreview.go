@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,6 +18,14 @@ import (
 	"github.com/umputun/revdiff/app/keymap"
 	"github.com/umputun/revdiff/app/ui/style"
 )
+
+// mdPreviewState holds markdown preview's own transient runtime state. Only a
+// status-bar hint today, following outputState / compactState: preview refuses
+// to annotate a document whose source map did not align, and a refusal with no
+// message on screen is indistinguishable from an unbound key.
+type mdPreviewState struct {
+	hint string // transient status-bar message; cleared on next key press
+}
 
 // mdFencePrefix returns the fence character ('`' or '~') and the count of leading
 // consecutive occurrences at the start of s. It returns (0, 0) when s does not
@@ -71,9 +80,10 @@ func mdFencePrefix(s string) (rune, int) {
 // verify width-dependent behavior must go through renderMarkdownDocument
 // instead.
 func renderMermaidFences(lines []diff.DiffLine) string {
-	return joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
+	doc, _ := joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
 		return renderMermaidBlock(body, openLine, closeLine, mermaidUnconstrainedWidth)
 	})
+	return doc
 }
 
 // joinWithMermaidFences is the shared fence-scanning walk behind
@@ -83,18 +93,31 @@ func renderMermaidFences(lines []diff.DiffLine) string {
 // fence — renderMermaidFences passes renderMermaidBlock (inline rendered
 // art), mermaidPlaceholderDocument passes a callback that defers rendering
 // and substitutes a placeholder instead (see renderMarkdownDocument for why).
-func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string, openLine, closeLine string) string) string {
+//
+// origins is the per-emitted-document-line provenance: origins[i] is the index
+// into lines that produced document line i+1. It exists because the document
+// this builds is NOT line-for-line with lines — divider rows are dropped and
+// every mermaid fence collapses to whatever renderBlock returns — so a
+// document line number cannot be used as a diff-line index without it. The
+// markdown source map (mdpreview_srcmap.go) is its only consumer; the two
+// other callers discard it. Every line of a fence's replacement text is
+// attributed to the fence's OPENING line, so a comment anywhere on a rendered
+// diagram anchors to the ```mermaid line the reader sees in source view.
+func joinWithMermaidFences(lines []diff.DiffLine,
+	renderBlock func(body []string, openLine, closeLine string) string) (doc string, origins []int) {
 	var out strings.Builder
 
 	var fenceChar rune // 0 when outside any fence
 	var fenceLen int   // length of the opening fence marker
 	var fenceLang string
-	var fenceStart int     // index into lines of the opening fence line
-	var fenceBody []string // body lines collected while inside a mermaid fence
+	var fenceStart int         // index into lines of the opening fence line
+	var fenceBody []string     // body lines collected while inside a mermaid fence
+	var fenceBodyOrigins []int // the index into lines each fenceBody entry came from
 
-	writeLine := func(content string) {
+	writeLine := func(content string, origin int) {
 		out.WriteString(content)
 		out.WriteString("\n")
+		origins = append(origins, origin)
 	}
 
 	for i, line := range lines {
@@ -118,35 +141,40 @@ func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string
 				fenceLang = strings.ToLower(fields[0])
 			}
 			fenceStart = i
-			fenceBody = nil
+			fenceBody, fenceBodyOrigins = nil, nil
 			if fenceLang != "mermaid" {
-				writeLine(content)
+				writeLine(content, i)
 			}
 			continue
 		case fenceChar != 0 && ch == fenceChar && n >= fenceLen && strings.TrimSpace(trimmed[n:]) == "":
 			// closing fence
 			if fenceLang == "mermaid" {
-				out.WriteString(renderBlock(fenceBody, lines[fenceStart].Content, content))
+				replacement := renderBlock(fenceBody, lines[fenceStart].Content, content)
+				out.WriteString(replacement)
+				for range strings.Count(replacement, "\n") {
+					origins = append(origins, fenceStart)
+				}
 			} else {
-				writeLine(content)
+				writeLine(content, i)
 			}
 			fenceChar = 0
 			fenceLen = 0
 			fenceLang = ""
-			fenceBody = nil
+			fenceBody, fenceBodyOrigins = nil, nil
 			continue
 		}
 
 		if fenceChar != 0 {
 			if fenceLang == "mermaid" {
 				fenceBody = append(fenceBody, content)
+				fenceBodyOrigins = append(fenceBodyOrigins, i)
 			} else {
-				writeLine(content)
+				writeLine(content, i)
 			}
 			continue
 		}
 
-		writeLine(content)
+		writeLine(content, i)
 	}
 
 	// an unterminated mermaid fence extends to end of document; its opening
@@ -154,13 +182,16 @@ func joinWithMermaidFences(lines []diff.DiffLine, renderBlock func(body []string
 	// never came, so flush them verbatim rather than losing them. Non-mermaid
 	// fences are written eagerly above and need no flush here.
 	if fenceChar != 0 && fenceLang == "mermaid" {
-		writeLine(lines[fenceStart].Content)
-		for _, b := range fenceBody {
-			writeLine(b)
+		writeLine(lines[fenceStart].Content, fenceStart)
+		for bi, b := range fenceBody {
+			// the recorded index, never fenceStart+1+bi: the loop above skips
+			// ChangeDivider rows, so a divider inside the fence would make the
+			// arithmetic drift and misattribute every body line after it.
+			writeLine(b, fenceBodyOrigins[bi])
 		}
 	}
 
-	return out.String()
+	return out.String(), origins
 }
 
 // renderMermaidBlock renders one mermaid fence's body via mermaid-ascii,
@@ -211,8 +242,15 @@ var mdPreviewStyle = glamourStyles.DarkStyleConfig
 // bold, or underline attributes at all, so it renders as plain text with ASCII
 // markers (e.g. a leading "# " on headings, "**" around bold, "|" table
 // separators) instead of color. Combined with the Ascii color profile in
-// renderMarkdownDocument, it guarantees the no-colors preview emits zero ANSI
+// renderMarkdownDocument, it guarantees the RENDERED DOCUMENT emits zero ANSI
 // escape sequences, honoring --no-colors / REVDIFF_NO_COLORS.
+//
+// The promise covers the document, not the whole frame. Annotation rows spliced
+// into the preview (mdpreview_annotate.go) are painted by the diff pane's own
+// renderAnnotationOrInput, whose style.Renderer.AnnotationInline emits a literal
+// italic pair regardless of the resolver — so a --no-colors preview carrying an
+// annotation does contain escapes. That is the same output source view produces
+// under --no-colors for the same annotation, and matching it is the point.
 var mdPreviewStyleNoColor = glamourStyles.ASCIIStyleConfig
 
 // mdPreviewMinWidth is the floor applied to the requested render width
@@ -271,15 +309,18 @@ func mermaidPlaceholder(nonce string, idx int) string {
 // mdpreview_transpile.go) — the whole reason this function has a width
 // parameter at all, since renderMarkdownDocument is the only caller that
 // ever has a real viewport width to offer.
-func mermaidPlaceholderDocument(lines []diff.DiffLine, nonce string, paneWidth int) (doc string, arts []string) {
+//
+// origins is joinWithMermaidFences' per-document-line provenance, passed
+// straight through — see there. Only the markdown source map uses it.
+func mermaidPlaceholderDocument(lines []diff.DiffLine, nonce string, paneWidth int) (doc string, arts []string, origins []int) {
 	idx := 0
-	doc = joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
+	doc, origins = joinWithMermaidFences(lines, func(body []string, openLine, closeLine string) string {
 		arts = append(arts, renderMermaidBlock(body, openLine, closeLine, paneWidth))
 		placeholder := mermaidPlaceholder(nonce, idx)
 		idx++
 		return "\n" + placeholder + "\n\n"
 	})
-	return doc, arts
+	return doc, arts, origins
 }
 
 // spliceMermaidArt replaces, for each art in order, the FIRST not-yet-consumed
@@ -300,11 +341,34 @@ func mermaidPlaceholderDocument(lines []diff.DiffLine, nonce string, paneWidth i
 // being word-wrap-atomic — see there) is left as visible plain text rather
 // than silently dropping the diagram or panicking.
 func spliceMermaidArt(rendered, nonce string, arts []string) string {
+	out, _ := spliceMermaidArtTracked(rendered, nonce, arts)
+	return out
+}
+
+// mdPreviewArtShift records that the splice of one diagram turned a single
+// rendered row into several: row is the placeholder's row in the PRE-splice
+// render (0-based) and added is how many rows the art introduced beyond it.
+// Every pre-splice row strictly greater than row therefore moves down by
+// added. See mdPreviewShiftRow (mdpreview_srcmap.go), which is the only
+// consumer — the markdown source map's rows are produced against the
+// pre-splice render because that is the one the markers were extracted from.
+type mdPreviewArtShift struct {
+	row   int
+	added int
+}
+
+// spliceMermaidArtTracked is spliceMermaidArt plus the row shifts its
+// substitutions cause. The shifts are in pre-splice row coordinates and in
+// ascending row order. See spliceMermaidArt for the substitution rules; this
+// function is the implementation and that one is a thin wrapper for the
+// callers that do not need the shifts.
+func spliceMermaidArtTracked(rendered, nonce string, arts []string) (string, []mdPreviewArtShift) {
 	if len(arts) == 0 {
-		return rendered
+		return rendered, nil
 	}
 	lines := strings.Split(rendered, "\n")
 	consumed := make([]bool, len(lines))
+	var shifts []mdPreviewArtShift
 	for idx, art := range arts {
 		placeholder := mermaidPlaceholder(nonce, idx)
 		for i, line := range lines {
@@ -314,12 +378,17 @@ func spliceMermaidArt(rendered, nonce string, arts []string) string {
 			if strings.TrimSpace(ansi.Strip(line)) != placeholder {
 				continue
 			}
-			lines[i] = mermaidArtWithoutControls(strings.TrimSuffix(art, "\n"))
+			replacement := mermaidArtWithoutControls(strings.TrimSuffix(art, "\n"))
+			lines[i] = replacement
 			consumed[i] = true
+			if added := strings.Count(replacement, "\n"); added > 0 {
+				shifts = append(shifts, mdPreviewArtShift{row: i, added: added})
+			}
 			break
 		}
 	}
-	return strings.Join(lines, "\n")
+	sort.Slice(shifts, func(a, b int) bool { return shifts[a].row < shifts[b].row })
+	return strings.Join(lines, "\n"), shifts
 }
 
 // mermaidArtWithoutControls drops C0 control bytes and DEL from one diagram's
@@ -397,7 +466,7 @@ func mermaidControlRune(r rune) bool {
 // know which rows actually overflow.
 func renderMarkdownDocument(lines []diff.DiffLine, width int, noColors bool) string {
 	nonce := mermaidNonce()
-	doc, arts := mermaidPlaceholderDocument(lines, nonce, width)
+	doc, arts, _ := mermaidPlaceholderDocument(lines, nonce, width)
 
 	w := max(width, mdPreviewMinWidth)
 
@@ -468,17 +537,25 @@ func (m *Model) toggleMarkdownPreview() {
 
 // renderMarkdownPreview renders the currently loaded file as a markdown
 // preview at the current viewport width, cut to the visible column window at
-// the current horizontal offset (see applyMdPreviewScroll). It re-renders on
-// every call, with no cache: the render only fires on a P toggle, a pan, or a
-// viewport content refresh, never per frame, so the one saved glamour+mermaid
-// pass is not worth the staleness risk of a file+width-keyed cache surviving
-// an R reload of the same file at the same width.
+// the current horizontal offset (see applyMdPreviewScroll). The base render
+// goes through mdPreviewBaseRender (mdpreview_cache.go), keyed on
+// file/loadSeq/width/noColors, so a repaint at an unchanged state (the
+// scroll-following highlight repainting on every offset change, in a later
+// task) reuses the last glamour+mermaid pass instead of paying for a fresh
+// one. loadSeq is what makes the key safe across an R reload of the same file
+// at the same width: reload bumps it even though the file name and width do
+// not change, so a stale render can never satisfy a post-reload lookup.
 //
-// A pan keypress does NOT go through here — panMarkdownPreview renders the
-// document itself, because it needs the uncut render to compute the clamp and
-// would otherwise pay for a second glamour pass to draw the same thing.
+// The frame it returns is the composed one — base render, this file's
+// annotations painted under the blocks they belong to, and the scroll-following
+// block highlight — assembled by mdPreviewFinalRender (mdpreview_cache.go),
+// which owns the order those three steps run in.
+//
+// A pan keypress does NOT go through here — panMarkdownPreview composes the
+// frame itself, because it needs the uncut body to compute the clamp and would
+// otherwise cut a second copy of the same render to draw the same thing.
 func (m Model) renderMarkdownPreview() string {
-	return m.applyMdPreviewScroll(renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors))
+	return m.mdPreviewFinalRender()
 }
 
 // mdPreviewCutWidth returns how many columns of a rendered preview row are
@@ -522,8 +599,16 @@ func mdPreviewMaxLineWidth(rendered string) int {
 // mdPreviewMaxOffset returns the largest horizontal offset worth showing: the
 // one that puts the widest row's last column at the right edge of the pane.
 // Zero when everything already fits.
-func mdPreviewMaxOffset(rendered string, cutWidth int) int {
-	return max(0, mdPreviewMaxLineWidth(rendered)-cutWidth)
+func (m Model) mdPreviewMaxOffset(rendered string, cutWidth int) int {
+	return max(0, m.mdPreviewWidestRow(rendered)-cutWidth)
+}
+
+// mdPreviewWidestRow is mdPreviewMaxLineWidth through the memo on the render
+// cache (see mdPreviewScrollCache), which is what keeps the full-document
+// grapheme scan off every repaint. NewModel initializes that cache; like
+// renderCache, direct Model{} construction is unsupported.
+func (m Model) mdPreviewWidestRow(rendered string) int {
+	return m.mdPreviewCache.scroll.widestOf(rendered)
 }
 
 // applyMdPreviewScroll cuts every row of a rendered preview to the visible
@@ -547,12 +632,21 @@ func (m Model) applyMdPreviewScroll(rendered string) string {
 	if cutWidth <= 0 {
 		return rendered // pathologically narrow layout state: leave the render alone
 	}
-	widest := mdPreviewMaxLineWidth(rendered)
+	widest := m.mdPreviewWidestRow(rendered)
 	offset := min(max(0, m.layout.scrollX), max(0, widest-cutWidth))
 	if offset == 0 && widest <= cutWidth {
 		return rendered // nothing hidden in either direction: pass the render through untouched
 	}
 
+	compute := func() string { return m.cutMdPreviewRows(rendered, offset, cutWidth) }
+	indicators := m.mdPreviewLeftIndicator() + m.mdPreviewRightIndicator()
+	return m.mdPreviewCache.scroll.cutOf(rendered, offset, cutWidth, indicators, compute)
+}
+
+// cutMdPreviewRows cuts every row of rendered. Split out of
+// applyMdPreviewScroll so the memo (mdPreviewScrollCache) has one function to
+// call on a miss and the clamp/early-return logic stays above it.
+func (m Model) cutMdPreviewRows(rendered string, offset, cutWidth int) string {
 	lines := strings.Split(rendered, "\n")
 	for i, line := range lines {
 		lines[i] = m.cutMdPreviewLine(line, offset, cutWidth)
@@ -642,9 +736,13 @@ func (m Model) mdPreviewRightIndicator() string {
 // left when direction < 0 and right otherwise, and pushes the re-cut render
 // into the viewport. Mirrors handleHorizontalScroll's shape for the diff pane.
 //
-// It renders the document itself instead of going through renderDiff so a
-// keypress costs one glamour+mermaid pass, not two: the clamp needs the
-// widest rendered row, and the same render then supplies the rows to cut.
+// It composes the frame itself — mdPreviewBody, then the shared mdPreviewFrame
+// renderMarkdownPreview also ends in — instead of going through renderDiff: the
+// clamp needs the widest row of the uncut body, and that same body then supplies
+// the rows to cut. Going through the cache (mdpreview_cache.go) means a pan
+// keypress only pays for a fresh glamour+mermaid pass on the first call at a
+// given file/width/color state — every pan step after that, and every
+// renderMarkdownPreview call in between, reuses the same cached render.
 //
 // The stored offset is folded through the current clamp before the step is
 // applied, so an offset left over from a wider layout converges back into
@@ -660,8 +758,8 @@ func (m *Model) panMarkdownPreview(direction int) {
 	if !m.file.markdownPreviewable {
 		return
 	}
-	rendered := renderMarkdownDocument(m.file.lines, m.layout.viewport.Width, m.cfg.noColors)
-	maxOffset := mdPreviewMaxOffset(rendered, m.mdPreviewCutWidth())
+	body, srcMap := m.mdPreviewBody()
+	maxOffset := m.mdPreviewMaxOffset(body, m.mdPreviewCutWidth())
 
 	offset := min(m.layout.scrollX, maxOffset)
 	if direction < 0 {
@@ -671,7 +769,7 @@ func (m *Model) panMarkdownPreview(direction int) {
 	}
 	m.layout.scrollX = min(max(0, offset), maxOffset)
 
-	m.layout.viewport.SetContent(m.applyMdPreviewScroll(rendered))
+	m.layout.viewport.SetContent(m.mdPreviewFrame(body, srcMap))
 }
 
 // handleMdPreviewAction is the preview-mode gate every keymap-resolved action
@@ -679,9 +777,12 @@ func (m *Model) panMarkdownPreview(direction int) {
 // m.modes.mdPreview is on. The bool reports whether preview handled the
 // action: true means dispatchAction returns immediately (either the action
 // was blocked, or preview ran it here), false means the action is allowed and
-// falls through to the ordinary dispatch. There is no tea.Cmd in the return:
-// nothing preview serves itself is asynchronous — a pan is a pure state
-// change plus a viewport content swap, both done in place.
+// falls through to the ordinary dispatch. The tea.Cmd return exists for
+// exactly one case: ActionConfirm starts an annotation input, whose textinput
+// Focus() returns a cmd that must reach the Update loop the same way
+// handleEnterKey's does in source view. Every other action handled here is a
+// pure state change plus a viewport content swap, done in place — their cmd
+// is always nil.
 //
 // The two pan actions are routed here rather than left to fall through, and
 // that detour is required, not stylistic: scroll_right doubles as the
@@ -703,44 +804,58 @@ func (m *Model) panMarkdownPreview(direction int) {
 // they look like — move the viewport — and are served by shifting YOffset
 // directly. Without this, the only way to read past the first screen was
 // J/K, and every key a reader reaches for first was silently dead.
-func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, bool) {
+func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, bool) {
 	if !mdPreviewActionAllowed(action) {
-		return m, true
+		return m, nil, true
 	}
 	switch action {
+	case keymap.ActionConfirm:
+		if m.layout.focus != paneDiff {
+			// self-heal, exactly the way source view does: handleEnterKey's
+			// paneTree branch moves focus to the diff pane, so the first press
+			// takes focus and the second annotates. A bare no-op here is not a
+			// milder version of the same thing — it is a dead key: the default
+			// focus IS paneTree (NewModel, model.go) for every multi-file
+			// review, and preview blocks toggle_pane / focus_tree / focus_diff,
+			// so nothing on the keyboard could ever hand focus back.
+			m.layout.focus = paneDiff
+			return m, nil, true
+		}
+		cmd := m.mdPreviewStartAnnotation()
+		return m, cmd, true
 	case keymap.ActionScrollLeft:
 		m.panMarkdownPreview(-1)
-		return m, true
+		return m, nil, true
 	case keymap.ActionScrollRight:
 		m.panMarkdownPreview(1)
-		return m, true
+		return m, nil, true
 	case keymap.ActionDown:
 		m.scrollMarkdownPreview(1)
-		return m, true
+		return m, nil, true
 	case keymap.ActionUp:
 		m.scrollMarkdownPreview(-1)
-		return m, true
+		return m, nil, true
 	case keymap.ActionPageDown:
 		m.scrollMarkdownPreview(m.mdPreviewPageStep())
-		return m, true
+		return m, nil, true
 	case keymap.ActionPageUp:
 		m.scrollMarkdownPreview(-m.mdPreviewPageStep())
-		return m, true
+		return m, nil, true
 	case keymap.ActionHalfPageDown:
 		m.scrollMarkdownPreview(max(1, m.mdPreviewPageStep()/2))
-		return m, true
+		return m, nil, true
 	case keymap.ActionHalfPageUp:
 		m.scrollMarkdownPreview(-max(1, m.mdPreviewPageStep()/2))
-		return m, true
+		return m, nil, true
 	case keymap.ActionHome:
 		m.layout.viewport.GotoTop()
-		return m, true
+		return m, nil, true
 	case keymap.ActionEnd:
 		m.layout.viewport.GotoBottom()
-		return m, true
+		return m, nil, true
 	default: // every other allowed action runs through the ordinary dispatch
 	}
-	return m, false
+	return m, nil, false
 }
 
 // mdPreviewPageStep is the row count one page key moves the preview viewport.
@@ -751,25 +866,66 @@ func (m Model) mdPreviewPageStep() int {
 }
 
 // scrollMarkdownPreview shifts the preview viewport by delta rows, clamped to
-// the content. It deliberately does NOT go through scrollDiffViewportLine (the
+// the content, and repaints so the block highlight lands on the block that is
+// now topmost. It deliberately does NOT go through scrollDiffViewportLine (the
 // J/K path): that helper follows the shift with pinDiffCursorTo, which is a
 // no-op under preview only because of an explicit mdPreview guard in mouse.go.
 // Preview has no cursor to pin, so it calls the pure shifter directly and the
 // guard stays a backstop for the wheel rather than load-bearing here.
+//
+// The repaint is immediate rather than deferred, and that is the one place this
+// path differs from the wheel. A key press is one event; the wheel arrives in
+// bursts of hundreds, which is what wheelState's debounce exists for (see
+// .claude/rules/gotchas.md), and the wheel keeps using it — flushWheelPending
+// repaints preview once at burst end. Repainting here costs a cached base render
+// plus two per-row passes, not a glamour render, so a held-down j does not need
+// its own debounce beside that one.
+//
+// A no-op scroll (already at an edge) repaints nothing: the offset did not move,
+// so neither did the highlight.
 func (m *Model) scrollMarkdownPreview(delta int) {
-	m.scrollDiffViewportBy(delta)
+	if !m.scrollDiffViewportBy(delta) {
+		return
+	}
+	if !m.file.markdownPreviewable {
+		return // preview stuck on for a file renderDiff will not preview; see panMarkdownPreview
+	}
+	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 }
 
 // mdPreviewAllowedActions is the fixed allowlist of keymap actions that stay
 // live while markdown preview is on. Every action not in this set is a no-op
 // while previewing (see mdPreviewActionAllowed and its call site in
-// dispatchAction, app/ui/model.go) because it would create, edit, delete, or
-// navigate to an annotation, or move/reposition m.nav.diffCursor — all
-// meaningless once the diff pane shows one whole-document glamour render
-// instead of one row per source line (see this plan's Solution Overview).
+// dispatchAction, app/ui/model.go). Most of the excluded set still shares one
+// reason — it would edit, delete, or navigate to an annotation by index, or
+// move/reposition m.nav.diffCursor in diff-line coordinates the preview
+// render does not have — but that is no longer a blanket rule: ActionConfirm
+// (a/enter) is allowed and DOES create an annotation, anchored to a block
+// through the source map instead of through m.nav.diffCursor's ordinary
+// meaning. Each remaining exclusion is explained on its own below rather than
+// folded into one shared sentence.
 //
 //   - toggle_preview must stay allowed so P can turn the mode back
 //     off — this is the mode's only exit key.
+//   - confirm (a/enter) creates a line-level annotation anchored to the block
+//     the scroll-following highlight currently marks (mdPreviewHighlightAnchor)
+//     — see mdPreviewStartAnnotation, mdpreview_annotate.go. It is routed INSIDE
+//     handleMdPreviewAction above rather than left to fall through: its
+//     ordinary fall-through target, handleEnterKey, branches on pane focus,
+//     and the tree/TOC pane is reachable while previewing (nothing in this
+//     allowlist changes m.layout.focus), where handleEnterKey would run the
+//     TOC jump — reassigning m.nav.diffCursor and the viewport offset in
+//     diff-line coordinates, exactly the class of bug this allowlist exists
+//     to prevent. With the tree/TOC pane focused it does not annotate — it
+//     takes focus and returns, so the second press annotates, which is exactly
+//     what handleEnterKey's own paneTree branch does in source view. A bare
+//     no-op there would have been a dead key rather than a stricter gate:
+//     paneTree is the focus every multi-file review starts in (NewModel,
+//     model.go — only single-file mode assigns paneDiff), and toggle_pane /
+//     focus_tree / focus_diff are all excluded below, so nothing on the
+//     keyboard could hand focus back. Taking focus on the first press is also
+//     what makes annotate_file (A) reachable, since it keeps its own
+//     diff-pane-only gate unmodified.
 //   - quit / discard_quit / help / theme_select / toggle_tree are session and
 //     layout actions that never touch m.nav.diffCursor or the annotation
 //     store (theme_select and help open an overlay; toggle_tree only flips
@@ -801,11 +957,39 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     so they move the render and never the cursor. They must never fall
 //     through: the fall-through target is handleDiffMovement (diffnav.go),
 //     i.e. the exact cursor motion this mode exists to avoid.
+//   - annotate_file (A) creates a file-level annotation the same way source
+//     view does — handleFileAnnotateKey (app/ui/handlers.go) falls all the
+//     way through to startFileAnnotation (app/ui/annotate.go) unmodified. A
+//     file-level annotation's Line is always 0, and mdPreviewPaintAnnotationsTracked
+//     (mdpreview_annotate.go) already paints Line-0 rows ahead of every block
+//     unconditionally, so there is no block to resolve and no source map to
+//     consult — unlike confirm, this needs no routing here. It is gated the
+//     same as source view: handleFileAnnotateKey is a no-op unless the diff
+//     pane has focus, so it cannot fire while the tree/TOC pane is focused.
+//   - flush_output (O) writes the current annotation store to the --output
+//     file (handleFlushOutput, app/ui/output.go). It never reads or assigns
+//     m.nav.diffCursor and never touches the viewport, so it is safe to let
+//     it fall through unmodified — creating annotations in preview without a
+//     way to flush them out would be half a feature.
+//   - delete_annotation (d) is excluded: deleteAnnotation resolves its target
+//     from m.nav.diffCursor plus m.annot.cursorOnAnnotation, and preview drives
+//     neither — the cursor points at whichever block the last a/click aimed at,
+//     and cursorOnAnnotation is cleared by mdPreviewStartAnnotationAt. To remove
+//     a comment made in preview, press P, delete it in source view, press P
+//     again.
+//   - annot_list (@) is excluded: the overlay's whole purpose is its jump
+//     outcome, and that routes through jumpToAnnotationTarget ->
+//     positionOnAnnotation, which reassigns m.nav.diffCursor and moves the
+//     viewport in diff-line coordinates the preview render does not have. A
+//     popup whose one action is unusable is worse than no popup.
+//   - next_annotation / prev_annotation (} and {) are excluded for exactly
+//     that reason: they ARE the same jump, with the target picked by store
+//     order instead of by the popup.
 //
 // Deliberately NOT included, despite being layout/session actions with no
 // obvious annotation/cursor risk on their own: toggle_pane / focus_tree /
 // focus_diff (switching focus into the TOC pane is pointless once TOC
-// navigation itself is blocked below), info, reload, flush_output,
+// navigation itself is blocked below), info, reload,
 // mark_reviewed, filter, filter_unreviewed, open_file_in_editor,
 // toggle_untracked, and the other view-mode toggles (wrap/collapsed/compact/
 // line_numbers/blame/word_diff/toggle_hunk) — none of them are needed to
@@ -841,6 +1025,7 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 // navigate, then press P again on the next markdown file.
 var mdPreviewAllowedActions = map[keymap.Action]bool{
 	keymap.ActionTogglePreview:  true,
+	keymap.ActionConfirm:        true,
 	keymap.ActionQuit:           true,
 	keymap.ActionDiscardQuit:    true,
 	keymap.ActionHelp:           true,
@@ -859,6 +1044,8 @@ var mdPreviewAllowedActions = map[keymap.Action]bool{
 	keymap.ActionHome:           true,
 	keymap.ActionEnd:            true,
 	keymap.ActionDismiss:        true,
+	keymap.ActionAnnotateFile:   true,
+	keymap.ActionFlushOutput:    true,
 }
 
 // mdPreviewActionAllowed reports whether action may run while markdown

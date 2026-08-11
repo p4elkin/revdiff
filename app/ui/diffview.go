@@ -959,6 +959,10 @@ func (c *diffRenderCache) put(idx int, flags lineRenderFlags, block string) {
 // because of where they happen to be mutated, which is not something to rely on —
 // any new path that rebuilds the resolver, loads blame, re-highlights, or recomputes
 // intra-line ranges MUST call this.
+//
+// The markdown-preview memos (mdPreviewRenderCache and the mdPreviewScrollCache
+// nested in it) are deliberately not cleared here — they are fully self-keying,
+// and that type's doc comment spells out input by input why.
 func (m *Model) invalidateRenderCaches() {
 	clear(m.annot.rowCache)
 	m.renderCache.clear()

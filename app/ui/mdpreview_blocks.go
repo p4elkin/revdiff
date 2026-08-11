@@ -1,0 +1,505 @@
+package ui
+
+import (
+	"strings"
+
+	"github.com/yuin/goldmark"
+	gast "github.com/yuin/goldmark/ast"
+	gext "github.com/yuin/goldmark/extension"
+	gextast "github.com/yuin/goldmark/extension/ast"
+	gparser "github.com/yuin/goldmark/parser"
+	gtext "github.com/yuin/goldmark/text"
+)
+
+// mdPreviewBlockKind identifies one of the block kinds this feature can
+// anchor an annotation to. It is the SINGLE shared vocabulary between this
+// file's goldmark block walk and mdpreview_marker.go's marker table
+// (mdPreviewMarkerKind.kind field) — one type, not a pair of enums with a
+// mapping between them, because the two sides track the same block kinds by
+// construction: this walk decides which lines a comment on "the h2" or "the
+// table" covers, the marker table decides which rendered row glamour put
+// that same h2/table on, and task 3's alignment is a direct kind-for-kind
+// comparison between the two, which only works cleanly if both read from
+// one enum. Values: "paragraph", "h1".."h6", "item", "enumeration",
+// "code_block", "block_quote", "table", "hr", "html_block".
+// There is deliberately no generic "heading" value — glamour never emits a
+// marker for it (see the spike's "Decided by the spike" notes), only the
+// level-specific h1..h6 kinds do, so mdPreviewBlockTargets never produces
+// one either. This walk emits no "task" value either, because a task-list
+// item is folded into its enclosing item/enumeration target — see the
+// KindListItem case below. The MARKER side does carry one (mdBlockTask, and
+// see mdPreviewMarkerKinds' doc comment in mdpreview_marker.go for why it has
+// to): glamour renders a checkbox item through Styles.Task and never through
+// Styles.Item, so the two sides are bridged by mdPreviewKindMatches rather
+// than by both excluding it.
+type mdPreviewBlockKind string
+
+const (
+	mdBlockParagraph mdPreviewBlockKind = "paragraph"
+	mdBlockH1        mdPreviewBlockKind = "h1"
+	mdBlockH2        mdPreviewBlockKind = "h2"
+	mdBlockH3        mdPreviewBlockKind = "h3"
+	mdBlockH4        mdPreviewBlockKind = "h4"
+	mdBlockH5        mdPreviewBlockKind = "h5"
+	mdBlockH6        mdPreviewBlockKind = "h6"
+	mdBlockItem      mdPreviewBlockKind = "item"
+	mdBlockEnum      mdPreviewBlockKind = "enumeration"
+	mdBlockCodeBlock mdPreviewBlockKind = "code_block"
+	mdBlockQuote     mdPreviewBlockKind = "block_quote"
+	mdBlockTable     mdPreviewBlockKind = "table"
+	mdBlockHR        mdPreviewBlockKind = "hr"
+	mdBlockHTMLBlock mdPreviewBlockKind = "html_block"
+
+	// mdBlockTask is produced by the MARKER side only (see
+	// mdPreviewMarkerKinds in mdpreview_marker.go): glamour renders a
+	// checkbox list item through Styles.Task instead of Styles.Item, so its
+	// rendered row carries a "task" marker where this walk emits an
+	// mdBlockItem / mdBlockEnum target. mdPreviewBlockTargets never produces
+	// this kind — mdPreviewKindMatches (mdpreview_srcmap.go) is what bridges
+	// the two sides.
+	mdBlockTask mdPreviewBlockKind = "task"
+)
+
+// mdPreviewBlockTarget is one annotatable unit: a tracked block kind and the
+// 1-based, inclusive source line span it owns. Targets returned by
+// mdPreviewBlockTargets are in document order and non-overlapping — every
+// source line belongs to at most one target (see the "deepest block owning
+// a start line wins" note on swallowedSpan).
+type mdPreviewBlockTarget struct {
+	kind      mdPreviewBlockKind
+	startLine int
+	endLine   int
+}
+
+// mdBlockMarkdown is the goldmark instance used to locate block targets. Its
+// extension set MUST match glamour's own parser exactly (see
+// vendor/github.com/charmbracelet/glamour/glamour.go's NewTermRenderer) —
+// GFM (which brings the table extension) plus DefinitionList, with
+// auto-heading-IDs on. A mismatch here (e.g. missing the table extension)
+// would make this walk see a table as a paragraph while glamour renders it
+// as a table, disagreeing with the render on block boundaries before
+// alignment (task 3) ever gets a chance to compare them.
+var mdBlockMarkdown = goldmark.New(
+	goldmark.WithExtensions(gext.GFM, gext.DefinitionList),
+	goldmark.WithParserOptions(gparser.WithAutoHeadingID()),
+)
+
+// mdPreviewBlockTargets parses doc (as produced by mermaidPlaceholderDocument
+// — this function itself is agnostic to that, it just walks whatever
+// markdown text it is given) and returns the ordered, non-overlapping list
+// of annotatable block targets.
+//
+// Container kinds that glamour renders as a single unit — a list item's own
+// paragraph, a blockquote's paragraph(s), a table's rows and cells — do not
+// get their own targets; they are folded into the target of the kind that
+// owns their chrome (item/enumeration, block_quote, table respectively). See
+// swallowedSpan for why, and blockLineSpan for the mechanics of turning
+// goldmark's per-line text.Segments into a source line span.
+func mdPreviewBlockTargets(doc string) []mdPreviewBlockTarget {
+	src := []byte(doc)
+	root := mdBlockMarkdown.Parser().Parse(gtext.NewReader(src))
+	idx := newMdLineIndex(doc)
+	breaks := newMdBreakResolver(doc, idx)
+
+	var targets []mdPreviewBlockTarget
+	add := func(kind mdPreviewBlockKind, start, end int, ok bool) {
+		if ok {
+			targets = append(targets, mdPreviewBlockTarget{kind: kind, startLine: start, endLine: end})
+		}
+	}
+
+	_ = gast.Walk(root, func(n gast.Node, entering bool) (gast.WalkStatus, error) {
+		if !entering {
+			return gast.WalkContinue, nil
+		}
+		switch n.Kind() {
+		case gast.KindHeading:
+			kind, ok := headingBlockKind(n.(*gast.Heading).Level)
+			if ok {
+				start, end, hok := blockLineSpan(n, idx)
+				add(kind, start, end, hok)
+			}
+			return gast.WalkSkipChildren, nil
+
+		case gast.KindParagraph:
+			// A paragraph directly inside a list item renders nothing at all
+			// (see vendor/.../glamour/ansi/elements.go's KindParagraph case,
+			// which returns an empty Element for that parent) — it is not a
+			// target, the enclosing item already is one. A paragraph inside a
+			// blockquote DOES render, but under the quote's own chrome, not
+			// as an independent paragraph — see swallowedSpan's doc comment.
+			if p := n.Parent(); p != nil && (p.Kind() == gast.KindListItem || p.Kind() == gast.KindBlockquote) {
+				return gast.WalkSkipChildren, nil
+			}
+			start, end, ok := blockLineSpan(n, idx)
+			add(mdBlockParagraph, start, end, ok)
+			return gast.WalkSkipChildren, nil
+
+		case gast.KindListItem:
+			list, ok := n.Parent().(*gast.List)
+			if !ok {
+				return gast.WalkContinue, nil
+			}
+			kind := mdBlockItem
+			if list.IsOrdered() {
+				kind = mdBlockEnum
+			}
+			start, end, sok := swallowedSpan(n, idx)
+			add(kind, start, end, sok)
+			// Continue descending: a nested list under this item gets its
+			// own item/enumeration targets, not swallowed by this one (see
+			// isMdSpanBoundary — swallowedSpan already excluded those lines
+			// from the span just added).
+			return gast.WalkContinue, nil
+
+		case gast.KindCodeBlock, gast.KindFencedCodeBlock:
+			start, end, ok := blockLineSpan(n, idx)
+			add(mdBlockCodeBlock, start, end, ok)
+			return gast.WalkSkipChildren, nil
+
+		case gast.KindBlockquote:
+			start, end, ok := swallowedSpan(n, idx)
+			add(mdBlockQuote, start, end, ok)
+			// Continue descending for the same reason as KindListItem: a
+			// nested list, table, code block or heading inside the quote is
+			// itself a tracked kind and gets its own target.
+			return gast.WalkContinue, nil
+
+		case gextast.KindTable:
+			// One target for the whole table (decided by the spike: "Tables
+			// are one target each" — a comment on a table means "this
+			// table", not "this row"). Never descend into rows/cells.
+			start, end, ok := blockLineSpan(n, idx)
+			add(mdBlockTable, start, end, ok)
+			return gast.WalkSkipChildren, nil
+
+		case gast.KindThematicBreak:
+			line, ok := breaks.line(n)
+			add(mdBlockHR, line, line, ok)
+			return gast.WalkContinue, nil
+
+		case gast.KindHTMLBlock:
+			start, end, ok := blockLineSpan(n, idx)
+			add(mdBlockHTMLBlock, start, end, ok)
+			return gast.WalkSkipChildren, nil
+		}
+		return gast.WalkContinue, nil
+	})
+	return targets
+}
+
+// headingBlockKind maps a goldmark heading level (1..6) to its tracked
+// block kind. false for any level outside that range, which goldmark itself
+// never produces (ATX headings are capped at 6 "#" and setext headings only
+// ever produce level 1 or 2), so the only realistic caller of this with
+// ok==false would be a future goldmark change — handled by simply skipping
+// the target rather than panicking.
+func headingBlockKind(level int) (mdPreviewBlockKind, bool) {
+	switch level {
+	case 1:
+		return mdBlockH1, true
+	case 2:
+		return mdBlockH2, true
+	case 3:
+		return mdBlockH3, true
+	case 4:
+		return mdBlockH4, true
+	case 5:
+		return mdBlockH5, true
+	case 6:
+		return mdBlockH6, true
+	default:
+		return "", false
+	}
+}
+
+// mdLineIndex maps a byte offset within the document it was built from to
+// its 1-based source line number. idx[i] holds the byte offset where line
+// i+1 begins (idx[0] == 0, the start of line 1); a new entry is appended
+// after every '\n'.
+type mdLineIndex []int
+
+func newMdLineIndex(doc string) mdLineIndex {
+	idx := make(mdLineIndex, 1, 64)
+	idx[0] = 0
+	for i := range len(doc) {
+		if doc[i] == '\n' {
+			idx = append(idx, i+1)
+		}
+	}
+	return idx
+}
+
+// lineAt returns the 1-based line number containing byteOffset.
+func (idx mdLineIndex) lineAt(byteOffset int) int {
+	lo, hi := 0, len(idx)-1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if idx[mid] <= byteOffset {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo + 1
+}
+
+// lastLine returns the 1-based number of the last line the index covers.
+func (idx mdLineIndex) lastLine() int {
+	return len(idx)
+}
+
+// blockLineSpan returns the 1-based, inclusive source line span covering n
+// and every descendant that carries its own position. Goldmark records one
+// text.Segment per physical line on leaf raw-text block nodes (Heading,
+// Paragraph, CodeBlock/FencedCodeBlock, HTMLBlock, TableCell) and records
+// nothing at all on pure container nodes (List, ListItem, Blockquote,
+// Table, TableRow, TableHeader) — verified empirically against this
+// project's vendored goldmark, not assumed — so this recurses through
+// containers to find the leaves that do carry one.
+//
+// ok is false only when the whole subtree carries no position at all: an
+// empty node, or a ThematicBreak (see mdBreakResolver — it is the one
+// tracked kind with zero text and so zero Lines() anywhere in its subtree).
+func blockLineSpan(n gast.Node, idx mdLineIndex) (start, end int, ok bool) {
+	if n.Type() == gast.TypeBlock {
+		lines := n.Lines()
+		if lines.Len() > 0 {
+			start = idx.lineAt(lines.At(0).Start)
+			end = idx.lineAt(lines.At(lines.Len() - 1).Start)
+			ok = true
+		}
+	}
+	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+		if c.Type() == gast.TypeInline {
+			continue // ast.BaseInline.Lines() panics if called; inline nodes carry no block position of their own anyway
+		}
+		cs, ce, cok := blockLineSpan(c, idx)
+		if !cok {
+			continue
+		}
+		if !ok || cs < start {
+			start = cs
+		}
+		if !ok || ce > end {
+			end = ce
+		}
+		ok = true
+	}
+	return start, end, ok
+}
+
+// swallowedSpan computes the span a "swallowing" container claims for
+// itself — used for KindListItem and KindBlockquote. It aggregates over the
+// container's own direct content (its own paragraph text) but stops at any
+// child that is itself a boundary kind (see isMdSpanBoundary): a nested
+// list, blockquote, table, heading, code block, HTML block or thematic
+// break is itself a tracked kind and gets its own separate target later in
+// the same walk, so those lines must not also be claimed here.
+//
+// This is "the deepest block owning a start line wins" from the task
+// checklist, implemented as exclusion rather than a later dedup pass: a
+// nested list's first item and this item's own text can never both claim
+// the nested item's line, because swallowedSpan never looks past the nested
+// List boundary in the first place. The same mechanism gives block_quote
+// and table their "one target for the whole construct" treatment (decided
+// for table by the spike; extended here to list item and blockquote, which
+// swallow their own paragraph content the same way — see the KindParagraph
+// case in mdPreviewBlockTargets for why: item's paragraph renders nothing
+// at all, blockquote's paragraph(s) render under the quote's own chrome).
+func swallowedSpan(n gast.Node, idx mdLineIndex) (start, end int, ok bool) {
+	for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+		if c.Type() == gast.TypeInline || isMdSpanBoundary(c.Kind()) {
+			continue
+		}
+		cs, ce, cok := blockLineSpan(c, idx)
+		if !cok {
+			continue
+		}
+		if !ok || cs < start {
+			start = cs
+		}
+		if !ok || ce > end {
+			end = ce
+		}
+		ok = true
+	}
+	return start, end, ok
+}
+
+// isMdSpanBoundary reports whether k is a kind that gets its own separate
+// target in mdPreviewBlockTargets, and so must never have its lines folded
+// into an ancestor's swallowedSpan.
+func isMdSpanBoundary(k gast.NodeKind) bool {
+	switch k {
+	case gast.KindList, gast.KindListItem, gast.KindBlockquote, gextast.KindTable,
+		gast.KindHeading, gast.KindCodeBlock, gast.KindFencedCodeBlock,
+		gast.KindHTMLBlock, gast.KindThematicBreak:
+		return true
+	default:
+		return false
+	}
+}
+
+// mdBreakResolver locates the source line of every ThematicBreak in one
+// document. Unlike every other tracked kind, goldmark records no text.Segment
+// for a thematic break at all — see vendor/.../goldmark/parser/thematic_break.go's
+// Open, which returns a bare ast.NewThematicBreak() with nothing ever appended
+// to its Lines() because the node carries no text (verified empirically:
+// Lines().Len() == 0 for every ThematicBreak, with an experiment run against
+// this project's vendored goldmark before writing this).
+//
+// The line is recovered from context instead: a thematic break is always
+// exactly one line, and it must fall between the end of the nearest previous
+// sibling with a known position (or the start of the document, if there is
+// none) and the start of the nearest next sibling with a known position (or
+// the end of the document). Within that gap, the break is the first line that
+// LOOKS like a rule — see looksLikeThematicBreak.
+//
+// "Looks like a rule" rather than "is not blank", and that difference is the
+// whole correctness of this type on ordinary documents. goldmark's Lines() on
+// a fenced code block covers the CONTENT lines only, never the fences, so a
+// "---" after a code fence has the closing ``` sitting inside its gap: the
+// not-blank rule anchored the break to the fence line, and annotating the rule
+// then wrote the fence's line number into the -o output. A break inside a
+// blockquote had the same shape, anchoring to a bare ">" continuation line. A
+// closing fence and a lone ">" are both non-blank and neither can be a rule,
+// so testing the candidate directly fixes both without needing each container
+// kind's real source extent.
+//
+// Resolved lines are memoized per node because the lower bound recurses into
+// an unresolved ThematicBreak sibling (see lowerBound): without the memo, every
+// break in a run of consecutive breaks re-walked the whole run before it, and
+// re-split the document at each level — measurably quadratic-plus on the
+// bubbletea Update goroutine (800 consecutive breaks took seconds). The
+// document is split into lines once, when the resolver is built.
+type mdBreakResolver struct {
+	idx   mdLineIndex
+	lines []string
+	memo  map[gast.Node]int // resolved 1-based line; 0 means "resolved to nothing"
+}
+
+func newMdBreakResolver(doc string, idx mdLineIndex) *mdBreakResolver {
+	return &mdBreakResolver{idx: idx, lines: strings.Split(doc, "\n"), memo: make(map[gast.Node]int)}
+}
+
+// line returns the 1-based source line of thematic break n, and whether one
+// was found at all. A break whose gap holds no rule-looking line resolves to
+// nothing: mdPreviewBlockTargets then emits no target for it, the marker
+// sequence and the block sequence disagree on length, and mdPreviewBuildSourceMap
+// degrades the whole document to Aligned=false. Refusing to anchor is the
+// correct outcome there — the alternative is anchoring to a line that is not
+// the break.
+func (r *mdBreakResolver) line(n gast.Node) (int, bool) {
+	if l, seen := r.memo[n]; seen {
+		return l, l > 0
+	}
+	// memoize the failure first: recursion below only ever targets strictly
+	// earlier nodes, so this cannot be read back for n itself, but it keeps a
+	// future change from looping.
+	r.memo[n] = 0
+
+	lo, hi := r.lowerBound(n), r.upperBound(n)
+	for l := lo; l <= hi && l <= len(r.lines); l++ {
+		if looksLikeThematicBreak(r.lines[l-1]) {
+			r.memo[n] = l
+			return l, true
+		}
+	}
+	return 0, false
+}
+
+// lowerBound returns the earliest line line() may search from: the line right
+// after the end of the nearest preceding sibling of n, searching upward through
+// ancestors when a level has no previous sibling of its own (n's parent's
+// parent's previous sibling, and so on) — bubbling up rather than falling back
+// to the immediate parent's own aggregate span, which would be wrong here: a
+// parent's blockLineSpan aggregates over EVERY resolved descendant regardless
+// of document order, so on a document that opens with an unresolved
+// ThematicBreak it would jump straight to whatever comes after the break
+// instead of bounding to the true start of the document. Returns 1 if no
+// ancestor level has a previous sibling with a known position — n is the very
+// first block.
+//
+// A previous sibling that is itself a ThematicBreak carries no position of
+// its own, and is the one case where bubbling up gives an actively wrong
+// answer rather than a merely loose one: the bound then lands before the
+// earlier break, and the first rule-looking line found from there is that
+// break's line. Recursing resolves the earlier break first and bounds this one
+// to the line after it.
+func (r *mdBreakResolver) lowerBound(n gast.Node) int {
+	for cur := n; cur != nil; cur = cur.Parent() {
+		prev := cur.PreviousSibling()
+		if prev == nil {
+			continue
+		}
+		if _, e, ok := blockLineSpan(prev, r.idx); ok {
+			return e + 1
+		}
+		if prev.Kind() == gast.KindThematicBreak {
+			if l, ok := r.line(prev); ok {
+				return l + 1
+			}
+		}
+		// prev carries no position and is not a break we can resolve —
+		// nothing better to try at this level, keep walking up.
+	}
+	return 1
+}
+
+// upperBound is the mirror of lowerBound: the line right before the start of
+// the nearest following sibling, bubbling up through ancestors the same way, or
+// the last line of the document if none exists.
+func (r *mdBreakResolver) upperBound(n gast.Node) int {
+	for cur := n; cur != nil; cur = cur.Parent() {
+		next := cur.NextSibling()
+		if next == nil {
+			continue
+		}
+		if s, _, ok := blockLineSpan(next, r.idx); ok {
+			return s - 1
+		}
+	}
+	return r.idx.lastLine()
+}
+
+// looksLikeThematicBreak reports whether one source line could be the rule
+// itself: three or more of the same "-", "*" or "_" character, with nothing
+// else on the line but spaces and tabs. That is CommonMark's own definition of
+// a thematic break, minus the indentation limit — leading whitespace and any
+// number of blockquote ">" markers are stripped first and never counted,
+// because a break nested in a list item or a quote carries that container's
+// prefix on its source line and would otherwise never match.
+//
+// Being permissive about the prefix is safe: this only ever runs on lines
+// inside a gap goldmark has already told us contains exactly one break.
+func looksLikeThematicBreak(line string) bool {
+	s := line
+	for {
+		t := strings.TrimLeft(s, " \t")
+		if !strings.HasPrefix(t, ">") {
+			s = t
+			break
+		}
+		s = t[1:]
+	}
+	s = strings.TrimRight(s, " \t\r")
+	if s == "" {
+		return false
+	}
+	marker := s[0]
+	if marker != '-' && marker != '*' && marker != '_' {
+		return false
+	}
+	count := 0
+	for i := range len(s) {
+		switch s[i] {
+		case marker:
+			count++
+		case ' ', '\t':
+		default:
+			return false
+		}
+	}
+	return count >= 3
+}

@@ -7,23 +7,31 @@ playbook: what the patch touches, and how to carry it onto a new upstream releas
 Two different things both get called "master" in this repo, and this file means only the first
 one whenever it says "upstream":
 
-- **upstream** — `origin` = `umputun/revdiff` on GitHub, the real open-source project. This is
-  what `brew`/`go install` ship. The patch NEVER goes here, in any form, ever.
-- **the fork** — `fork` = `p4elkin/revdiff` on GitHub, the personal fork this patch lives in.
-  The local `master` branch tracks `origin/master` (so it can be kept in sync and PR'd from),
-  but it is also where fork-only feature branches (including `md-preview`) get merged together
-  before being pushed to `fork/master` — see "Integrating into the fork's master" below. That
-  push is a normal, expected use of this patch, not an exception to the no-upstream rule.
+- **upstream** — remote `upstream` = `umputun/revdiff` on GitHub, the real open-source project.
+  This is what `brew`/`go install` ship. The patch NEVER goes here, in any form, ever.
+- **the fork** — remote `origin` = `p4elkin/revdiff` on GitHub, the personal fork this patch
+  lives in. The local `master` branch tracks `origin/master`, i.e. the fork, so a bare
+  `git push` from `master` goes to the fork and cannot reach upstream by accident. `master` is
+  also where fork-only feature branches (including `md-preview`) get merged together before
+  being pushed — see "Integrating into the fork's master" below. That push is a normal,
+  expected use of this patch, not an exception to the no-upstream rule.
 
-Because the patch never goes to `origin`, it deliberately leaves every doc that describes the
+To take new upstream work, fetch it explicitly: `git fetch upstream`, then merge or rebase
+`upstream/master`. A plain `git pull` on `master` follows the fork and does not do this.
+
+(These remote names were swapped on 2026-08-11. Before that `origin` was upstream and the fork
+was `fork`, which meant a bare `git push` from `master` aimed at `umputun/revdiff`. Any older
+note or transcript using the old names is describing that layout, not this one.)
+
+Because the patch never goes to upstream, it deliberately leaves every doc that describes the
 released, brew-installed binary alone: `README.md`, `site/index.html`, `site/docs.html`, and
 the plugin reference docs under `.claude-plugin/` and `plugins/`. So the `P` key
 (`toggle_preview`), the `▤` status-bar icon, and the `--preview` flag appear in neither the
 README keybindings/options tables, nor `site/docs.html`, nor any plugin `config.md`/`usage.md`.
 That is on purpose, not an oversight: editing them would describe a feature to people running
 the real upstream binary, which does not have it — true whether those docs live on `md-preview`
-or get merged all the way to `fork/master`, since `fork/master` is still not what those docs are
-about. The `P` binding and `--preview` flag are discoverable at runtime instead, through the
+or get merged all the way to the fork's `master`, since the fork's `master` is still not what
+those docs are about. The `P` binding and `--preview` flag are discoverable at runtime instead, through the
 in-app help overlay (`?`), `--dump-keys`, and `--help`/`--dump-config`, all of which read the
 real keymap/options and so list them automatically in this build.
 
@@ -32,18 +40,18 @@ real keymap/options and so list them automatically in this build.
 `md-preview` rebases onto upstream tags directly (see "Rebase procedure" below) and is not
 itself pushed anywhere upstream. Separately, feature work meant for the fork as a whole —
 whether upstream-portable (like `--no-tree`) or preview-only (like `--preview`) — gets merged
-into the local `master` branch and pushed to `fork/master`:
+into the local `master` branch and pushed to the fork:
 
 ```sh
 git checkout master
-git fetch origin              # master tracks origin/master; re-sync if it has moved
+git fetch origin              # origin is the fork; master tracks origin/master
 git merge --no-ff md-preview  # or a feature branch, if the feature isn't on md-preview yet
 make test && make lint
-git push fork master
+git push origin master
 ```
 
-This is how `fork/master` ends up ahead of `origin/master`: it carries every fork-only feature,
-preview included, published to the user's own fork, never to `origin`.
+This is how the fork's `master` ends up ahead of `upstream/master`: it carries every fork-only
+feature, preview included, published to the user's own fork, never to upstream.
 
 ## Base
 
@@ -92,7 +100,35 @@ preview included, published to the user's own fork, never to `origin`.
   against a large body of real fences; skipped unless `REVDIFF_MERMAID_CORPUS` is set, so it
   never runs in `make test` or CI.
 
-A clean rebase never conflicts on these fifteen files — they don't exist upstream. All conflict
+- `app/ui/mdpreview_marker.go` — the zero-width marker mechanism preview annotations are built on
+  (see "Preview annotations" below): the marker encoding, the tracked-block-kind table, and the
+  style-cloning that prepends a marker without discarding an existing prefix.
+- `app/ui/mdpreview_marker_test.go` — its tests.
+- `app/ui/mdpreview_blocks.go` — the goldmark block walk: parses the placeholder document and
+  emits one target per tracked block kind with its source line span, folding task-list items into
+  their enclosing list item and a table into one target covering the whole table.
+- `app/ui/mdpreview_blocks_test.go` — its tests.
+- `app/ui/mdpreview_srcmap.go` — agrees the block walk's targets against the markers glamour left
+  in the render and builds the row↔line map (`mdPreviewSourceMap`), or sets `aligned = false` and
+  exposes no targets when the two disagree. Also carries the mermaid-splice row-shift adjustment
+  and the `--no-colors` degrade.
+- `app/ui/mdpreview_srcmap_test.go` — its tests.
+- `app/ui/mdpreview_srcmap_corpus_test.go` — the env-gated corpus harness that measures alignment
+  success rate and per-kind anchor counts over a real document tree (mirrors
+  `mdpreview_corpus_test.go`'s differential mermaid harness on the fork's `master`, which this
+  branch predates — see "Preview annotations" → "Corpus measurement" below).
+- `app/ui/mdpreview_cache.go` — the single-entry render cache (`mdPreviewRenderCache`) that keys
+  the base render and its source map on `(file.name, file.loadSeq, viewport.Width, noColors)`, plus
+  the composed-frame assembly (`mdPreviewBody`, `mdPreviewFrame`, `mdPreviewHighlight`) that
+  layers the scroll-following block highlight and painted annotations on top of the cached base.
+- `app/ui/mdpreview_cache_test.go` — its tests, plus `BenchmarkMdPreviewRepaint`.
+- `app/ui/mdpreview_annotate.go` — painting existing annotations into the preview
+  (`mdPreviewPaintAnnotationsTracked`, reusing `renderAnnotationOrInput`/`renderFileAnnotationHeader`
+  rather than a parallel painter) and creating one (`mdPreviewStartAnnotation`,
+  `mdPreviewStartAnnotationAt`, `mdPreviewClickDiff`, the live-input visibility helper).
+- `app/ui/mdpreview_annotate_test.go` — its tests.
+
+A clean rebase never conflicts on these twenty-six files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -139,7 +175,7 @@ its site count differs — use the itemized list above as the actual hunk map.
 
 Same reasoning as the `P` binding and `▤` icon above — this is a preview-only option, so it is
 NOT added to `README.md`/`site/docs.html`/plugin `config.md` (which describe the released,
-upstream binary, no preview mode). It IS expected to reach `fork/master` via the merge described
+upstream binary, no preview mode). It IS expected to reach the fork's `master` via the merge described
 in "Integrating into the fork's master" — that section, not this one, is what decides where a
 feature ends up; this section only says why the docs stay untouched. Discoverable via `--help`
 and `--dump-config` in this build.
@@ -325,6 +361,125 @@ caution, not a safety condition, and it is gone.
 Both files are already patch-owned (listed under "New files added by the patch" above), so none
 of this carries rebase conflict risk against upstream — recorded here for the call-flow map,
 same reasoning as the "Diagram transpile wiring" and "Horizontal panning wiring" entries above.
+
+**Preview annotations (reading and creating annotations inside preview, this
+plan's own feature — see `docs/plans/20260811-preview-annotations.md`):**
+
+The mechanism: every block glamour renders writes a zero-width marker into its
+style's prefix (`mdpreview_marker.go`); a goldmark walk over the same document
+independently lists what block starts on what source line
+(`mdpreview_blocks.go`); the two sequences are agreed kind-for-kind and
+row-for-row (`mdpreview_srcmap.go`) into `mdPreviewSourceMap`, which answers
+"which source line did this rendered row come from?" or, on any disagreement,
+refuses to answer at all (`aligned = false`, no targets exposed). Everything
+downstream — the highlight, the painted annotations, `a`, a click — is built
+on that one map and that one refusal contract.
+
+- `app/ui/model.go`
+  - `mdPreviewCache *mdPreviewRenderCache` field on `Model`, seeded in
+    `NewModel` — held behind a pointer for the same reason `renderCache` is
+    (`renderMarkdownPreview` has a value receiver; a plain field would
+    memoize into a copy the method throws away).
+  - `dispatchAction`'s `mdPreview` guard now threads a `tea.Cmd` through:
+    `handleMdPreviewAction` gained a third return value, and this call site
+    forwards it instead of always returning `nil`. The only case that ever
+    produces a non-nil cmd is `ActionConfirm` starting an annotation input
+    (`startAnnotation`'s `ti.Focus()` cmd, ordinarily nil under this fork's
+    `cursor.CursorStatic` — see gotchas.md's per-line render cache note).
+- `app/ui/mouse.go` — both hunks are a single call line, with the preview logic
+  itself in the patch-owned preview files, the way `handleMdPreviewAction` was
+  moved out of `model.go`.
+  - the preview branch of `handleMouse`'s left-click case now checks
+    `zone == hitDiff` first and calls `mdPreviewClickDiff`
+    (`mdpreview_annotate.go` — maps the clicked row through the current source
+    map to a block and starts annotating it); every other zone still falls
+    through to the old read-only `return m, nil`.
+  - `flushWheelPending` gained a two-line `if m.flushPreviewWheelPending()
+    { return }` at its top (`mdpreview_cache.go`): `pinDiffCursorTo` is an
+    unconditional no-op in preview (nothing to pin), so without it the deferred
+    repaint the wheel-burst debounce owes never landed, and the
+    scroll-following highlight would freeze on the pre-burst block. That helper
+    repaints once and clears both `renderPending` and `tickInFlight` — it rides
+    the SAME `wheelState` debounce documented in gotchas.md rather than adding a
+    second one, per that task's explicit warning.
+
+`mdPreviewAllowedActions`' doc comment (`mdpreview.go`, a patch-owned file, so
+this carries no upstream conflict risk) was rewritten because its blanket
+justification stopped being true: the whole map used to be excluded for one
+shared reason ("would create, edit, delete, or navigate to an annotation, or
+move `m.nav.diffCursor`"), and `ActionConfirm` is now the one exception —
+allowed, and it DOES create an annotation, anchored through the source map
+instead of through `m.nav.diffCursor`'s ordinary meaning. Each remaining
+exclusion now has its own inline reason rather than sharing the old blanket
+one. `ActionConfirm` is routed INSIDE `handleMdPreviewAction` rather than only
+added to the allowlist map, because its ordinary fall-through target
+(`handleEnterKey`) branches on pane focus and would run the TOC jump — in
+diff-line coordinates the preview render does not have — if the tree/TOC pane
+happened to have focus while previewing. `ActionAnnotateFile` (`A`) and
+`ActionFlushOutput` (`O`) needed no such routing: both fall through to their
+ordinary handlers unmodified, because
+neither reads or assigns `m.nav.diffCursor` (a file-level annotation's `Line`
+is always 0, which `mdPreviewPaintAnnotationsTracked` already paints ahead of
+every block unconditionally) and neither touches the viewport.
+
+⚠️ **The `ActionConfirm` focus branch takes focus rather than doing nothing.**
+With the tree/TOC pane focused it assigns `m.layout.focus = paneDiff` and
+returns, so the second press annotates — the same progression
+`handleEnterKey`'s own `paneTree` branch gives source view. A bare no-op there
+made `a` and `A` permanently dead in every **multi-file** review: `paneTree` is
+the focus `NewModel` starts in (only single-file mode flips it to `paneDiff`,
+in `handleFilesLoaded`), and `toggle_pane` / `focus_tree` / `focus_diff` are all
+excluded from the allowlist, so no key could hand focus back. `A` keeps its own
+unmodified diff-pane-only gate and becomes reachable once `a` has moved focus.
+
+A refused preview annotation is not silent either: `mdPreviewStartAnnotation` sets
+`m.preview.hint` (an `mdPreviewState`, the same shape as `outputState` /
+`compactState`, rendered by `transientHint` and cleared on the next key or mouse
+event) when `mdPreviewHighlightAnchor` returns -1. That is the unaligned-document
+case — `README.md` is one — where the frame is otherwise byte-identical and the
+reader cannot tell "this document cannot be anchored" from "the key is not
+bound".
+
+The render cache (`mdpreview_cache.go`) is a single entry, not a map — the
+preview shows one file at a time, so there is never more than one base render
+worth keeping warm (same shape as `diffRenderCache`'s own per-line, not
+per-file, single-generation cache). Key: `(file.name, file.loadSeq,
+viewport.Width, noColors)`. `loadSeq` is what makes the key safe across an `R`
+reload of the same file at the same width — `renderMarkdownPreview`'s old doc
+comment explicitly declined a cache for exactly this reason before `loadSeq`
+closed it, the same way `globalRenderKey` already relies on it (see
+gotchas.md's per-line render cache note).
+
+Two more memos sit beside it on `mdPreviewRenderCache`, both keyed on the
+painted body string rather than on the cache key, because the body is the base
+render PLUS this file's annotation rows and changes on every annotation edit:
+the widest-row width (`ansi.StringWidth` over the whole document, the pan
+clamp's basis) and the horizontal cut itself. Neither depends on the vertical
+offset, so the repaint every `j`/`k` keypress now drives — the block highlight
+has to follow the viewport — reuses both.
+
+Measured on Apple M2 Max against
+`docs/plans/completed/20260722-markdown-preview-mode.md` (810 source lines, 983
+rendered rows, 3 mermaid fences), pane width 80, a resolver carrying a search
+background so the highlight really paints:
+
+| path | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| fresh `mdPreviewRenderWithMap` (what a repaint cost before the cache) | 104,003,012 | 42,925,885 | 415,344 |
+| repaint frame, before the width/cut memos | 6,222,047 | 1,409,447 | 1,092 |
+| repaint frame, current (`mdPreviewFinalRender`) | 124,481 | 671,822 | 21 |
+| cached base-render lookup alone — NOT a repaint | 502.5 | 0 | 0 |
+
+⚠️ **The last row is a cache lookup, not a repaint, and an earlier version of
+this note recorded it as one** (`~523ns`, "about 215,000x"). The benchmark it
+came from timed `mdPreviewBaseRender` — a key comparison and a string return —
+while a repaint is `mdPreviewFinalRender`: cached base render, annotations
+painted in, the horizontal cut, the highlight. Mislabelling it is how a
+full-document width scan came to sit unnoticed in every keypress. The honest
+figure for the repaint the scroll-following highlight actually pays is the
+third row: ~0.12ms, down from ~6.2ms, and ~835x below a fresh render. The
+remaining cost is the highlight's own per-row pass, which cannot be cached
+because it moves with the offset.
 
 **Test-only, mechanical, not part of the feature itself:**
 
@@ -859,6 +1014,106 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   {outcome}` and `resolve {outcome} (act without claiming)` both render as `resolve` because
   `mermaidCutParenthetical` and the brace cut are content rules that run regardless of width. That
   shortening is deliberate (see the plan's "Edge label" section) and is not affected by the cap.
+- ⚠️ **`--no-colors` never aligns the preview annotation source map — the whole feature is absent
+  in that mode, not degraded at the edges.** Measured 0 of 59 real documents (the task 3 spike
+  corpus). With colors off, glamour's ASCII style writes a heading's marker on the row AFTER its
+  text as well as on it, and a task item's marker reappears on the next list row, so the marker
+  sequence stops being one-per-block and `mdPreviewAlignRows` refuses every document it sees. In
+  that mode preview renders exactly as it did before this feature existed: read-only, no
+  highlight, no painted annotations, `a`/click do nothing. This is a whole-mode gap, not an edge
+  case — it is the single most important limitation to know about before assuming annotate-in-preview
+  works everywhere `P` does.
+- **A table is one annotation target, not one per row.** One real corpus document produced 561
+  markers for 6 tables, 73 landing mid-row; a comment on a table means "this table", not "this
+  row" — see `mdPreviewAlignRows`' `takeTable` in `mdpreview_srcmap.go`. A consequence: two tables
+  separated by nothing but a blank line produce one indistinguishable run of table markers, so
+  that document fails alignment and degrades entirely rather than mis-anchoring one table's
+  comment onto the other (`TestMdPreviewSrcMap_AdjacentTablesDegrade`).
+- **A blockquote is one annotation target too — its inner paragraphs get no separate anchors.**
+  This was a task 2 deviation from the plan's own granularity list, which did not call this out
+  explicitly; it follows the same "one target per swallowing construct" treatment the spike
+  established for tables, and keeps the target list a clean partition of the document (see the
+  task 2/task 3 decision log entries on `mdPreviewQuoteParagraphs`).
+- **Anchoring is block granularity, not character-exact.** A comment on a wrapped paragraph
+  anchors to the whole paragraph, not the line or word under the cursor at the moment of wrapping
+  — matching how the same paragraph would be commented in source view before this feature existed,
+  where the paragraph's block boundary is already the finest resolution.
+- **Three annotation actions are still blocked in preview: `d`, `@`, and `}`/`{`.** Creating,
+  reading, and flushing annotations all work inside preview after this plan; deleting one, listing
+  them in the `@` popup, and stepping between them all still require leaving preview first (press
+  `P`, act, press `P` again). None of the three are on `mdPreviewAllowedActions`' allowlist — see
+  that map and its doc comment in `mdpreview.go` for the per-action reason. Practical consequence
+  worth stating on its own: **a comment made in preview cannot be undone from inside preview.**
+  Pressing `a` on the same block again pre-fills the existing comment, but clearing the input and
+  confirming runs `cancelAnnotation`, which leaves the stored comment untouched.
+- **A thematic break (`---`) has no position of its own and is recovered by a gap scan.** goldmark
+  appends nothing to a `ThematicBreak`'s `Lines()`, so `mdBreakResolver` (`mdpreview_blocks.go`)
+  bounds it between the nearest siblings that DO carry a position and takes the first line in that
+  gap which looks like a rule (`looksLikeThematicBreak` — three or more matching `-`/`*`/`_`,
+  ignoring leading whitespace and any `>` quote markers). The candidate test is what makes the gap
+  scan correct on ordinary documents rather than only on isolated breaks: `Lines()` on a fenced code
+  block covers the CONTENT only, so a `---` after a fence has the closing ``` inside its gap, and a
+  break inside a blockquote has a bare `>` continuation in its. The earlier "first non-blank line"
+  rule anchored to those, with `Aligned=true` — a wrong source line in the `-o` output and nothing
+  to warn on. Resolved lines memoize per node, because a run of consecutive breaks resolves each
+  break through the one before it (800 consecutive breaks took seconds without the memo, on the
+  bubbletea `Update` goroutine). A break whose gap holds no rule-looking line resolves to nothing,
+  which fails alignment and degrades the whole document — the correct outcome, since the alternative
+  is anchoring to a line that is not the break.
+- **A list item whose children are all boundary kinds contributes no target, and degrades the whole
+  document.** `swallowedSpan` aggregates only over a container's own direct content, and a nested
+  list, table, code block, heading or thematic break is excluded because it gets its own target —
+  so an item like `-` followed only by an indented sub-list (`-\n  - deep`) yields no target of its
+  own while glamour still writes its item marker. The length mismatch fails alignment, and the
+  document degrades to read-only in full, the same all-or-nothing way the adjacent-tables case
+  does.
+
+**Preview annotations — corpus measurement (`mdpreview_srcmap_corpus_test.go`, env-gated via
+`REVDIFF_MDPREVIEW_SRCMAP_CORPUS`, same corpus definition the task 1-3 spike used: every file
+under `docs/plans/completed/`, every file directly under `docs/`, and every `.md` at the repo
+root):**
+
+Measured against the current repo (58 documents, one more than the spike's 59-entry corpus minus
+its one synthetic handwritten fixture, at pane width 80, colors on):
+
+| metric | result |
+|---|---|
+| documents aligned | 57 / 58 (98.3%) |
+| unaligned | `README.md` (multiple tables among other constructs; not root-caused further — falls under the documented table/alignment-mismatch degrade above) |
+| anchors produced across the 57 aligned documents | 9,851 total |
+
+Per-kind anchor counts across those 9,851 (confirms per-item granularity at real-corpus scale, not
+just in the unit-test fixtures — `item` alone accounts for two thirds of every anchor produced):
+
+| kind | anchors |
+|---|---|
+| item | 6,755 |
+| paragraph | 1,339 |
+| h3 | 727 |
+| h2 | 551 |
+| enumeration | 199 |
+| code_block | 153 |
+| h1 | 57 |
+| h4 | 28 |
+| table | 34 |
+| hr | 6 |
+| block_quote | 2 |
+
+Re-run with `go test ./app/ui -run TestMdPreviewSrcMapCorpusAlignment -v
+REVDIFF_MDPREVIEW_SRCMAP_CORPUS=<path-to-a-file-listing-one-.md-path-per-line>` — the numbers will
+drift as the corpus (this repo's own docs) grows or changes; treat this table as a snapshot, not a
+promise.
+
+⚠️ **The preview render is non-deterministic for about a quarter of documents — general finding,
+not specific to this feature.** The task 1-3 spike rendered the same document twice through the
+*unmodified*, pre-existing glamour style config (nothing this plan added) and got different bytes
+on 15 of 59 runs. The variation is ANSI-only — `ansi.Strip` equal, same row count, same per-row
+`ansi.StringWidth` — and is not mermaid-related. This is why every visual-identity assertion in
+this feature's tests (and any future test on this render path) checks `ansi.Strip` equality + row
+count + per-row width, never raw byte equality: a byte-identity test on `renderMarkdownPreview` or
+`renderMarkdownDocument` would have been flaky from its first run, independently of anything this
+plan changed.
+
 - **A subgraph id containing punctuation outside the identifier set can hide a crossing edge from
   the disjointness check.** The identifier rule — letters, digits, underscore, and the three chars
   real names use (`-` `.` `/`) — is applied when the block header claims its id as one string, and

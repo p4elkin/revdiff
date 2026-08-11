@@ -220,3 +220,65 @@ func TestSGRState_applySGR(t *testing.T) {
 		})
 	}
 }
+
+func TestSGR_ReassertBackground(t *testing.T) {
+	const bg = "\033[48;2;10;20;30m"
+	tests := []struct {
+		name   string
+		row    string
+		bg     string
+		expect string
+	}{
+		{name: "empty row untouched", row: "", bg: bg, expect: ""},
+		{name: "empty bg untouched", row: "plain", bg: "", expect: "plain"},
+		{name: "plain row wrapped", row: "plain", bg: bg, expect: bg + "plain" + "\033[49m"},
+		{
+			name: "full reset re-asserts", row: "a\033[0mb", bg: bg,
+			expect: bg + "a\033[0m" + bg + "b\033[49m",
+		},
+		{
+			name: "bare reset re-asserts", row: "a\033[mb", bg: bg,
+			expect: bg + "a\033[m" + bg + "b\033[49m",
+		},
+		{
+			name: "explicit bg reset re-asserts", row: "a\033[49mb", bg: bg,
+			expect: bg + "a\033[49m" + bg + "b\033[49m",
+		},
+		{
+			// the spellings a hand-written replacement table misses
+			name: "padded zero reset re-asserts", row: "a\033[00mb", bg: bg,
+			expect: bg + "a\033[00m" + bg + "b\033[49m",
+		},
+		{
+			name: "reset inside a multi-parameter sequence re-asserts", row: "a\033[0;39mb", bg: bg,
+			expect: bg + "a\033[0;39m" + bg + "b\033[49m",
+		},
+		{
+			name: "bg reset inside a multi-parameter sequence re-asserts", row: "a\033[22;49mb", bg: bg,
+			expect: bg + "a\033[22;49m" + bg + "b\033[49m",
+		},
+		{
+			// a foreground change must not re-assert: it never cleared the background
+			name: "foreground change left alone", row: "a\033[31mb", bg: bg,
+			expect: bg + "a\033[31mb\033[49m",
+		},
+		{
+			name: "bold off left alone", row: "a\033[22mb", bg: bg,
+			expect: bg + "a\033[22mb\033[49m",
+		},
+		{
+			// a non-SGR CSI sequence is copied through without a re-assertion
+			name: "non-sgr csi left alone", row: "a\033[2Kb", bg: bg,
+			expect: bg + "a\033[2Kb\033[49m",
+		},
+		{
+			name: "unterminated csi copied verbatim", row: "a\033[38;2;1", bg: bg,
+			expect: bg + "a\033[38;2;1\033[49m",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expect, SGR{}.ReassertBackground(tt.row, tt.bg))
+		})
+	}
+}

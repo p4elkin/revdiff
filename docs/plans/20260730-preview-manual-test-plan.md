@@ -232,6 +232,83 @@ None is a regression; all are limits of the vendored renderer, recorded in `PATC
       retry never fires on it
 - [ ] preview off is byte-identical to before any of this work
 
+## 9. Annotating in preview
+
+New: preview is no longer read-only. Reading a document and commenting on it now happens in one
+view — the current block is highlighted as you scroll, `a` annotates it, a click annotates a
+different one, and existing annotations are painted under the block they belong to. See
+`docs/plans/20260811-preview-annotations.md` for the design. `--no-colors` is a whole-mode
+exception: none of this section applies there — see item 9.6.
+
+### 9.1 Scroll-following highlight
+
+- [ ] press `P` on this file; a background highlight appears on the topmost fully-visible block
+- [ ] scroll with `j`/`k`, page up/down, and the wheel — the highlight follows the block that is
+      now topmost
+- [ ] a fast wheel flick (several notches quickly) still feels immediate — the highlight settles
+      once at the end of the flick, not once per notch
+- [ ] the highlight is a background color, not a border or an icon — confirm it is legible against
+      both a heading and a plain paragraph
+
+### 9.2 Keyboard aim (`a`)
+
+- [ ] with a bullet list item highlighted, press `a` — the annotation input opens under THAT item,
+      not the top of the file or the previously-focused line
+- [ ] type a short note and confirm it — the annotation appears painted directly under the bullet
+      it was aimed at
+- [ ] press `P` to leave preview — the same annotation is visible in source view, on the same
+      source line the bullet came from (confirms the anchor is a real `(Line, Type)` pair, not a
+      preview-only side note)
+- [ ] scroll so nothing has settled as "topmost" yet (immediately after `P`, before any scroll) and
+      press `a` — it aims at the topmost visible block rather than doing nothing
+- [ ] scroll to the very last block in the document and press `a` — it anchors there, not past the
+      end
+
+### 9.3 Two annotations in one tight list
+
+- [ ] find (or add) a tight bullet list with at least two items close together
+- [ ] annotate the first item, then scroll/aim and annotate the second item
+- [ ] confirm both painted annotations are on screen at once, each under its own bullet — two
+      distinct comments, not one overwriting the other
+- [ ] press `P` to leave preview, then open the annotation list popup (`@`) — both entries are
+      listed with different line numbers. `@` is a no-op while preview is on (same as `d`), so the
+      popup has to be opened from source view
+
+### 9.4 Click aim
+
+- [ ] click directly on a bullet or paragraph — the annotation input opens anchored to that block
+- [ ] click on a different block — a second annotation anchors to the new one, not the first
+- [ ] click below the last block in the document (into the empty space under the content) — it
+      resolves to the last block rather than doing nothing
+- [ ] click inside a table — the annotation anchors to the table as a whole (confirm the comment
+      reads as "on this table", not on a specific row — see the PATCH.md limitation)
+
+### 9.5 File-level annotation and flush
+
+- [ ] press `A` in preview — a file-level annotation input opens at the top of the document, above
+      row 0
+- [ ] confirm it, then press `O` (with `-o`/`--output` set) — the output file updates without
+      exiting preview
+- [ ] press `d` on a painted annotation in preview — confirm it is still a no-op (not yet
+      supported); leave preview with `P` to delete it from source view instead
+- [ ] same for `@` and `}`/`{` — all three annotation actions are blocked in preview; press `P`
+      first
+- [ ] move focus to the file-tree/TOC pane FIRST, then press `P` and press `a` — the first press
+      does not annotate, it hands focus to the diff pane; press `a` again and the input opens. This
+      is the only way back to diff focus while previewing, since `tab`, `h` and `l` are all blocked
+- [ ] do the same in a MULTI-FILE review that contains a markdown file (open the review, move to the
+      markdown file, press `P` without touching focus) — `a` must reach an input in two presses.
+      A multi-file review starts with the tree focused, so this is the ordinary path, not a corner
+- [ ] press `a` on a document that cannot be anchored (README.md is one) — the status bar says so
+      rather than the key doing nothing visible
+
+### 9.6 `--no-colors`
+
+- [ ] relaunch with `--no-colors` on this same file, press `P` — preview renders exactly as it did
+      before this feature (no highlight, no click-to-annotate)
+- [ ] confirm `a` and a click are silent no-ops in this mode — this is expected, not a bug (see
+      PATCH.md's `--no-colors` limitation)
+
 ## Notes
 
 Anything you want changed, annotate on the line. The two open questions I would most like an

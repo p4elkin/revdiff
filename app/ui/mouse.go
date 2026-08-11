@@ -150,12 +150,13 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.handleOverlayMouse(msg)
 	}
 
-	// reload, output, compact-mode, and editor hints persist for exactly one
-	// render cycle; any mouse event that reaches this point dismisses them,
+	// reload, output, compact-mode, preview and editor hints persist for exactly
+	// one render cycle; any mouse event that reaches this point dismisses them,
 	// mirroring handleKey.
 	m.reload.hint = ""
 	m.output.hint = ""
 	m.compact.hint = ""
+	m.preview.hint = ""
 	m.editorState.hint = ""
 
 	zone := m.hitTest(msg.X, msg.Y)
@@ -180,8 +181,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil // ignore release and motion while holding
 		}
 		if m.modes.mdPreview {
-			// preview is read-only: a click in either pane only repositions the
-			// source-line cursor (clickDiff / clickTree -> syncDiffToTOCCursor),
+			if zone == hitDiff {
+				return m.mdPreviewClickDiff(msg.Y)
+			}
+			// every other zone stays read-only in preview: a tree/TOC click would
+			// reposition the source-line cursor (clickTree -> syncDiffToTOCCursor),
 			// which is meaningless once the viewport shows the glamour render.
 			return m, nil
 		}
@@ -422,6 +426,9 @@ func (m *Model) scrollDiffViewportBy(delta int) bool {
 func (m *Model) flushWheelPending() {
 	if !m.wheel.renderPending {
 		return
+	}
+	if m.flushPreviewWheelPending() {
+		return // markdown preview owns the deferred repaint (see mdpreview_cache.go)
 	}
 	if m.pinDiffCursorTo(m.layout.viewport.YOffset) {
 		m.syncTOCActiveSection()

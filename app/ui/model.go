@@ -591,6 +591,7 @@ type Model struct {
 	compact     compactState      // applicability + transient hint for compact diff mode
 	editorState editorState       // transient hint state for source-file editor launches
 	output      outputState       // transient hint state for the O in-session output flush
+	preview     mdPreviewState    // transient hint state for markdown preview refusals
 	keys        keyState          // chord-pending state and transient hint for leader-chord keybindings
 	vim         vimState          // count accumulator, pending letter leader, and transient hint for vim-motion preset
 	wheel       wheelState        // diff-pane mouse wheel coalescing (debounced render via wheelDebounceMsg)
@@ -609,6 +610,13 @@ type Model struct {
 	// instance, which is what lets a block rendered by one copy serve the next.
 	// NewModel initializes this; direct Model{} construction is unsupported.
 	renderCache *diffRenderCache
+
+	// mdPreviewCache memoizes the base markdown-preview render and its source map
+	// (see mdpreview_cache.go). Held behind a pointer for the same reason
+	// renderCache is: renderMarkdownPreview has a value receiver, so a plain field
+	// would memoize into a Model copy the method throws away. NewModel initializes
+	// this; direct Model{} construction is unsupported.
+	mdPreviewCache *mdPreviewRenderCache
 
 	discarded        bool // true when user chose to discard annotations and quit
 	inConfirmDiscard bool // true when showing discard confirmation prompt
@@ -940,6 +948,7 @@ func NewModel(cfg ModelConfig) (Model, error) {
 		compact:              compactState{applicable: cfg.CompactApplicable},
 		annot:                annotationState{rowCache: make(map[annotCacheKey][]string)},
 		renderCache:          &diffRenderCache{},
+		mdPreviewCache:       &mdPreviewRenderCache{},
 		loadUntracked:        cfg.LoadUntracked,
 		loadUntrackedRenames: cfg.LoadUntrackedRenames,
 		activeThemeName:      cfg.ActiveThemeName,
@@ -1027,6 +1036,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.reload.hint = ""
 	m.output.hint = ""
 	m.compact.hint = ""
+	m.preview.hint = ""
 	m.editorState.hint = ""
 	m.keys.hint = ""
 	m.vim.hint = ""
@@ -1092,17 +1102,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // passes through — handleKey's direct path and handleChordSecond's chord
 // path both call it. Markdown preview renders the whole document through
 // glamour, which reflows text, so a rendered row no longer maps to a source
-// line — every action that would create/edit/delete/navigate to an
-// annotation or move m.nav.diffCursor must be a no-op while previewing. See
-// handleMdPreviewAction and mdPreviewActionAllowed (mdpreview.go) for the
-// fixed allowlist of what stays live and for the two pan actions preview
-// serves itself. The guard is kept in this thin wrapper, rather than inline in
-// dispatchResolvedAction's own switch, purely to keep that already-large
-// function's cyclomatic complexity (gocyclo) unchanged.
+// line — most actions that would edit/delete/navigate to an annotation or
+// move m.nav.diffCursor must be a no-op while previewing. Annotation
+// CREATION is the one exception: ActionConfirm is allowed and anchors through
+// the source map instead (see the ActionConfirm case in
+// handleMdPreviewAction). See handleMdPreviewAction and mdPreviewActionAllowed
+// (mdpreview.go) for the fixed allowlist of what stays live. The guard is
+// kept in this thin wrapper, rather than inline in dispatchResolvedAction's
+// own switch, purely to keep that already-large function's cyclomatic
+// complexity (gocyclo) unchanged.
 func (m Model) dispatchAction(action keymap.Action) (tea.Model, tea.Cmd) {
 	if m.modes.mdPreview {
-		if model, handled := m.handleMdPreviewAction(action); handled {
-			return model, nil
+		if model, cmd, handled := m.handleMdPreviewAction(action); handled {
+			return model, cmd
 		}
 	}
 	return m.dispatchResolvedAction(action)
