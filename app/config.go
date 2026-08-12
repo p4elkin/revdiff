@@ -29,6 +29,7 @@ type options struct {
 	NoTree                bool     `long:"no-tree" ini-name:"no-tree" env:"REVDIFF_NO_TREE" description:"hide the file tree pane"`
 	Wrap                  bool     `long:"wrap" ini-name:"wrap" env:"REVDIFF_WRAP" description:"enable line wrapping in diff view"`
 	WrapIndent            int      `long:"wrap-indent" ini-name:"wrap-indent" env:"REVDIFF_WRAP_INDENT" default:"0" description:"indent wrap continuation rows by N columns so they hang under the first row's content (helps when reviewing markdown lists where unindented continuation can be misread as a new bullet)"`
+	PageOverlap           int      `long:"page-overlap" ini-name:"page-overlap" env:"REVDIFF_PAGE_OVERLAP" default:"0" description:"keep N lines from the previous screen when paging the diff"`
 	Collapsed             bool     `long:"collapsed" ini-name:"collapsed" env:"REVDIFF_COLLAPSED" description:"start in collapsed diff mode"`
 	Preview               bool     `long:"preview" ini-name:"preview" env:"REVDIFF_PREVIEW" description:"start in markdown preview mode"`
 	Compact               bool     `long:"compact" ini-name:"compact" env:"REVDIFF_COMPACT" description:"start in compact diff mode (small context around changes)"`

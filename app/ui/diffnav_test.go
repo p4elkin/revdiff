@@ -510,6 +510,192 @@ func TestModel_PgDownPgUpPreservesRelativeCursorPosition(t *testing.T) {
 	})
 }
 
+func TestModel_PageOverlapCarriesRowsAcrossPages(t *testing.T) {
+	lines := make([]diff.DiffLine, 200)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeAdd}
+	}
+
+	newModel := func(overlap int) Model {
+		m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+		m.modes.pageOverlap = overlap
+		result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+		model := result.(Model)
+		result, _ = model.Update(fileLoadedMsg{file: "a.go", lines: lines})
+		model = result.(Model)
+		model.layout.focus = paneDiff
+		return model
+	}
+
+	t.Run("zero overlap advances a full page", func(t *testing.T) {
+		model := newModel(0)
+		pageHeight := model.layout.viewport.Height
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		model = result.(Model)
+		assert.Equal(t, pageHeight, model.layout.viewport.YOffset)
+	})
+
+	t.Run("overlap keeps N rows on screen", func(t *testing.T) {
+		model := newModel(2)
+		pageHeight := model.layout.viewport.Height
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		model = result.(Model)
+		assert.Equal(t, pageHeight-2, model.layout.viewport.YOffset,
+			"the last 2 rows of the previous screen must be the first 2 of the new one")
+	})
+
+	t.Run("overlap applies to pgup as well", func(t *testing.T) {
+		model := newModel(2)
+		pageHeight := model.layout.viewport.Height
+		for range 2 {
+			result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+			model = result.(Model)
+		}
+		downOffset := model.layout.viewport.YOffset
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+		model = result.(Model)
+		assert.Equal(t, downOffset-(pageHeight-2), model.layout.viewport.YOffset)
+	})
+
+	t.Run("half page motions ignore the overlap", func(t *testing.T) {
+		model := newModel(2)
+		pageHeight := model.layout.viewport.Height
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+		model = result.(Model)
+		assert.Equal(t, pageHeight/2, model.layout.viewport.YOffset,
+			"ctrl+d already retains half a screen, so the overlap must not shrink it further")
+	})
+
+	t.Run("overlap wider than the pane still advances", func(t *testing.T) {
+		model := newModel(1000)
+		result, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		model = result.(Model)
+		assert.Positive(t, model.layout.viewport.YOffset, "paging must never stall on an oversized overlap")
+	})
+}
+
+// a line taller than the remaining page budget must not make paging scroll past unseen rows:
+// the walk used to step onto it and then shift the viewport by the cursor's whole visual delta,
+// skipping the tail of an annotation that was never rendered.
+func TestModel_PagingDoesNotSkipRowsAtTallLineBoundary(t *testing.T) {
+	lines := make([]diff.DiffLine, 200)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeAdd}
+	}
+
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	model := result.(Model)
+	result, _ = model.Update(fileLoadedMsg{file: "a.go", lines: lines})
+	model = result.(Model)
+	model.layout.focus = paneDiff
+
+	pageHeight := model.layout.viewport.Height
+	require.Positive(t, pageHeight)
+
+	// annotate the line one row short of the page edge with a body long enough to wrap
+	// several rows, so stepping off it crosses the page boundary in a single cursor step
+	boundary := pageHeight - 2
+	require.Positive(t, boundary)
+	model.store.Add(annotation.Annotation{File: "a.go", Line: boundary + 1, Type: string(diff.ChangeAdd),
+		Comment: strings.Repeat("some long annotation body ", 30)})
+	model.invalidateRenderCaches()
+
+	offsets := model.cursorVisualOffsets(model.findHunks(), model.buildAnnotationSet())
+	require.Greater(t, offsets[boundary+1]-offsets[boundary], 3,
+		"annotated line must be tall enough to overshoot the page budget")
+
+	startOffset := model.layout.viewport.YOffset
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	model = result.(Model)
+	assert.LessOrEqual(t, model.layout.viewport.YOffset-startOffset, pageHeight,
+		"pgdown must not advance the viewport by more than one page, or rows are skipped unseen")
+	assert.Greater(t, model.layout.viewport.YOffset, startOffset, "pgdown must still advance the viewport")
+
+	downOffset := model.layout.viewport.YOffset
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = result.(Model)
+	assert.LessOrEqual(t, downOffset-model.layout.viewport.YOffset, pageHeight,
+		"pgup must not retreat the viewport by more than one page, or rows are skipped unseen")
+}
+
+// a line taller than the whole viewport must stay reachable: the overshoot guard exempts the
+// first step, or paging would refuse to move and the cursor could never get past such a line.
+func TestModel_PagingAdvancesPastLineTallerThanPage(t *testing.T) {
+	lines := make([]diff.DiffLine, 200)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeAdd}
+	}
+
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	model := result.(Model)
+	result, _ = model.Update(fileLoadedMsg{file: "a.go", lines: lines})
+	model = result.(Model)
+	model.layout.focus = paneDiff
+
+	pageHeight := model.layout.viewport.Height
+	model.store.Add(annotation.Annotation{File: "a.go", Line: 1, Type: string(diff.ChangeAdd),
+		Comment: strings.Repeat("a very long annotation body that wraps many times ", 40)})
+	model.invalidateRenderCaches()
+
+	offsets := model.cursorVisualOffsets(model.findHunks(), model.buildAnnotationSet())
+	require.Greater(t, offsets[1]-offsets[0], pageHeight,
+		"the annotated line must be taller than a full page for this to exercise the exemption")
+
+	startOffset := model.layout.viewport.YOffset
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	model = result.(Model)
+	assert.GreaterOrEqual(t, model.layout.viewport.YOffset-startOffset, pageHeight/2,
+		"pgdown must not collapse to a near-zero scroll when the block ahead is taller than the page")
+
+	for range 2 {
+		result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		model = result.(Model)
+	}
+	assert.Positive(t, model.nav.diffCursor, "paging must get past a line taller than the viewport")
+}
+
+// the upward walk rolls back its overshooting step too: without it, pgup across a tall
+// annotated line retreats the viewport by the line's whole height, past rows never rendered.
+func TestModel_PgUpDoesNotSkipRowsAtTallLineBoundary(t *testing.T) {
+	lines := make([]diff.DiffLine, 200)
+	for i := range lines {
+		lines[i] = diff.DiffLine{NewNum: i + 1, Content: "line", ChangeType: diff.ChangeAdd}
+	}
+
+	m := testModel([]string{"a.go"}, map[string][]diff.DiffLine{"a.go": lines})
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 24})
+	model := result.(Model)
+	result, _ = model.Update(fileLoadedMsg{file: "a.go", lines: lines})
+	model = result.(Model)
+	model.layout.focus = paneDiff
+
+	pageHeight := model.layout.viewport.Height
+	const tall = 40
+	model.store.Add(annotation.Annotation{File: "a.go", Line: tall + 1, Type: string(diff.ChangeAdd),
+		Comment: strings.Repeat("some long annotation body ", 30)})
+	model.invalidateRenderCaches()
+
+	offsets := model.cursorVisualOffsets(model.findHunks(), model.buildAnnotationSet())
+	require.Greater(t, offsets[tall+1]-offsets[tall], 3,
+		"annotated line must be tall enough to overshoot the page budget")
+
+	// park the cursor just over half a page below the tall line, so the walk up has spent
+	// enough budget to make the rollback worthwhile by the time it reaches the annotation
+	model.nav.diffCursor = tall + pageHeight/2 + 1
+	model.syncViewportToCursor()
+	require.Greater(t, model.layout.viewport.YOffset, pageHeight,
+		"viewport must be far enough down that an over-page retreat would not clamp at zero")
+
+	startOffset := model.layout.viewport.YOffset
+	result, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = result.(Model)
+	assert.LessOrEqual(t, startOffset-model.layout.viewport.YOffset, pageHeight,
+		"pgup must not retreat the viewport by more than one page, or rows are skipped unseen")
+	assert.Less(t, model.layout.viewport.YOffset, startOffset, "pgup must still retreat the viewport")
+}
+
 // on annotated lines the cursor must stay visible within the viewport after pgdown/pgup,
 // even when moveDiffCursorDown only flips cursorOnAnnotation without advancing diffCursor.
 func TestModel_PgDownKeepsCursorVisibleOnAnnotatedLine(t *testing.T) {

@@ -114,14 +114,25 @@ func (m *Model) moveDiffCursorUpWithHunks(hunks []int) {
 // keeps the cursor's relative screen position stable by scrolling both
 // cursor and viewport by the same amount.
 func (m *Model) moveDiffCursorPageDown() {
-	m.moveDiffCursorDownBy(m.layout.viewport.Height)
+	m.moveDiffCursorDownBy(m.pageRows())
 }
 
 // moveDiffCursorPageUp moves the diff cursor up by one visual page.
 // keeps the cursor's relative screen position stable by scrolling both
 // cursor and viewport by the same amount.
 func (m *Model) moveDiffCursorPageUp() {
-	m.moveDiffCursorUpBy(m.layout.viewport.Height)
+	m.moveDiffCursorUpBy(m.pageRows())
+}
+
+// pageRows returns how far a full-page motion advances, one screen less the
+// configured overlap. the overlap is approximate rather than exact, and deviates in both
+// directions: the walk stops on cursor positions and one position can span several rendered
+// rows (a wrapped line, an annotation block), so a tall line at the page edge carries over
+// more than requested when the walk rolls back off it, and less than requested - down to
+// rows skipped unseen - when worthRollingBack accepts it whole.
+// half-page motions do not subtract it - they already retain half a screen.
+func (m Model) pageRows() int {
+	return max(1, m.layout.viewport.Height-m.modes.pageOverlap)
 }
 
 // moveDiffCursorHalfPageDown moves the diff cursor down by half a visual page.
@@ -142,10 +153,15 @@ func (m *Model) moveDiffCursorHalfPageUp() {
 // accounts for divider lines, wrap continuations, and annotation rows that occupy rendered space.
 // transitions onto an annotation sub-row (cursorOnAnnotation flip with no diffCursor change)
 // count as real progress so the loop does not terminate early on annotated lines.
+// a step that would carry the delta past rows is undone, but only when what is already
+// walked is worth keeping (see worthRollingBack): one cursor step can span many rows
+// (a wrapped line or an annotation block), and scrolling by that whole height would move the
+// viewport further than a page, past rows it never rendered.
 func (m *Model) moveDiffCursorDownBy(rows int) {
 	hunks := m.findHunks()
 	offsets := m.cursorVisualOffsets(hunks, m.buildAnnotationSet())
 	startY := m.cursorViewportYFromOffsets(offsets)
+	walked := 0
 	for {
 		prevCursor := m.nav.diffCursor
 		prevAnnot := m.annot.cursorOnAnnotation
@@ -153,7 +169,17 @@ func (m *Model) moveDiffCursorDownBy(rows int) {
 		if m.nav.diffCursor == prevCursor && m.annot.cursorOnAnnotation == prevAnnot {
 			break // no more movement possible (end of content)
 		}
-		if m.cursorViewportYFromOffsets(offsets)-startY >= rows {
+		delta := m.cursorViewportYFromOffsets(offsets) - startY
+		// walking down, the delta grows by the height of the line being LEFT, not the one
+		// arrived at: offsets[i] is that line's top row, so its own wrap and annotation rows
+		// are only counted once the cursor steps past them
+		if delta > rows && m.worthRollingBack(walked, rows) {
+			m.nav.diffCursor = prevCursor
+			m.annot.cursorOnAnnotation = prevAnnot
+			break
+		}
+		walked = delta
+		if delta >= rows {
 			break
 		}
 	}
@@ -169,10 +195,13 @@ func (m *Model) moveDiffCursorDownBy(rows int) {
 // accounts for divider lines, wrap continuations, and annotation rows that occupy rendered space.
 // transitions off an annotation sub-row count as real progress so the loop does not
 // terminate early on annotated lines.
+// a step that would carry the delta past rows is undone on the same terms as the
+// downward walk: scrolling by a tall line's whole height skips rows that were never rendered.
 func (m *Model) moveDiffCursorUpBy(rows int) {
 	hunks := m.findHunks()
 	offsets := m.cursorVisualOffsets(hunks, m.buildAnnotationSet())
 	startY := m.cursorViewportYFromOffsets(offsets)
+	walked := 0
 	for {
 		prevCursor := m.nav.diffCursor
 		prevAnnot := m.annot.cursorOnAnnotation
@@ -180,13 +209,34 @@ func (m *Model) moveDiffCursorUpBy(rows int) {
 		if m.nav.diffCursor == prevCursor && m.annot.cursorOnAnnotation == prevAnnot {
 			break // no more movement possible (start of content)
 		}
-		if startY-m.cursorViewportYFromOffsets(offsets) >= rows {
+		delta := startY - m.cursorViewportYFromOffsets(offsets)
+		// walking up, the delta grows by the height of the line ARRIVED at, including the
+		// annotation block that renders below it - the mirror of the downward walk
+		if delta > rows && m.worthRollingBack(walked, rows) {
+			m.nav.diffCursor = prevCursor
+			m.annot.cursorOnAnnotation = prevAnnot
+			break
+		}
+		walked = delta
+		if delta >= rows {
 			break
 		}
 	}
 	actualDelta := startY - m.cursorViewportYFromOffsets(offsets)
 	m.layout.viewport.SetYOffset(max(0, m.layout.viewport.YOffset-actualDelta))
 	m.layout.viewport.SetContent(m.renderDiff())
+}
+
+// worthRollingBack reports whether undoing an overshooting step leaves a useful scroll.
+// a rollback trades landing past the requested page for landing short of it, worthwhile only
+// when what is already walked is a real move. with a block taller than the page ahead of the
+// cursor there is no selectable position inside it, so rolling back to a row or two would
+// scroll the pane by almost nothing and the next press would take the same oversized step
+// anyway - worse than simply taking it now. half a page is the bar, matching ctrl+d/ctrl+u.
+// walked is 0 on the first step, so no rollback can fire there and the walk can never
+// refuse to move.
+func (m Model) worthRollingBack(walked, rows int) bool {
+	return walked*2 >= rows
 }
 
 // moveDiffCursorToStart moves the diff cursor to the first selectable position.

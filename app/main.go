@@ -214,6 +214,7 @@ func run(opts options) (int, error) {
 		NoTree:               opts.NoTree,
 		Wrap:                 opts.Wrap,
 		WrapIndent:           opts.WrapIndent,
+		PageOverlap:          opts.PageOverlap,
 		Collapsed:            opts.Collapsed,
 		Preview:              opts.Preview,
 		Compact:              opts.Compact,
