@@ -541,10 +541,10 @@ on run argv
                                 set newSession to split horizontally with same profile command cmd
                             end if
                         end tell
-                        -- the tab label comes from its active session's name,
+                        -- the tab label comes from the name of its active session,
                         -- and the split gets none of its own: it copies the
-                        -- parent's profile but not the session variables that
-                        -- profile's name may interpolate
+                        -- parent profile but not the session variables that
+                        -- profile name may interpolate
                         set name of newSession to overlayTitle
                         return id of newSession
                     end if
