@@ -63,9 +63,9 @@ func mdFencePrefix(s string) (rune, int) {
 // whitespace already removed and n the marker length mdFencePrefix reported.
 //
 // One definition, shared by the walk that substitutes mermaid fences
-// (joinWithMermaidFences) and the check that refuses to expand one
-// (mdPreviewMermaidFenceLine): two readings of the same info string would let the
-// two disagree about which fences are diagrams.
+// (joinWithMermaidFences) and the check that recovers one's fence extent for raw
+// expansion (mdPreviewMermaidFenceLine): two readings of the same info string
+// would let the two disagree about which fences are diagrams.
 func mdFenceLang(trimmed string, n int) string {
 	if fields := strings.Fields(trimmed[n:]); len(fields) > 0 {
 		return strings.ToLower(fields[0])

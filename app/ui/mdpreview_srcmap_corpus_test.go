@@ -9,6 +9,8 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/umputun/revdiff/app/diff"
 )
 
 // This file is the alignment corpus harness for the markdown-preview source
@@ -133,6 +135,12 @@ func TestMdPreviewSrcMapCorpusAlignment(t *testing.T) {
 // than compared in order because glamour wraps table cells, which interleaves the
 // columns and reorders the rendered text against its source.
 //
+// A MERMAID DIAGRAM is the one block that sentence is false about, so its
+// expectation is computed differently — see mdPreviewCorpusExpected, which states
+// what replaces it and why. It is not a weaker check: everything outside the
+// block's own rows must survive exactly as before, and the definition must
+// additionally be proven on screen.
+//
 // Same env gate and same corpus list as TestMdPreviewSrcMapCorpusAlignment above;
 // see that test's comment for how to run it. Measured on the repo's own document
 // tree it does 10298 expansions across 59 aligned documents in about 100 seconds,
@@ -163,7 +171,6 @@ func TestMdPreviewRawExpansionCorpusKeepsEveryLetter(t *testing.T) {
 			continue
 		}
 		docs++
-		want := mdPreviewCorpusLetters(before)
 		for bi := range srcMap.blocks() {
 			expanded := m
 			expanded.setMdPreviewCursorToBlock(bi)
@@ -172,6 +179,7 @@ func TestMdPreviewRawExpansionCorpusKeepsEveryLetter(t *testing.T) {
 				continue // refused, and the refusal hint says why
 			}
 			expansions++
+			want := mdPreviewCorpusExpected(before, srcMap.blocks()[bi], m.file.lines)
 			after, _ := expanded.mdPreviewBody()
 			assert.True(t, mdPreviewCorpusCovers(mdPreviewCorpusLetters(after), want),
 				"%s: expanding block %d (kind %s, source lines %d..%d) removed content from the frame",
@@ -183,6 +191,44 @@ func TestMdPreviewRawExpansionCorpusKeepsEveryLetter(t *testing.T) {
 		t.Fatalf("corpus list %s yielded no aligned documents", listPath)
 	}
 	t.Logf("expanded %d blocks across %d aligned documents with no content lost", expansions, docs)
+}
+
+// mdPreviewCorpusExpected is the letter count the frame must still cover once
+// block a has been expanded: the frame as it was, for every block but one.
+//
+// A mermaid diagram is that one. Its rendered form is a DRAWING produced from the
+// definition rather than a typesetting of it, and the renderer writes text into
+// the drawing that appears in no source line — a `<|--` edge is labeled
+// `implements`, node labels are truncated to `+ChangedFiles...`. Requiring the
+// art's own letters to survive the expansion would therefore be requiring the
+// source to contain words the author never wrote. (Measured, not assumed: the
+// classDiagram in docs/plans/20260730-preview-manual-test-plan.md loses exactly
+// three `m` and three `p` that way — the three synthesized `implements` labels.)
+//
+// So for a diagram the art's rows drop out of the expectation and the fence's own
+// source lines are added to it. That is stronger than the plain frame check, not
+// weaker: every row OUTSIDE the block still has to survive letter for letter — the
+// direction the harness exists to police, since the deletion that motivated it hit
+// a neighboring block — and the definition now has to be proven on screen rather
+// than merely not-lost. The rows dropped are the block's own tile as the map
+// recorded it, so a pass that replaced more rows than it owns is still caught by
+// the letters outside going missing.
+func mdPreviewCorpusExpected(before string, a mdPreviewBlockAnchor, lines []diff.DiffLine) []int {
+	fenceEnd, isDiagram := mdPreviewMermaidFenceSpan(lines, a.startLine)
+	if !isDiagram || a.startLine != a.endLine {
+		return mdPreviewCorpusLetters(before)
+	}
+	var b strings.Builder
+	for row, text := range strings.Split(ansi.Strip(before), "\n") {
+		if row >= a.row && row <= a.endRow {
+			continue // the art, which the source it was drawn from does not spell
+		}
+		b.WriteString(text + "\n")
+	}
+	for i := a.startLine; i <= min(fenceEnd, len(lines)-1); i++ {
+		b.WriteString(lines[i].Content + "\n")
+	}
+	return mdPreviewCorpusLetters(b.String())
 }
 
 // mdPreviewCorpusLetters is a frame reduced to its lowercase ASCII letters:

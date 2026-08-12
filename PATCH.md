@@ -144,8 +144,9 @@ feature, preview included, published to the user's own fork, never to upstream.
 - `app/ui/mdpreview_expand.go` — raw source expansion for the selected block: the pass that swaps
   one block's rendered rows for its markdown source one row per source line
   (`mdPreviewRawLines`, `mdPreviewExpandBlock`, `mdPreviewLineAnchor`), the refusal rules that
-  say when `r` will not expand (`mdPreviewExpandRefusal` — a code fence by block kind, a mermaid
-  diagram by its fence text, a block whose every source line is blank), and the `r` handler
+  say when `r` will not expand (`mdPreviewExpandRefusal` — a code fence by block kind, a block
+  whose every source line is blank), the recovery of a mermaid diagram's fence extent
+  (`mdPreviewOwnSpanEnd`, `mdPreviewMermaidFenceSpan`), and the `r` handler
   itself (`mdPreviewToggleRaw`, `mdPreviewExpandTarget`, `mdPreviewRawStopLine`,
   `mdPreviewCollapseRaw`). See "Raw source expansion" below.
 - `app/ui/mdpreview_expand_test.go` — its tests.
@@ -632,6 +633,8 @@ whose memos were warmed with the annotation still present.
 Press `r` on the block the preview cursor marks and that block is redrawn as its raw markdown
 source, one rendered row per source line. `j`/`k` then step between those source lines and `a`
 annotates the exact line. Press `r` again, or `esc`, and the block goes back to its rendered form.
+A mermaid diagram expands too (added after the first version of the feature — see "A mermaid
+diagram expands to its fence source" below); a code fence still does not.
 
 Only one upstream-owned file gained hunks for this, and they are all four in `app/keymap/keymap.go`:
 
@@ -733,6 +736,43 @@ The rest of the feature is fork-owned: the pass and the `r` handler in the new
   expands every block of every corpus document and fails if a letter disappears from the frame. The
   deletion above survived a review and a round of fixture tests because every fixture expanded the
   CONTAINER, never the block nested inside it.
+- **A mermaid diagram expands to its fence source, a code fence does not, and the asymmetry is the
+  point.** A code fence renders as its own lines, roughly one for one, so expanding it would add the
+  fence markers and nothing else — it stays refused by kind. A diagram renders as box art that
+  carries none of its source's text, so expanding is the only way to read or comment on the
+  definition ("this edge label is wrong", "this node should be a decision"), which is what the
+  feature is for. The first version refused it with `Diagram source is one line`; that was a fact
+  about the ANCHOR, not about the document, and the refusal and its hint constant are both gone now.
+  - The anchor really does carry one line: `joinWithMermaidFences` replaces the whole fence with a
+    single placeholder paragraph and attributes every line of the replacement to the fence's opening
+    line, so the block arrives as an `mdBlockParagraph` spanning only the ` ```mermaid ` line while
+    the ROWS it owns are the art rows the splice put there. `mdPreviewOwnSpanEnd` recovers the
+    fence's real extent — opening line to closing fence, inclusive — by scanning forward with
+    `joinWithMermaidFences`' own closing rule (`mdPreviewMermaidFenceSpan`: same fence character, a
+    marker at least as long, nothing but whitespace after it, `ChangeDivider` rows skipped).
+  - ⚠️ The widening happens at EXPANSION time, inside `mdPreviewClipRawSpan`, not where
+    `mdPreviewBuildSourceMap` builds the anchor. The deciding fact is that `endLine` has exactly one
+    consumer — the expansion pass — so widening the recorded anchor would mean threading the source
+    lines into the map builder to change a field nothing else reads, and would leave the map
+    claiming a span its own row range was never derived from. If a second reader of `endLine` ever
+    appears, the widening belongs in the builder instead.
+  - Both fence markers are painted as rows of their own. The pass's whole arithmetic is "one source
+    line, one rendered row", and the opening line is where a comment on the diagram anchors anyway.
+  - The nesting case needs no special handling, and not by luck: the placeholder is written at
+    column 0, so a diagram indented inside a list item breaks out of the item and becomes its own
+    top-level block. A diagram inside a BLOCKQUOTE does not exist at all — `> ```mermaid ` does not
+    read as a fence opening to `joinWithMermaidFences`, so it is never substituted and renders as an
+    ordinary code fence.
+  - ⚠️ `TestMdPreviewRawExpansionCorpusKeepsEveryLetter`'s property does not hold for a diagram, and
+    the harness now computes that one expectation differently (`mdPreviewCorpusExpected`). The art is
+    a drawing produced FROM the definition, not a typesetting of it: the renderer writes text into it
+    that appears in no source line — `implements` on a `<|--` edge, `+ChangedFiles...` for a
+    truncated member. Measured, not assumed: the classDiagram in
+    `docs/plans/20260730-preview-manual-test-plan.md` "loses" exactly three `m` and three `p` on
+    expansion, the three synthesized `implements` labels. For a diagram the art's own rows drop out
+    of the expectation and the fence's source lines are added to it, which is stronger rather than
+    weaker — every row outside the block still has to survive letter for letter, and the definition
+    now has to be proven on screen.
 - **What the painted map says is expanded beats what the cursor says.** The two can disagree — the
   cursor still carries `expanded` while `mdPreviewExpandBlock` refused, e.g. against a map built at
   another width. Every reader holding a painted map (`moveMdPreviewCursor`'s j/k clamp,
@@ -1345,14 +1385,21 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   belong to the nested block — expanding THAT shows them, because they are rendered into rows it
   owns. The alternative — painting the container's whole span — put the nested block's content on
   screen twice, as source and as render, which is why this is the cut rather than the bug.
-- **A container's trailing lines are unreachable when its nested block is a code fence or a mermaid
-  diagram.** Those two blocks refuse expansion (`mdPreviewExpandRefusal`: a fence already shows its
-  source, a diagram's whole art hangs off one source line), and they are the only block whose rows
-  the container's trailing paragraph is rendered into. So in `- para a` / fence / `  para b`, the
-  `  para b` line has no raw-line stop in preview and cannot be annotated per line — `a` on the
-  fence block anchors to the fence instead. Accepted: lifting it means expanding a fence into its
-  own source, which is the one thing the fence refusal exists to prevent. The line is annotatable in
-  the ordinary source view with preview off.
+- **A container's trailing lines are unreachable when its nested block is a code fence.** A fence
+  refuses expansion (`mdPreviewExpandRefusal`: it already shows its source), and it is the block
+  whose rows the container's trailing paragraph is rendered into. So in `- para a` / fence /
+  `  para b`, the `  para b` line has no raw-line stop in preview and cannot be annotated per line —
+  `a` on the fence block anchors to the fence instead. Accepted: lifting it means expanding a fence
+  into its own source, which is the one thing the fence refusal exists to prevent. The line is
+  annotatable in the ordinary source view with preview off.
+
+  This used to be stated for a mermaid diagram as well, and that half is gone — measured on
+  `- para a` / mermaid fence / `  para b`, which produces three blocks (the item, the diagram, and
+  `  para b` as a paragraph of its own). Two separate reasons, either one sufficient: the diagram
+  now expands rather than refusing, and the placeholder that replaces the fence is written at column
+  0, so it breaks the item apart and the trailing paragraph gets its own anchor instead of being
+  rendered into the diagram's rows. The second reason held before this change too — the entry was
+  wrong about mermaid when it was written, not made wrong by it.
 - **A list item whose children are all boundary kinds contributes no target, and degrades the whole
   document.** `swallowedSpan` aggregates only over a container's own direct content, and a nested
   list, table, code block, heading or thematic break is excluded because it gets its own target —

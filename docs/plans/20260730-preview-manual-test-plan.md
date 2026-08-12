@@ -380,8 +380,12 @@ them as unverified until it is ticked here.
 - [ ] press `right` / `left` — the raw rows pan and show `«` / `»`, and the pan reaches the end of
       the longest raw line
 - [ ] press `esc` — the table is rendered again and the comment is back under the block
-- [ ] press `r` on a mermaid diagram and on a code fence — a hint appears in the status bar and
-      nothing changes on screen
+- [ ] press `r` on a code fence — a hint appears in the status bar and nothing changes on screen
+- [ ] press `r` on a mermaid diagram (this file has several — see sections 1 to 6 above) — the box
+      art is replaced by the fence source, from ` ```mermaid ` down to the closing ` ``` `, one row
+      per line, and the rest of the document only moves by the height difference. `j` down to an
+      edge line, `a`, type something, Enter — the comment sits under that exact line. `esc` — the
+      art is drawn again exactly as it was, and the comment is back under the diagram
 - [ ] press `r` on a bullet-list item that contains a fenced code block (this plan file has one) —
       the item's own lines up to the fence show as source, the fence body is NOT drawn twice, and
       nothing below the item is duplicated

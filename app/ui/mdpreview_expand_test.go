@@ -96,18 +96,23 @@ func TestMdPreviewExpandRefusal_CodeBlockByKind(t *testing.T) {
 	assert.Equal(t, mdPreviewExpandCodeHint, mdPreviewExpandRefusal(anchors, 0, lines, "    "))
 }
 
-func TestMdPreviewExpandRefusal_MermaidFenceOnSingleLineSpan(t *testing.T) {
+// TestMdPreviewExpandRefusal_AllowsAMermaidDiagram is the asymmetry with the
+// code fence above: a fence renders as its own lines, a diagram renders as art
+// that looks nothing like its source, so the diagram is the one that must expand.
+// joinWithMermaidFences attributes the whole art to the opening fence line, so
+// the block arrives as a paragraph whose recorded span is that one line, and the
+// clip is where the fence's real extent comes back.
+func TestMdPreviewExpandRefusal_AllowsAMermaidDiagram(t *testing.T) {
 	lines := mdLines("```mermaid\nflowchart TD\n  a --> b\n```")
-	// joinWithMermaidFences attributes the whole art to the opening fence line,
-	// so the block arrives as a paragraph whose span is that one line. The test is
-	// against the anchor's OWN span, not the clipped one, which is why the extra
-	// source lines below the fence line do not make it look like prose.
 	anchors := []mdPreviewBlockAnchor{{kind: mdBlockParagraph, startLine: 0, endLine: 0}}
-	assert.Equal(t, mdPreviewExpandMermaidHint, mdPreviewExpandRefusal(anchors, 0, lines, "    "))
+	assert.Empty(t, mdPreviewExpandRefusal(anchors, 0, lines, "    "))
+	assert.Equal(t, 3, mdPreviewClipRawSpan(anchors, 0, lines).endLine,
+		"the span must reach the closing fence, or the pass would paint one row over the whole art")
 
 	tilde := mdLines("~~~MERMAID title=x\nflowchart TD\n~~~")
-	assert.Equal(t, mdPreviewExpandMermaidHint, mdPreviewExpandRefusal(anchors, 0, tilde, "    "),
+	assert.Empty(t, mdPreviewExpandRefusal(anchors, 0, tilde, "    "),
 		"the info string is read the same way joinWithMermaidFences reads it")
+	assert.Equal(t, 2, mdPreviewClipRawSpan(anchors, 0, tilde).endLine)
 }
 
 func TestMdPreviewExpandRefusal_MermaidTextOnMultiLineSpanIsNotADiagram(t *testing.T) {
@@ -767,22 +772,198 @@ func TestMdPreviewToggleRaw_KeyPressOutsidePreviewChangesNothing(t *testing.T) {
 	assert.Empty(t, got.store.Get("plan.md"), "and must not touch the annotation store")
 }
 
-// TestMdPreviewToggleRaw_RefusesAMermaidDiagram reaches the mermaid refusal
-// through the key rather than through mdPreviewExpandRefusal alone: only the key
-// path can show that the hint reaches m.preview.hint.
-func TestMdPreviewToggleRaw_RefusesAMermaidDiagram(t *testing.T) {
-	m := mdPreviewStyledModel(t, "# Title\n\n```mermaid\nflowchart TD\n  a --> b\n```\n")
+// mermaidRawDoc is the fixture for the diagram tests: a heading (block 0), a
+// mermaid diagram (block 1, a paragraph whose recorded span is its single
+// fence-opening line) and a paragraph after it (block 2).
+const mermaidRawDoc = "# Title\n\n```mermaid\nflowchart TD\n    a[Alpha] --> b[Beta]\n```\n\nAfter the diagram.\n"
+
+// mermaidRawModel is mermaidRawDoc in a styled preview model, with the block
+// shape the tests below name asserted once here rather than in each of them.
+func mermaidRawModel(t *testing.T) Model {
+	t.Helper()
+	m := mdPreviewStyledModel(t, mermaidRawDoc)
 	_, sm := m.mdPreviewBody()
 	require.True(t, sm.aligned, "fixture sanity: the diagram document must align")
-	require.Len(t, sm.blocks(), 2, "fixture sanity: the heading plus the collapsed diagram paragraph")
+	require.Len(t, sm.blocks(), 3, "fixture sanity: the heading, the collapsed diagram, the paragraph after it")
 	require.Equal(t, sm.blocks()[1].startLine, sm.blocks()[1].endLine,
-		"fixture sanity: the diagram's span is the single fence-opening line")
+		"fixture sanity: the diagram's recorded span is the single fence-opening line")
+	require.Equal(t, 2, sm.blocks()[1].startLine, "fixture sanity: the fence opens on source line 2")
+	return m
+}
+
+// TestMdPreviewToggleRaw_ExpandsAMermaidDiagram is the headline of this change:
+// `r` on a diagram shows the definition it was drawn from. The art is the one
+// rendered form that carries none of its source's text, so this is the only way
+// to read or comment on the definition at all.
+func TestMdPreviewToggleRaw_ExpandsAMermaidDiagram(t *testing.T) {
+	m := mermaidRawModel(t)
 	m.setMdPreviewCursorToBlock(1)
 
 	m = pressKey(t, m, "r")
 
-	assert.Equal(t, mdPreviewExpandMermaidHint, m.preview.hint)
-	assert.Equal(t, -1, m.mdPreviewExpandedBlock())
+	assert.Empty(t, m.preview.hint, "a diagram must no longer be refused")
+	require.Equal(t, 1, m.mdPreviewExpandedBlock())
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 2}, mustMdPreviewRef(t, m),
+		"the cursor lands on the fence-opening line, which is where a comment on the diagram anchors")
+
+	body, sm := m.mdPreviewBody()
+	rows := strings.Split(ansi.Strip(body), "\n")
+	got := make([]int, 0, len(sm.lines))
+	for _, la := range sm.lines {
+		got = append(got, la.lineIdx)
+		require.Less(t, la.row, len(rows))
+		assert.Equal(t, m.file.lines[la.lineIdx].Content, rows[la.row],
+			"a raw row must be the source line and nothing else")
+	}
+	assert.Equal(t, []int{2, 3, 4, 5}, got,
+		"the whole fence, opening and closing markers included — one source line, one row")
+}
+
+// TestMdPreviewToggleRaw_ExpandingADiagramRemovesItsArt is the other half of the
+// same press, and the one the row arithmetic can get wrong on its own: the source
+// replaces the art rather than being painted beside it. A diagram that expanded
+// while its art stayed on screen would show the same diagram twice.
+func TestMdPreviewToggleRaw_ExpandingADiagramRemovesItsArt(t *testing.T) {
+	m := mermaidRawModel(t)
+	before, _ := m.mdPreviewBody()
+	require.Contains(t, ansi.Strip(before), "┌", "fixture sanity: the diagram must render as box art")
+	require.Contains(t, ansi.Strip(before), "Alpha", "fixture sanity: the art must carry the node label")
+
+	m.setMdPreviewCursorToBlock(1)
+	m.mdPreviewToggleRaw()
+
+	after := ansi.Strip(mdPreviewBodyOf(t, m))
+	assert.NotContains(t, after, "┌", "every art row must be gone while the block is expanded")
+	assert.Contains(t, after, "flowchart TD", "and the definition must be on screen in its place")
+	assert.Contains(t, after, "Title", "the rest of the document is untouched")
+	assert.Contains(t, after, "After the diagram.", "including everything below the diagram")
+}
+
+// TestMdPreviewToggleRaw_CollapsingADiagramRestoresTheArt covers both ways out —
+// a second `r` and `esc` — against the frame the reader started with. Byte
+// equality is the assertion worth making here: the expansion changes the row
+// count, so anything left over from it would move the whole document below.
+func TestMdPreviewToggleRaw_CollapsingADiagramRestoresTheArt(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		collapse func(m Model) Model
+	}{
+		{"second r", func(m Model) Model { m.mdPreviewToggleRaw(); return m }},
+		{"esc", func(m Model) Model {
+			model, _, handled := m.handleMdPreviewAction(keymap.ActionDismiss)
+			require.True(t, handled)
+			return model.(Model)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := mermaidRawModel(t)
+			m.setMdPreviewCursorToBlock(1)
+			before, _ := m.mdPreviewBody()
+			m.mdPreviewToggleRaw()
+			require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: expand first")
+
+			got := tt.collapse(m)
+
+			assert.Equal(t, -1, got.mdPreviewExpandedBlock())
+			assert.Equal(t, before, mdPreviewBodyOf(t, got), "the art must come back exactly as it was")
+		})
+	}
+}
+
+// TestMdPreviewStartAnnotation_OnADiagramDefinitionLine is what expanding a
+// diagram is FOR: commenting on one line of the definition ("this edge label is
+// wrong") rather than on the diagram as a whole. The fixture aims at the edge
+// line, so a comment landing on the block instead would visibly carry the fence
+// line's number.
+func TestMdPreviewStartAnnotation_OnADiagramDefinitionLine(t *testing.T) {
+	m := mermaidRawModel(t)
+	m.setMdPreviewCursorToBlock(1)
+	m.mdPreviewToggleRaw()
+	m.moveMdPreviewCursor(1)
+	m.moveMdPreviewCursor(1)
+	require.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 4}, mustMdPreviewRef(t, m),
+		"fixture sanity: the cursor must be on the edge line of the definition")
+
+	m.mdPreviewStartAnnotation()
+	require.True(t, m.annot.annotating, "`a` on a definition line must open a line-level input")
+	assert.Equal(t, 4, m.nav.diffCursor)
+	m.annot.input.SetValue("this edge label is wrong")
+	m.saveAnnotation()
+
+	anns := m.store.Get("plan.md")
+	require.Len(t, anns, 1)
+	assert.Equal(t, 5, anns[0].Line, "the comment carries the definition line's own 1-based number")
+	assert.Equal(t, "this edge label is wrong", anns[0].Comment)
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "annotating must not collapse the diagram under the reader")
+}
+
+// TestMdPreviewToggleRaw_ExpandsADiagramInsideAListItem: a diagram indented into
+// a list item is substituted by a placeholder written at column 0, so it ends up
+// its own top-level block rather than part of the item. Expanding it must still
+// paint the fence as it stands in the source, indentation included, and leave the
+// item's own lines to the item.
+func TestMdPreviewToggleRaw_ExpandsADiagramInsideAListItem(t *testing.T) {
+	doc := "- item text\n\n  ```mermaid\n  flowchart LR\n      a[Alpha] --> b[Beta]\n  ```\n\n  trailing line\n"
+	m := mdPreviewStyledModel(t, doc)
+	_, sm := m.mdPreviewBody()
+	require.True(t, sm.aligned, "fixture sanity: the document must align")
+	require.Len(t, sm.blocks(), 3, "fixture sanity: the item, the diagram, the trailing paragraph")
+	require.Equal(t, 2, sm.blocks()[1].startLine, "fixture sanity: block 1 is the diagram")
+
+	m.setMdPreviewCursorToBlock(1)
+	m.mdPreviewToggleRaw()
+
+	body, painted := m.mdPreviewBody()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock())
+	got := make([]int, 0, len(painted.lines))
+	for _, la := range painted.lines {
+		got = append(got, la.lineIdx)
+	}
+	assert.Equal(t, []int{2, 3, 4, 5}, got, "the fence's own lines and nothing of the item around it")
+	rows := strings.Split(ansi.Strip(body), "\n")
+	assert.Equal(t, "  ```mermaid", rows[painted.lines[0].row], "the source is painted as it stands, indentation included")
+	assert.Contains(t, ansi.Strip(body), "item text", "the item's own rendered row stays")
+	assert.Contains(t, ansi.Strip(body), "trailing line", "and so does the paragraph after the diagram")
+}
+
+// TestMdPreviewToggleRaw_TwoDiagramsExpandIndependently: with more than one
+// diagram in a document, each block's row tile has to be found on its own —
+// expanding the second must not disturb the first, and the art that comes back
+// on collapse must be the one that was there.
+func TestMdPreviewToggleRaw_TwoDiagramsExpandIndependently(t *testing.T) {
+	doc := "```mermaid\nflowchart TD\n    one[First] --> two[Second]\n```\n\nBetween.\n\n" +
+		"```mermaid\nflowchart LR\n    three[Third] --> four[Fourth]\n```\n"
+	m := mdPreviewStyledModel(t, doc)
+	before, sm := m.mdPreviewBody()
+	require.True(t, sm.aligned, "fixture sanity: the document must align")
+	require.Len(t, sm.blocks(), 3, "fixture sanity: diagram, paragraph, diagram")
+	require.Equal(t, []int{0, 5, 7}, []int{sm.blocks()[0].startLine, sm.blocks()[1].startLine, sm.blocks()[2].startLine},
+		"fixture sanity: both fences open where the test says they do")
+
+	m.setMdPreviewCursorToBlock(2)
+	m.mdPreviewToggleRaw()
+
+	body, painted := m.mdPreviewBody()
+	got := make([]int, 0, len(painted.lines))
+	for _, la := range painted.lines {
+		got = append(got, la.lineIdx)
+	}
+	assert.Equal(t, []int{7, 8, 9, 10}, got, "the second diagram's own fence, not the first one's")
+	stripped := ansi.Strip(body)
+	assert.Contains(t, stripped, "First", "the first diagram's art must be untouched")
+	assert.Contains(t, stripped, "flowchart LR", "the second diagram's definition is on screen")
+	assert.Less(t, strings.Count(stripped, "┌"), strings.Count(ansi.Strip(before), "┌"),
+		"and its art rows are gone — the node labels stay only because the definition names them")
+
+	m.mdPreviewToggleRaw()
+	assert.Equal(t, before, mdPreviewBodyOf(t, m), "collapsing restores both diagrams exactly")
+}
+
+// mdPreviewBodyOf is the painted body of m, for the tests that compare frames.
+func mdPreviewBodyOf(t *testing.T, m Model) string {
+	t.Helper()
+	body, _ := m.mdPreviewBody()
+	return body
 }
 
 // TestMdPreviewToggleRaw_RefusesABlockWithNothingToShow reaches the "Nothing to
@@ -962,6 +1143,65 @@ func TestMdPreviewMermaidFenceLine(t *testing.T) {
 			assert.Equal(t, tt.want, mdPreviewMermaidFenceLine(tt.content))
 		})
 	}
+}
+
+func TestMdPreviewMermaidFenceSpan(t *testing.T) {
+	tests := []struct {
+		name  string
+		doc   string
+		start int
+		want  int
+		ok    bool
+	}{
+		{"closing fence", "```mermaid\nflowchart TD\n```\nafter", 0, 2, true},
+		{"longer closing marker", "```mermaid\nflowchart TD\n`````", 0, 2, true},
+		{"tilde", "~~~mermaid\nflowchart TD\n~~~", 0, 2, true},
+		{"backticks do not close a tilde fence", "~~~mermaid\n```\n~~~", 0, 2, true},
+		{"shorter marker does not close", "````mermaid\n```\n````", 0, 2, true},
+		{"trailing text does not close", "```mermaid\n``` still art\n```", 0, 2, true},
+		{"not a diagram", "```go\nx := 1\n```", 0, 0, false},
+		{"unclosed", "```mermaid\nflowchart TD", 0, 0, false},
+		{"out of range", "```mermaid\n```", 7, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := mdPreviewMermaidFenceSpan(mdLines(tt.doc), tt.start)
+			assert.Equal(t, tt.ok, ok)
+			if tt.ok {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+// TestMdPreviewMermaidFenceSpan_SkipsDividers: a compact diff drops rows out of
+// the middle of a file and marks the gap with a divider. joinWithMermaidFences
+// skips those rows outright, so a divider inside a fence neither closes it nor
+// shifts what does.
+func TestMdPreviewMermaidFenceSpan_SkipsDividers(t *testing.T) {
+	lines := mdLines("```mermaid\nplaceholder\n```\nafter")
+	lines[1].ChangeType = diff.ChangeDivider
+	lines[1].Content = "⋯ 4 lines ⋯"
+
+	got, ok := mdPreviewMermaidFenceSpan(lines, 0)
+
+	require.True(t, ok)
+	assert.Equal(t, 2, got)
+}
+
+// TestMdPreviewOwnSpanEnd_OnlyWidensACollapsedDiagram: the single-line shape is
+// what a substituted diagram looks like. A paragraph that merely opens with fence
+// text spans more than one line, which means the fence was never substituted, so
+// there is nothing collapsed to recover.
+func TestMdPreviewOwnSpanEnd_OnlyWidensACollapsedDiagram(t *testing.T) {
+	lines := mdLines("```mermaid\nflowchart TD\n```\ntail")
+
+	assert.Equal(t, 2, mdPreviewOwnSpanEnd(mdPreviewBlockAnchor{startLine: 0, endLine: 0}, lines))
+	assert.Equal(t, 1, mdPreviewOwnSpanEnd(mdPreviewBlockAnchor{startLine: 0, endLine: 1}, lines),
+		"a multi-line paragraph is ordinary prose, whatever its first line looks like")
+	assert.Equal(t, 3, mdPreviewOwnSpanEnd(mdPreviewBlockAnchor{startLine: 3, endLine: 3}, lines))
+	assert.Equal(t, 9, mdPreviewOwnSpanEnd(mdPreviewBlockAnchor{startLine: 9, endLine: 9}, lines),
+		"an anchor pointing past the end of the file must not index out of range")
 }
 
 // TestMdPreviewEsc_CollapsesTheExpandedBlock: esc is the second way out of raw

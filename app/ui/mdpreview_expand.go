@@ -122,10 +122,14 @@ func mdPreviewRawText(content, tabSpaces string) string {
 // than replacing them (they are glamour's padding between blocks), so painting the
 // blank source lines too would show that padding twice.
 //
+// The block's OWN span is read through mdPreviewOwnSpanEnd rather than off the
+// anchor, which is where a mermaid diagram's fence lines are recovered — see
+// there for the whole of that case.
+//
 // Caller guarantees 0 <= block < len(anchors).
 func mdPreviewClipRawSpan(anchors []mdPreviewBlockAnchor, block int, lines []diff.DiffLine) mdPreviewBlockAnchor {
 	a := anchors[block]
-	end := a.endLine
+	end := mdPreviewOwnSpanEnd(a, lines)
 	for _, prev := range anchors[:block] {
 		end = max(end, prev.endLine) // an enclosing container continuing past this block
 	}
@@ -138,6 +142,88 @@ func mdPreviewClipRawSpan(anchors []mdPreviewBlockAnchor, block int, lines []dif
 	}
 	a.endLine = max(a.startLine, end)
 	return a
+}
+
+// mdPreviewOwnSpanEnd is the last source line of a block's own span, as the
+// expansion pass needs it: the anchor's endLine for every block except a mermaid
+// diagram, whose fence lines it recovers.
+//
+// A diagram reaches the pass as an mdBlockParagraph whose span is the SINGLE
+// ```mermaid line, because joinWithMermaidFences (mdpreview.go) replaces the whole
+// fence with one placeholder paragraph and attributes every line of the
+// replacement to the fence's opening line. Its rows, though, are the art rows the
+// splice put there — so the anchor's own span and the rows it owns describe
+// different amounts of document, and painting that span into those rows would
+// replace a twenty-row diagram with one row reading "```mermaid". Reading the
+// fence's true extent here is what keeps the pass's one-source-line-one-row
+// arithmetic exact: the fence's lines are exactly the lines the art was rendered
+// from.
+//
+// This widens the span AT EXPANSION TIME rather than widening the anchor where
+// mdPreviewBuildSourceMap builds it, and the reason is that endLine has exactly
+// one consumer — this pass. Widening the recorded anchor would mean threading the
+// source lines (or the fence spans) into the map builder to change a field nothing
+// else reads, and would leave the map claiming a span its own row range was never
+// derived from. Keeping it here leaves the anchor a faithful record of what the
+// render agreed on and keeps the fence knowledge inside the pass that needs it.
+// If a second reader of endLine ever appears, the widening belongs in the builder
+// instead, because by then the anchor itself would be under-reporting.
+//
+// The single-line shape is required, not just checked: it is what a collapsed
+// diagram looks like, and a multi-line paragraph that merely opens with fence text
+// is ordinary prose (the fence was never substituted, so nothing was collapsed).
+//
+// The span runs from the opening ```mermaid line to the closing ``` INCLUSIVE, so
+// both markers are painted as rows of their own. Deliberate, and the smaller
+// choice: they are source lines like every other one, and the pass's whole
+// arithmetic is "one source line, one rendered row" — hiding two of them would
+// make this the one span whose painted rows are not its lines, for the sake of two
+// rows. They are worth showing on their own terms too: the opening line is where a
+// comment on the diagram anchors (joinWithMermaidFences attributes the art to it),
+// and it carries the info string the reader may well be commenting on.
+func mdPreviewOwnSpanEnd(a mdPreviewBlockAnchor, lines []diff.DiffLine) int {
+	if a.startLine != a.endLine {
+		return a.endLine
+	}
+	if end, ok := mdPreviewMermaidFenceSpan(lines, a.startLine); ok {
+		return end
+	}
+	return a.endLine
+}
+
+// mdPreviewMermaidFenceSpan reports the index of the closing fence line of the
+// mermaid fence opening at start. ok is false when lines[start] is not a mermaid
+// fence opening, or when the fence is never closed.
+//
+// The closing rule is joinWithMermaidFences': the same fence character, a marker
+// at least as long as the opening one, and nothing but whitespace after it. Rows
+// of kind ChangeDivider are skipped exactly as that walk skips them, so a compact
+// diff's divider inside a fence neither closes it nor shifts what follows.
+//
+// An unclosed fence widens nothing. That fence was never substituted — the walk
+// flushes it verbatim — so it reaches goldmark as a code block, its anchor is an
+// mdBlockCodeBlock, and it is refused before any of this runs. Returning "no span"
+// keeps that case a plain single-line block rather than a diagram guess.
+func mdPreviewMermaidFenceSpan(lines []diff.DiffLine, start int) (end int, ok bool) {
+	if start < 0 || start >= len(lines) {
+		return 0, false
+	}
+	opening := strings.TrimSpace(lines[start].Content)
+	if !mdPreviewMermaidFenceLine(opening) {
+		return 0, false
+	}
+	ch, n := mdFencePrefix(opening)
+	for i := start + 1; i < len(lines); i++ {
+		if lines[i].ChangeType == diff.ChangeDivider {
+			continue
+		}
+		trimmed := strings.TrimSpace(lines[i].Content)
+		c, k := mdFencePrefix(trimmed)
+		if c == ch && k >= n && strings.TrimSpace(trimmed[k:]) == "" {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // mdPreviewBlankSourceLine reports whether a source line paints nothing the
@@ -157,7 +243,6 @@ func mdPreviewBlankSourceLine(line diff.DiffLine) bool {
 // instead, because a hint that only says "no" is barely better than the silent
 // refusal mdPreviewUnanchorableHint's doc comment argues against.
 const (
-	mdPreviewExpandMermaidHint = "Diagram source is one line — press a to annotate it"
 	mdPreviewExpandCodeHint    = "Code blocks already show their source"
 	mdPreviewExpandNothingHint = "Nothing to show"
 )
@@ -165,36 +250,30 @@ const (
 // mdPreviewExpandRefusal reports why raw expansion is refused for anchors[block],
 // as the status-bar hint to show, or "" when expansion may proceed.
 //
-// Three refusals, and each is a case where the raw source is already on screen
-// or does not exist:
+// Two refusals, and each is a case where the raw source is already on screen or
+// does not exist:
 //
 //   - a fenced code block (by kind) renders its own source already, so
 //     expanding it would redraw the same text with the fences added back.
-//   - a mermaid diagram arrives here as an mdBlockParagraph whose span is the
-//     single ```mermaid line: joinWithMermaidFences attributes every line of
-//     the replacement art to the fence's opening line. Detection is therefore
-//     by fence text on a single-line span, NOT by kind — the kind is
-//     "paragraph", the same as prose.
 //   - a block whose every source line is blank has no source to show.
 //
-// It takes the whole anchor list and an index rather than one anchor because the
-// two block-level refusals ask about DIFFERENT spans, and handing it a single
-// pre-clipped anchor is what would let them drift apart:
+// A MERMAID DIAGRAM IS NOT REFUSED, and the asymmetry with the code fence above
+// is the whole point rather than an inconsistency. A code fence renders as its
+// own lines, roughly one for one, so expanding it adds the fence markers and
+// nothing else. A diagram renders as box art that looks nothing like the source
+// it was drawn from: expanding is the only way to read or comment on the
+// definition — "this edge label is wrong", "this node should be a decision" —
+// which is exactly what this feature exists for. The earlier refusal said a
+// diagram's source is one line; that was a fact about the ANCHOR, not about the
+// document, and mdPreviewOwnSpanEnd recovers the fence's real extent instead.
 //
-//   - the mermaid test asks the block's OWN span, the one the source map
-//     recorded, because the single-line shape it looks for is the one thing
-//     mdPreviewClipRawSpan is free to grow away — it stretches a span over an
-//     enclosing container's continuation. A diagram asked of a stretched span
-//     would read as ordinary multi-line prose and be expanded, painting source
-//     over its own art rows. Asking the recorded span keeps the test independent
-//     of the cut instead of resting on the shapes goldmark happens to produce.
-//   - the blankness test asks the CLIPPED span, because that is what the pass
-//     will paint. Blankness is asked of mdPreviewRawLines rather than of the
-//     source text directly, so this function and the pass share ONE definition of
-//     blank. They differ: a line holding nothing but a control byte is non-blank
-//     as source text and blank once mdPreviewRawLines has dropped it, and two
-//     answers to "is this block worth expanding" is exactly the drift the refusal
-//     exists to prevent.
+// It takes the whole anchor list and an index rather than one anchor because the
+// blankness test asks the CLIPPED span — that is what the pass will paint.
+// Blankness is asked of mdPreviewRawLines rather than of the source text
+// directly, so this function and the pass share ONE definition of blank. They
+// differ: a line holding nothing but a control byte is non-blank as source text
+// and blank once mdPreviewRawLines has dropped it, and two answers to "is this
+// block worth expanding" is exactly the drift the refusal exists to prevent.
 //
 // The two other refusals in the feature — an unaligned map and a cursor sitting
 // on the file-level annotation — are not block properties and are decided by
@@ -202,13 +281,8 @@ const (
 //
 // Caller guarantees 0 <= block < len(anchors).
 func mdPreviewExpandRefusal(anchors []mdPreviewBlockAnchor, block int, lines []diff.DiffLine, tabSpaces string) string {
-	a := anchors[block]
-	if a.kind == mdBlockCodeBlock {
+	if anchors[block].kind == mdBlockCodeBlock {
 		return mdPreviewExpandCodeHint
-	}
-	if a.startLine == a.endLine && a.startLine >= 0 && a.startLine < len(lines) &&
-		mdPreviewMermaidFenceLine(lines[a.startLine].Content) {
-		return mdPreviewExpandMermaidHint
 	}
 	raw := mdPreviewRawLines(lines, mdPreviewClipRawSpan(anchors, block, lines), tabSpaces)
 	if _, ok := mdPreviewRawStopLine(raw, mdPreviewNoWantedLine); !ok {
@@ -552,7 +626,8 @@ func mdPreviewRawStopLine(raw []mdPreviewRawLine, want int) (lineIdx int, ok boo
 // mdPreviewMermaidFenceLine reports whether content is a fence opening whose
 // info string names mermaid. It reads the info string through mdFenceLang, the
 // same helper joinWithMermaidFences reads it through, so the two cannot disagree
-// about which fences are diagrams.
+// about which fences are diagrams — and disagreeing would now show a reader the
+// wrong lines rather than merely refuse them (see mdPreviewMermaidFenceSpan).
 func mdPreviewMermaidFenceLine(content string) bool {
 	trimmed := strings.TrimSpace(content)
 	_, n := mdFencePrefix(trimmed)
