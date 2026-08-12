@@ -140,8 +140,16 @@ feature, preview included, published to the user's own fork, never to upstream.
   (`mdPreviewSourceMap.stops`/`stopAt`, `mdPreviewStopIndex`, `mdPreviewNearestStop`), and `d`
   inside preview (`mdPreviewDeleteAnnotation`, `repaintMdPreviewAfterStopChange`).
 - `app/ui/mdpreview_stops_test.go` — its tests.
+- `app/ui/mdpreview_expand.go` — raw source expansion for the selected block: the pass that swaps
+  one block's rendered rows for its markdown source one row per source line
+  (`mdPreviewRawLines`, `mdPreviewExpandBlock`, `mdPreviewLineAnchor`), the refusal rules that
+  say when `r` will not expand (`mdPreviewExpandRefusal` — a code fence by block kind, a mermaid
+  diagram by its fence text, a block whose every source line is blank), and the `r` handler
+  itself (`mdPreviewToggleRaw`, `mdPreviewExpandTarget`, `mdPreviewRawStopLine`,
+  `mdPreviewCollapseRaw`). See "Raw source expansion" below.
+- `app/ui/mdpreview_expand_test.go` — its tests.
 
-A clean rebase never conflicts on these thirty files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these thirty-two files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -609,6 +617,74 @@ on that body string and so miss by themselves, which
 `TestMdPreviewDeleteAnnotation_RepaintDoesNotServeAStaleFrame` pins on a model
 whose memos were warmed with the annotation still present.
 
+**Raw source expansion (`r` shows the selected block's markdown source, added later — see
+`docs/plans/completed/20260811-preview-raw-block-expansion.md`):**
+
+Press `r` on the block the preview cursor marks and that block is redrawn as its raw markdown
+source, one rendered row per source line. `j`/`k` then step between those source lines and `a`
+annotates the exact line. Press `r` again, or `esc`, and the block goes back to its rendered form.
+
+Only one upstream-owned file gained hunks for this, and they are all four in `app/keymap/keymap.go`:
+
+- `app/keymap/keymap.go`
+  - line 56: `ActionToggleRaw Action = "toggle_raw"` added to the `Action` const enum
+  - line 96: `ActionToggleRaw: true` added to the `validActions` map
+  - line 239: help-section entry in `defaultDescriptions()` — `{ActionToggleRaw, "toggle raw
+    source for the selected preview block", "View"}`
+  - line 302: `"r": ActionToggleRaw` in `defaultBindings()`
+
+`app/ui/model.go` is deliberately untouched. `dispatchAction` already routes every action through
+`handleMdPreviewAction` while preview is on (that hunk landed with Task 5 above), so both the
+allowlist entry (`keymap.ActionToggleRaw: true` in `mdPreviewAllowedActions`) and the handler case
+live in fork-owned `app/ui/mdpreview.go`. An action that reaches `dispatchResolvedAction` outside
+preview mode and matches no case falls through to the pane handlers and does nothing, so `r` in
+source view is a silent no-op needing no new guard.
+
+The rest of the feature is fork-owned: the pass and the `r` handler in the new
+`app/ui/mdpreview_expand.go`; the second cursor level in `mdpreview_cursor.go` and
+`mdpreview_stops.go`; the per-line annotation splice in `mdpreview_annotate.go`; the wiring line in
+`mdpreview_cache.go`; and the `lines` field plus `spliceRow` in `mdpreview_srcmap.go`.
+
+**The cursor became two-level, and the cursor is what carries the expansion:**
+
+- **A raw source line is a stop of its own.** `mdPreviewStopRef` gained an `onLine bool` + `line
+  int` pair beside the existing `onAnnot bool` + `annot int`, and for the same reason that type's
+  doc comment already gives — a stop is addressed by identity, never by its index in the list.
+  `line` holds the diff-line index (`mdPreviewLineAnchor.lineIdx`), which is also the coordinate
+  `a` needs, so "annotate this raw line" reads straight off the ref with no translation. A blank
+  source line paints a row but gets no stop: `mdPreviewHighlight` skips blank rows inside a span,
+  and a stop nobody can see would break the invariant that you always see what `a` will act on.
+- **One block is expanded at a time, and it is always the block the cursor is in.** The state is a
+  single `expanded bool` on `mdPreviewCursorState`, meaning "`ref.block` is drawn as raw source".
+  Putting it there is what makes a file switch and an `R` reload collapse the block for free — that
+  struct already carries the `file.name` + `file.loadSeq` tag, and every existing placement helper
+  assigns a fresh struct literal, so `expanded` defaults back to false on every path that was not
+  written for this feature. The failure direction is "collapsed when I did not expect it", never
+  "a stale expanded block with a row map that does not match the screen". Two setters deliberately
+  opt out of that default: `setMdPreviewLineCursor` (the only production writer of `expanded =
+  true`) and `setMdPreviewCursorRefKeepingExpansion`, which preserves it only when the target ref
+  names the block that is already expanded.
+- **Expansion ends when** `r` or `esc` is pressed, the cursor moves to another block, the whole
+  expanded block scrolls off screen, the file changes, or `R` reloads. A scroll *within* a long
+  expanded block does not end it: `dropMdPreviewCursorIfHidden` re-seats the cursor onto the
+  nearest still-visible stop of that block instead of clearing it.
+- **`j` and `k` clamp inside the expanded block** rather than stepping out of it, via
+  `mdPreviewBlockStopRange`. A flat clamp over the whole stop list would only hold for the
+  document's first and last block; anywhere else a held-down `j` would silently throw away the
+  reader's expansion.
+- **The pass runs on the cached base render, so no memo key changed.**
+  `mdPreviewBody` is now three stages — cached base render, then `mdPreviewExpandBlock`, then the
+  annotation painter. Expansion is not an input to the glamour render, so pressing `r` costs no
+  glamour pass; the downstream `mdPreviewScrollCache` keys on the body string, which already
+  carries the expansion, so it misses exactly when it should. ⚠️ The no-expansion path must return
+  the *same* string value it was handed, not a rebuilt copy, or `mdPreviewScrollCache.forBody`'s
+  `body == c.body` compare degrades from a shared-pointer check to a full memcmp on every frame.
+- **Annotations splice under the raw line they belong to.** `mdPreviewSourceMap.spliceRow` replaced
+  "splice at the block's `endRow`" with "splice at the row the map names for this source line", and
+  the painter's anchor shifting became a prefix sum over the splice points. The deciding case is
+  the live input: without it, pressing `a` on raw line 4 of a thirty-line table puts the box you
+  are typing into below raw line 30.
+
 **Test-only, mechanical, not part of the feature itself:**
 
 - `app/keymap/keymap_test.go` — asserts `P` resolves to `ActionTogglePreview`
@@ -621,8 +697,8 @@ whose memos were warmed with the annotation still present.
 
 `app/ui/diffview.go` and `app/ui/model.go` are the most actively developed files upstream and
 the most likely to conflict — this was flagged going in (see the plan's "Patch discipline"
-section) and confirmed empirically: `model.go` alone carries 6 of the patch's 21 existing-file
-hunks (keymap 4, model 6, loaders 2, diffview 1, mouse 3, view 4, diffnav 1).
+section) and confirmed empirically: `model.go` alone carries 6 of the patch's 25 existing-file
+hunks (keymap 8, model 6, loaders 2, diffview 1, mouse 3, view 4, diffnav 1).
 
 ## Mermaid diagram type coverage
 
@@ -1371,3 +1447,23 @@ on every rebase that touches `jump_file`'s default: `app/keymap/keymap_test.go`
 `TestModel_JumpFileKeyFiltersInsideOpenPicker` explicitly rebinds `P` to `ActionJumpFile` to
 still exercise the printable-key-filters-not-closes behavior upstream's own default used to
 demonstrate), `app/ui/search_test.go` (`TestModel_SearchPrompt_SwallowsTogglePreviewKey`).
+
+### A future `r` collision with an upstream binding
+
+`r` was unbound upstream at the fork base — `defaultBindings()` had `R` for `ActionReload` and no
+lowercase `r` — which is why this patch could take it for `ActionToggleRaw` (raw source expansion,
+above). If a rebase brings an upstream action bound to `r`, the Go compiler catches it immediately
+as a duplicate map key in `defaultBindings()`, exactly as it did for `P` / `jump_file`, so the
+build fails rather than one binding silently winning.
+
+Resolution: keep `toggle_raw` on `r` and move the upstream action to another key, unless
+upstream's use is the more valuable one — in that case move `toggle_raw` instead. `r` is worth
+defending: it is only reachable inside markdown preview mode, but it is the one key the raw
+expansion feature has, and it pairs with `P` in muscle memory.
+
+Following files carry test/behavior assertions tied to this specific key and need re-checking on
+every rebase that touches an `r` binding: `app/keymap/keymap_test.go`
+(`TestActionToggleRaw_IsValid`, `TestActionToggleRaw_DefaultBinding`,
+`TestActionToggleRaw_HelpEntry`) and `app/ui/mdpreview_expand_test.go`
+(`TestMdPreviewToggleRaw_ThroughTheKeyPath` sends the `r` key rather than dispatching the action
+directly; the other `TestMdPreviewToggleRaw_*` tests call the handler and survive a rebinding).

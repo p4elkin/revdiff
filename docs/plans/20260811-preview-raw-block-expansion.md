@@ -709,22 +709,22 @@ once per burst.
   depend on it, and the downstream scroll memos key on the body string which already carries it; and
   the no-expansion path must return the same string value so the body compare stays O(1).
 
-- [ ] In PATCH.md "New files added by the patch", add `app/ui/mdpreview_expand.go` and its test,
+- [x] In PATCH.md "New files added by the patch", add `app/ui/mdpreview_expand.go` and its test,
   with a one-line description naming the pass, the refusal rules and `mdPreviewToggleRaw`. Update
   the "twenty-eight files" count.
-- [ ] In PATCH.md "Existing files edited, and where", add a new subsection for this feature listing
+- [x] In PATCH.md "Existing files edited, and where", add a new subsection for this feature listing
   the four `app/keymap/keymap.go` hunks, and state that `app/ui/model.go` is deliberately untouched
   and why.
-- [ ] In PATCH.md's rebase section, add a new subsection beside "The `P` key collision with
+- [x] In PATCH.md's rebase section, add a new subsection beside "The `P` key collision with
   upstream's `jump_file`": `r` was unbound at the fork base, an upstream `r` binding will fail the
   build as a duplicate map key, the resolution is to keep `toggle_raw` on `r` and move the upstream
   action (or the reverse), and note the test files carrying assertions tied to this key.
-- [ ] In PATCH.md's preview narrative, extend the block-cursor section with the two-level cursor,
+- [x] In PATCH.md's preview narrative, extend the block-cursor section with the two-level cursor,
   the one-expanded-at-a-time rule, and the "cursor carries expansion" state model.
-- [ ] In `.claude/rules/gotchas.md`'s markdown-preview cache paragraph, note that `mdPreviewBody` is
+- [x] In `.claude/rules/gotchas.md`'s markdown-preview cache paragraph, note that `mdPreviewBody` is
   now three stages, that expansion is deliberately not in the cache key, and that the no-expansion
   path must return the same string value so the body compare stays O(1).
-- [ ] review the diff against the section names above — this task has no automated test
+- [x] review the diff against the section names above — this task has no automated test
 
 **Files:**
 - Modify: `PATCH.md` — "New files added by the patch", "Existing files edited, and where", the
