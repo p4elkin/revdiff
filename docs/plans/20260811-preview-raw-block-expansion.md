@@ -472,18 +472,18 @@ Give the cursor a second level.
   the doc comment that currently says the order "falls out of the paint geometry" — for the expanded
   block it no longer does, and the merge is why.
 
-- [ ] Add `onLine bool` and `line int` to `mdPreviewStopRef` in `app/ui/mdpreview_stops.go`,
+- [x] Add `onLine bool` and `line int` to `mdPreviewStopRef` in `app/ui/mdpreview_stops.go`,
   following the existing `onAnnot`/`annot` pairing.
-- [ ] Add `expanded bool` to `mdPreviewCursorState` and `expandedBlockOf(file string, seq uint64) int`
+- [x] Add `expanded bool` to `mdPreviewCursorState` and `expandedBlockOf(file string, seq uint64) int`
   in `app/ui/mdpreview_cursor.go`, returning the expanded block or `-1`; document that `onLine`
   implies `expanded`.
-- [ ] Update `stopAt` in `app/ui/mdpreview_stops.go` to resolve a line ref against `sm.lines`.
-- [ ] Update `stops()` in `app/ui/mdpreview_stops.go` so the expanded block emits its line stops and
+- [x] Update `stopAt` in `app/ui/mdpreview_stops.go` to resolve a line ref against `sm.lines`.
+- [x] Update `stops()` in `app/ui/mdpreview_stops.go` so the expanded block emits its line stops and
   annotation stops merged by ascending row, in place of the block's own stop; update the doc comment
   that currently says the order "falls out of the paint geometry".
-- [ ] Write tests in `app/ui/mdpreview_stops_test.go` for the new stop ref, cursor state, and merged
+- [x] Write tests in `app/ui/mdpreview_stops_test.go` for the new stop ref, cursor state, and merged
   stop order.
-- [ ] run `go test ./app/ui/ -race -run 'TestMdPreviewStops|TestMdPreviewStopAt|TestMdPreviewCursorState'`
+- [x] run `go test ./app/ui/ -race -run 'TestMdPreviewStops|TestMdPreviewStopAt|TestMdPreviewCursorState'`
   — must pass before the next task
 
 **Files:**

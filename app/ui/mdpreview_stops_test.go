@@ -405,6 +405,191 @@ func TestMdPreviewStartAnnotation_OnABlockStopStillTargetsTheBlock(t *testing.T)
 	assert.Equal(t, 2, m.store.Count(), "so it adds a comment rather than replacing the one further down")
 }
 
+// expandedStopsFixture is a hand-built map standing in for a frame whose block 1
+// is drawn as its raw markdown source: three blocks, block 1 expanded into three
+// raw rows. Hand-built rather than rendered so the row numbers the merge is
+// judged on are stated by the test itself.
+func expandedStopsFixture() mdPreviewSourceMap {
+	return mdPreviewSourceMap{
+		aligned: true,
+		anchors: []mdPreviewBlockAnchor{
+			{kind: mdBlockH1, row: 0, endRow: 1, startLine: 0, endLine: 0},
+			{kind: mdBlockParagraph, row: 2, endRow: 5, startLine: 5, endLine: 7},
+			{kind: mdBlockParagraph, row: 6, endRow: 7, startLine: 9, endLine: 9},
+		},
+		lines: []mdPreviewLineAnchor{
+			{block: 1, row: 2, lineIdx: 5},
+			{block: 1, row: 3, lineIdx: 6},
+			{block: 1, row: 4, lineIdx: 7},
+		},
+	}
+}
+
+// TestMdPreviewStopAt_ResolvesARawLineRef pins the second level of the cursor:
+// a line ref names a source line, and it resolves against the line anchors the
+// expansion pass recorded rather than against anything scanned off the frame.
+func TestMdPreviewStopAt_ResolvesARawLineRef(t *testing.T) {
+	sm := expandedStopsFixture()
+
+	stop, ok := sm.stopAt(mdPreviewStopRef{block: 1, onLine: true, line: 6})
+	require.True(t, ok, "a raw line of the expanded block must be a resolvable stop")
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 6}, stop.ref)
+	assert.Equal(t, [2]int{3, 3}, [2]int{stop.row, stop.endRow}, "one source line is one rendered row")
+	assert.Equal(t, 0, stop.line, "the store key stays zero: a raw line is not an annotation")
+
+	_, ok = sm.stopAt(mdPreviewStopRef{block: 1, onLine: true, line: 8})
+	assert.False(t, ok, "a source line that painted no row is not a stop")
+
+	collapsed := mdPreviewSourceMap{aligned: true, anchors: sm.anchors}
+	_, ok = collapsed.stopAt(mdPreviewStopRef{block: 1, onLine: true, line: 6})
+	assert.False(t, ok, "collapsing the block takes the cursor off its line stops without an explicit clear")
+}
+
+// TestMdPreviewStops_ExpandedBlockEmitsItsLinesInPlaceOfItself is the headline
+// of the two-level cursor: while a block is expanded, j/k step between its
+// source lines, and the block's own stop is gone — there is nothing left for it
+// to mean when every line under it is selectable.
+func TestMdPreviewStops_ExpandedBlockEmitsItsLinesInPlaceOfItself(t *testing.T) {
+	got := expandedStopsFixture().stops()
+
+	assert.Equal(t, []mdPreviewStopRef{
+		{block: 0},
+		{block: 1, onLine: true, line: 5},
+		{block: 1, onLine: true, line: 6},
+		{block: 1, onLine: true, line: 7},
+		{block: 2},
+	}, stopRefs(got), "the expanded block's raw lines replace its own stop; every other block is untouched")
+}
+
+// TestMdPreviewStops_ExpandedBlockMergesLinesAndAnnotationsByRow is the ordering
+// rule the expanded block imposes rather than inherits. A comment sits under the
+// line it belongs to, so the two lists interleave, and only ascending row order
+// makes j/k walk the block the way it is painted.
+func TestMdPreviewStops_ExpandedBlockMergesLinesAndAnnotationsByRow(t *testing.T) {
+	sm := expandedStopsFixture()
+	// the annotation rows push the later raw rows down, exactly as the painter
+	// will once it splices per line.
+	sm.lines = []mdPreviewLineAnchor{
+		{block: 1, row: 2, lineIdx: 5},
+		{block: 1, row: 4, lineIdx: 6},
+		{block: 1, row: 5, lineIdx: 7},
+	}
+	sm.annots = []mdPreviewAnnotAnchor{
+		{block: 1, ord: 0, row: 3, endRow: 3, line: 6, changeType: " "},
+		{block: 1, ord: 1, row: 6, endRow: 6, line: 8, changeType: " "},
+	}
+
+	got := sm.stops()
+
+	assert.Equal(t, []mdPreviewStopRef{
+		{block: 0},
+		{block: 1, onLine: true, line: 5},
+		{block: 1, onAnnot: true, annot: 0},
+		{block: 1, onLine: true, line: 6},
+		{block: 1, onLine: true, line: 7},
+		{block: 1, onAnnot: true, annot: 1},
+		{block: 2},
+	}, stopRefs(got), "a comment must be reached right after the raw line it was painted under")
+	for i := 1; i < len(got); i++ {
+		assert.LessOrEqual(t, got[i-1].row, got[i].row, "the merged list must stay row-ascending for mdPreviewNearestStop")
+	}
+}
+
+// TestMdPreviewStops_UnexpandedBlocksKeepTodayOrder guards the half that must
+// not move: with nothing expanded, the list is exactly what it was — block, then
+// the annotations painted under it.
+func TestMdPreviewStops_UnexpandedBlocksKeepTodayOrder(t *testing.T) {
+	sm := expandedStopsFixture()
+	sm.lines = nil
+	sm.annots = []mdPreviewAnnotAnchor{
+		{block: mdPreviewFileStopBlock, row: 0, endRow: 0},
+		{block: 1, ord: 0, row: 4, endRow: 4, line: 6, changeType: " "},
+	}
+
+	assert.Equal(t, []mdPreviewStopRef{
+		{block: mdPreviewFileStopBlock, onAnnot: true},
+		{block: 0},
+		{block: 1},
+		{block: 1, onAnnot: true, annot: 0},
+		{block: 2},
+	}, stopRefs(sm.stops()))
+	assert.Equal(t, -1, sm.expandedBlock(), "no line anchors means no block is drawn as source")
+}
+
+// TestMdPreviewMergeStopsByRow_TieGivesTheLineTheEarlierPlace pins the tie-break
+// on its own, since the production rows never collide today: an annotation is
+// painted UNDER its line, so on an equal row the line is what the reader reaches
+// first.
+func TestMdPreviewMergeStopsByRow_TieGivesTheLineTheEarlierPlace(t *testing.T) {
+	line := mdPreviewStop{ref: mdPreviewStopRef{block: 1, onLine: true, line: 5}, row: 4, endRow: 4}
+	annot := mdPreviewStop{ref: mdPreviewStopRef{block: 1, onAnnot: true}, row: 4, endRow: 4}
+
+	got := mdPreviewMergeStopsByRow([]mdPreviewStop{line}, []mdPreviewStop{annot})
+	assert.Equal(t, []mdPreviewStop{line, annot}, got)
+
+	assert.Equal(t, []mdPreviewStop{line}, mdPreviewMergeStopsByRow([]mdPreviewStop{line}, nil))
+	assert.Equal(t, []mdPreviewStop{annot}, mdPreviewMergeStopsByRow(nil, []mdPreviewStop{annot}))
+}
+
+// TestMdPreviewCursorState_ExpandedBlockOf covers the state that carries
+// expansion. It answers -1 for every load the cursor does not belong to, which
+// is what makes a file switch and an `R` reload collapse the block with no code
+// on either path.
+func TestMdPreviewCursorState_ExpandedBlockOf(t *testing.T) {
+	c := mdPreviewCursorState{
+		set: true, ref: mdPreviewStopRef{block: 2, onLine: true, line: 9},
+		file: "plan.md", seq: 3, expanded: true,
+	}
+
+	assert.Equal(t, 2, c.expandedBlockOf("plan.md", 3))
+	assert.Equal(t, -1, c.expandedBlockOf("other.md", 3), "another file's cursor expands nothing here")
+	assert.Equal(t, -1, c.expandedBlockOf("plan.md", 4), "and neither does an earlier load's")
+
+	collapsed := c
+	collapsed.expanded = false
+	assert.Equal(t, -1, collapsed.expandedBlockOf("plan.md", 3), "a cursor on a block expands nothing")
+	assert.Equal(t, -1, mdPreviewCursorState{}.expandedBlockOf("plan.md", 3), "nor does no cursor at all")
+
+	fileLevel := c
+	fileLevel.ref = mdPreviewStopRef{block: mdPreviewFileStopBlock, onAnnot: true}
+	assert.Equal(t, -1, fileLevel.expandedBlockOf("plan.md", 3), "the file-level stop owns no block to expand")
+}
+
+// TestMdPreviewCursorState_PlacingTheCursorCollapses is the reason expansion
+// lives on the cursor at all: every existing path that places the cursor assigns
+// a fresh struct literal, so it collapses the block for free and no call site had
+// to learn about expansion.
+func TestMdPreviewCursorState_PlacingTheCursorCollapses(t *testing.T) {
+	m := stopsModel(t)
+	m.preview.cursor = mdPreviewCursorState{
+		set: true, ref: mdPreviewStopRef{block: 1, onLine: true, line: 2},
+		file: m.file.name, seq: m.file.loadSeq, expanded: true,
+	}
+	require.Equal(t, 1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq), "fixture sanity")
+
+	m.setMdPreviewBlockCursor(2)
+	assert.Equal(t, -1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq),
+		"moving the cursor onto a block must collapse whatever was expanded")
+
+	m.preview.cursor.expanded = true
+	m.setMdPreviewCursorRef(mdPreviewStopRef{block: 0})
+	assert.Equal(t, -1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq))
+
+	m.preview.cursor.expanded = true
+	m.clearMdPreviewBlockCursor()
+	assert.Equal(t, -1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq))
+}
+
+// stopRefs is the identity of each stop, which is what the ordering tests are
+// about — the rows are asserted separately where they matter.
+func stopRefs(stops []mdPreviewStop) []mdPreviewStopRef {
+	out := make([]mdPreviewStopRef, 0, len(stops))
+	for _, s := range stops {
+		out = append(out, s.ref)
+	}
+	return out
+}
+
 // TestMdPreviewStops_UnalignedDocumentHasNone pins the refusal the stop list
 // inherits from the source map: with nothing anchorable there is nothing to stop
 // on, which is what makes j/k fall back to a plain row scroll there.

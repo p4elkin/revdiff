@@ -25,21 +25,43 @@ const mdPreviewFileStopBlock = -1
 // bool rather than a -1 in annot for the same reason: a zero value that
 // accidentally means "the first annotation under block 0" would be a trap for
 // anyone constructing a ref in a test.
+//
+// onLine/line is the raw-source level of the cursor, and it is a bool-plus-int
+// pair for exactly the reason onAnnot/annot is: line 0 of the file is a real
+// line, so a zero value that accidentally means "the first source line of the
+// document" would be the same trap. onLine and onAnnot are mutually exclusive —
+// a stop is a block, one of its raw source lines, or one annotation.
+//
+// line is the index into the []diff.DiffLine the render came from (i.e.
+// mdPreviewLineAnchor.lineIdx), NOT a position among the block's raw rows. That
+// is this type's own identity rule applied one level down: the source line a
+// reader picked is still the same source line after an annotation is added under
+// it or a blank row stops producing an anchor, while its position in the list
+// would drift. It is also the coordinate `a` needs, so annotating a raw line
+// reads straight off the ref.
+//
+// A line ref is only ever resolvable while its block is expanded, which is the
+// invariant mdPreviewCursorState.expanded carries: onLine implies expanded.
 type mdPreviewStopRef struct {
 	block   int  // index into srcMap.blocks(), or mdPreviewFileStopBlock
 	onAnnot bool // false: the block itself; true: the annot'th annotation painted under it
 	annot   int  // position among the annotations painted under that block, in paint order
+	onLine  bool // true: one raw source line of the block, which must be expanded
+	line    int  // index into the []diff.DiffLine, i.e. mdPreviewLineAnchor.lineIdx
 }
 
 // mdPreviewStop is one thing the preview cursor can stop on: a rendered block,
-// or a single annotation painted under one. row/endRow are its inclusive row
-// span in the PAINTED frame — the coordinates mdPreviewPaintAnnotationsTracked
-// returns its map in, not the base render's.
+// one raw source line of an expanded block, or a single annotation painted under
+// either. row/endRow are its inclusive row span in the PAINTED frame — the
+// coordinates mdPreviewPaintAnnotationsTracked returns its map in, not the base
+// render's. A raw-line stop spans the single row it painted, because one source
+// line is one rendered row (see mdPreviewLineAnchor).
 //
 // line/changeType are the annotation.Store key (File is always the current
 // file), carried so `d` can delete exactly the annotation the reader is looking
 // at without re-deriving it from a scan of the painted string. They are zero for
-// a block stop.
+// a block stop and for a raw-line stop — neither is an annotation, and a raw
+// line's own source index is carried by ref.line instead.
 type mdPreviewStop struct {
 	ref        mdPreviewStopRef
 	row        int
@@ -79,16 +101,60 @@ func (a mdPreviewAnnotAnchor) stop() mdPreviewStop {
 	}
 }
 
+// stop returns the anchor as a cursor stop. The span is the single row the
+// anchor painted: one source line is one rendered row, which is what keeps the
+// raw row for a source line pure arithmetic off the block's start row.
+func (a mdPreviewLineAnchor) stop() mdPreviewStop {
+	return mdPreviewStop{
+		ref:    mdPreviewStopRef{block: a.block, onLine: true, line: a.lineIdx},
+		row:    a.row,
+		endRow: a.row,
+	}
+}
+
+// expandedBlock is the block currently drawn as its raw source, or -1 when none
+// is. It is read off sm.lines rather than passed in, because mdPreviewExpandBlock
+// only ever records line anchors for the one block it expanded — so the anchors
+// themselves already say which block that was, and no caller of stops() has to
+// carry the answer alongside the map it was handed.
+func (sm mdPreviewSourceMap) expandedBlock() int {
+	if len(sm.lines) == 0 {
+		return -1
+	}
+	return sm.lines[0].block
+}
+
+// lineStops is the expanded block's raw source lines as cursor stops, in paint
+// order (which is source order, since mdPreviewExpandBlock walks the span
+// forwards). Empty for any block that is not expanded.
+func (sm mdPreviewSourceMap) lineStops(block int) []mdPreviewStop {
+	out := make([]mdPreviewStop, 0, len(sm.lines))
+	for _, la := range sm.lines {
+		if la.block == block {
+			out = append(out, la.stop())
+		}
+	}
+	return out
+}
+
 // stops lists everything the preview cursor can stop on, in the order they are
 // painted down the frame: the file-level annotation first (it sits above the
 // document body), then each block followed by the annotations painted under it.
 //
 // That order is what makes `j` from a block land on that block's own first
-// annotation rather than skipping to the next block, and it falls out of the
-// paint geometry rather than being imposed here: block i's annotation rows
-// occupy exactly the gap between block i's endRow and block i+1's row (see
-// mdPreviewPaintAnnotationsTracked's shift accounting), so listing them in this
-// order is also listing them in ascending row order.
+// annotation rather than skipping to the next block. For an ordinary block it
+// falls out of the paint geometry rather than being imposed here: block i's
+// annotation rows occupy exactly the gap between block i's endRow and block
+// i+1's row (see mdPreviewPaintAnnotationsTracked's shift accounting), so
+// listing them in this order is also listing them in ascending row order.
+//
+// The EXPANDED block is the one place where it no longer falls out, and so the
+// one place the order is imposed. Its raw source lines and its annotations
+// interleave — a comment sits under the line it belongs to, not at the bottom of
+// the block — so the two lists are merged by ascending row (see
+// mdPreviewMergeStopsByRow). The block's own stop is dropped while it is
+// expanded: the reader is looking at source lines, and a stop covering all of
+// them at once would make `a` ambiguous about which line it meant.
 //
 // Returns nil for a map that anchors nothing — an unaligned document or one with
 // no blocks. There is nothing to steer between there, and the callers fall back
@@ -99,19 +165,30 @@ func (sm mdPreviewSourceMap) stops() []mdPreviewStop {
 		return nil
 	}
 
-	out := make([]mdPreviewStop, 0, len(anchors)+len(sm.annots))
+	expanded := sm.expandedBlock()
+	out := make([]mdPreviewStop, 0, len(anchors)+len(sm.lines)+len(sm.annots))
 	next := 0
-	take := func(block int) {
+	take := func(block int) []mdPreviewStop {
+		first := next
 		for next < len(sm.annots) && sm.annots[next].block == block {
-			out = append(out, sm.annots[next].stop())
 			next++
 		}
+		taken := make([]mdPreviewStop, 0, next-first)
+		for _, a := range sm.annots[first:next] {
+			taken = append(taken, a.stop())
+		}
+		return taken
 	}
 
-	take(mdPreviewFileStopBlock)
+	out = append(out, take(mdPreviewFileStopBlock)...)
 	for i := range anchors {
+		annots := take(i)
+		if i == expanded {
+			out = append(out, mdPreviewMergeStopsByRow(sm.lineStops(i), annots)...)
+			continue
+		}
 		out = append(out, mdPreviewStop{ref: mdPreviewStopRef{block: i}, row: anchors[i].row, endRow: anchors[i].endRow})
-		take(i)
+		out = append(out, annots...)
 	}
 	// defensive: annots is built grouped by ascending block, so the walk above
 	// consumes all of it. An anchor the walk somehow skipped is still made
@@ -123,14 +200,43 @@ func (sm mdPreviewSourceMap) stops() []mdPreviewStop {
 	return out
 }
 
+// mdPreviewMergeStopsByRow merges two row-ascending stop lists into one. A tie
+// gives the raw line the earlier place: an annotation is painted UNDER the line
+// it belongs to, so on the same row the line is what the reader reaches first.
+func mdPreviewMergeStopsByRow(lines, annots []mdPreviewStop) []mdPreviewStop {
+	out := make([]mdPreviewStop, 0, len(lines)+len(annots))
+	i, j := 0, 0
+	for i < len(lines) && j < len(annots) {
+		if lines[i].row <= annots[j].row {
+			out = append(out, lines[i])
+			i++
+			continue
+		}
+		out = append(out, annots[j])
+		j++
+	}
+	out = append(out, lines[i:]...)
+	return append(out, annots[j:]...)
+}
+
 // stopAt resolves one ref against the map without building the whole stop list,
 // which is what keeps the per-frame paths (the highlight, the
 // scrolled-out-of-view check) allocation-free on a large document. ok is false
-// when the ref names nothing in this map: a block index past the end, or an
-// annotation that has since been deleted.
+// when the ref names nothing in this map: a block index past the end, an
+// annotation that has since been deleted, or a raw source line of a block that
+// is no longer expanded — which is how a collapse takes the cursor off a line
+// stop without anyone having to clear it there.
 func (sm mdPreviewSourceMap) stopAt(ref mdPreviewStopRef) (mdPreviewStop, bool) {
 	anchors := sm.blocks()
 	if !sm.aligned || len(anchors) == 0 {
+		return mdPreviewStop{}, false
+	}
+	if ref.onLine {
+		for _, la := range sm.lines {
+			if la.block == ref.block && la.lineIdx == ref.line {
+				return la.stop(), true
+			}
+		}
 		return mdPreviewStop{}, false
 	}
 	if !ref.onAnnot {

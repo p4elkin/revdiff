@@ -26,11 +26,25 @@ package ui
 // step: set is false, so refOf answers "no cursor" whatever the other fields
 // hold. Note that the zero mdPreviewStopRef is a real stop (block 0's own), so
 // set is the only thing that carries "nothing selected" — see mdPreviewStopRef.
+//
+// expanded is where raw source expansion lives, and putting it HERE rather than
+// in a state struct of its own is what makes the feature cost no invalidation
+// code: the cursor is already tagged with the load, so a file switch and an `R`
+// reload both collapse the block for free, and every existing call site that
+// places the cursor assigns a fresh struct literal, so expanded defaults back to
+// false and every existing path collapses automatically. The failure direction
+// is "collapsed when I did not expect it", never "a stale expanded block with a
+// row map that does not match the screen".
+//
+// Invariant: ref.onLine implies expanded. A raw-line stop only exists while its
+// block is drawn as source, so a line ref with expanded false would name a stop
+// no map can resolve.
 type mdPreviewCursorState struct {
-	set  bool             // false in the zero value, which is what makes "nothing highlighted" the default
-	ref  mdPreviewStopRef // which stop; meaningless unless set
-	file string           // m.file.name the cursor was placed against
-	seq  uint64           // m.file.loadSeq it was placed under
+	set      bool             // false in the zero value, which is what makes "nothing highlighted" the default
+	ref      mdPreviewStopRef // which stop; meaningless unless set
+	file     string           // m.file.name the cursor was placed against
+	seq      uint64           // m.file.loadSeq it was placed under
+	expanded bool             // ref.block is drawn as its raw markdown source
 }
 
 // refOf returns the stop the cursor marks for the load identified by
@@ -56,6 +70,20 @@ func (c mdPreviewCursorState) blockOf(file string, seq uint64) int {
 		return -1
 	}
 	return ref.block
+}
+
+// expandedBlockOf is the block drawn as its raw markdown source for the load
+// identified by (file, seq), or -1 when none is: no cursor, a cursor from
+// another file or an earlier load, or a cursor that is simply not expanded.
+//
+// One block is expanded at a time and it is always the block the cursor is in,
+// so this is blockOf narrowed by the expanded flag rather than a second piece of
+// state that could disagree with it.
+func (c mdPreviewCursorState) expandedBlockOf(file string, seq uint64) int {
+	if !c.expanded {
+		return -1
+	}
+	return c.blockOf(file, seq)
 }
 
 // mdPreviewCursorRef is the one read of the preview cursor's identity. ok is
