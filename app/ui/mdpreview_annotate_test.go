@@ -838,3 +838,186 @@ func TestMdPreviewHighlight_PannedRowReachesPaneEdge(t *testing.T) {
 	assert.Equal(t, m.mdPreviewCutWidth(), ansi.StringWidth(row),
 		"a panned highlighted row must be padded out so the bar reaches the pane edge")
 }
+
+// mdPaintExpandedFixture is mdExpandFixture already run through the expansion
+// pass, i.e. exactly what the annotation painter sees in production once a block
+// is expanded: the middle paragraph drawn as its three source lines, and the map
+// in that render's own rows.
+//
+// The expanded render is:
+//
+//	row 0  "  Heading"
+//	row 1  ""
+//	row 2  "para one"     <- lineIdx 2, Line 3
+//	row 3  "para two"     <- lineIdx 3, Line 4
+//	row 4  "para three"   <- lineIdx 4, Line 5
+//	row 5  ""
+//	row 6  "  tail"
+//	row 7  ""
+func mdPaintExpandedFixture() (rendered string, lines []diff.DiffLine, sm mdPreviewSourceMap) {
+	base, lines, sm := mdExpandFixture()
+	rendered, sm = mdPreviewExpandBlock(base, sm, 1, lines, "    ")
+	return rendered, lines, sm
+}
+
+func TestMdPreviewSpliceRow_CollapsedDocumentSplicesAtTheBlockEndRow(t *testing.T) {
+	_, _, sm := mdExpandFixture()
+
+	tests := []struct {
+		name      string
+		idx       int
+		idxOK     bool
+		wantRow   int
+		wantBlock int
+	}{
+		{"a block's own start line", 0, true, 1, 0},
+		{"a line inside a block's span", 3, true, 4, 1},
+		{"a line no block starts on", 5, true, 4, 1},
+		{"a line the file no longer has", 0, false, 6, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row, block := sm.spliceRow(tt.idx, tt.idxOK)
+			assert.Equal(t, tt.wantRow, row)
+			assert.Equal(t, tt.wantBlock, block)
+		})
+	}
+}
+
+func TestMdPreviewSpliceRow_ExpandedBlockSplicesAtTheRawLineItself(t *testing.T) {
+	_, _, sm := mdPaintExpandedFixture()
+
+	for i, wantRow := range map[int]int{2: 2, 3: 3, 4: 4} {
+		row, block := sm.spliceRow(i, true)
+		assert.Equal(t, wantRow, row, "a comment on raw line %d belongs under that line, not at the block's end", i)
+		assert.Equal(t, 1, block, "the block is the line anchor's own, so the runs stay grouped by ascending row")
+	}
+
+	row, block := sm.spliceRow(6, true)
+	assert.Equal(t, 7, row, "a line outside the expanded block still splices at its own block's endRow")
+	assert.Equal(t, 2, block)
+}
+
+func TestMdPreviewPaintAnnotations_ExpandedBlockCommentPaintsUnderItsRawLine(t *testing.T) {
+	rendered, lines, sm := mdPaintExpandedFixture()
+	m := mdPreviewTestModel(lines)
+	const comment = "a note on the middle line"
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 4, Type: " ", Comment: comment}) // "para two"
+
+	painted, gotMap := m.mdPreviewPaintAnnotationsTracked(rendered, sm)
+
+	rows := strings.Split(ansi.Strip(painted), "\n")
+	require.Len(t, gotMap.annots, 1)
+	got := gotMap.annots[0]
+	require.Contains(t, rows[got.row], comment, "the recorded anchor must name the row the comment was painted on")
+	assert.Equal(t, "para two", rows[got.row-1], "the comment belongs under the line it was written against")
+	assert.Equal(t, "para three", rows[got.endRow+1], "the rest of the block continues below the comment")
+	assert.Equal(t, 1, got.block)
+}
+
+func TestMdPreviewPaintAnnotations_SpliceInsideABlockShiftsRowAndEndRowApart(t *testing.T) {
+	rendered, lines, sm := mdPaintExpandedFixture()
+	m := mdPreviewTestModel(lines)
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 4, Type: " ", Comment: "a note"}) // raw row 3
+
+	_, gotMap := m.mdPreviewPaintAnnotationsTracked(rendered, sm)
+
+	require.Len(t, gotMap.annots, 1)
+	n := gotMap.annots[0].endRow - gotMap.annots[0].row + 1 // rows the comment took
+	assert.Equal(t, [2]int{0, 1}, [2]int{gotMap.anchors[0].row, gotMap.anchors[0].endRow},
+		"a block above the splice never moves")
+	assert.Equal(t, [2]int{2, 5 + n}, [2]int{gotMap.anchors[1].row, gotMap.anchors[1].endRow},
+		"the splice sits inside this block's span, so its row and endRow move by different amounts")
+	assert.Equal(t, [2]int{6 + n, 7 + n}, [2]int{gotMap.anchors[2].row, gotMap.anchors[2].endRow})
+	assert.Equal(t, 2, sm.anchors[1].row, "the caller's map is never edited in place")
+}
+
+func TestMdPreviewPaintAnnotations_CarriesLineAnchorsShifted(t *testing.T) {
+	rendered, lines, sm := mdPaintExpandedFixture()
+	m := mdPreviewTestModel(lines)
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 4, Type: " ", Comment: "a note"}) // raw row 3
+
+	painted, gotMap := m.mdPreviewPaintAnnotationsTracked(rendered, sm)
+
+	require.Len(t, gotMap.lines, 3, "dropping the line anchors would take every raw-line stop away the moment a comment exists")
+	require.Len(t, gotMap.annots, 1)
+	n := gotMap.annots[0].endRow - gotMap.annots[0].row + 1
+	assert.Equal(t, []int{2, 3, 4 + n}, []int{gotMap.lines[0].row, gotMap.lines[1].row, gotMap.lines[2].row},
+		"only the raw lines BELOW the splice move")
+	assert.Equal(t, []int{2, 3, 4}, []int{gotMap.lines[0].lineIdx, gotMap.lines[1].lineIdx, gotMap.lines[2].lineIdx})
+
+	rows := strings.Split(ansi.Strip(painted), "\n")
+	for _, la := range gotMap.lines {
+		assert.Equal(t, lines[la.lineIdx].Content, rows[la.row],
+			"a shifted line anchor must still name the row its own source text is on")
+	}
+}
+
+func TestMdPreviewPaintAnnotations_ExpandedBlockOrdCountsAcrossSplicePoints(t *testing.T) {
+	rendered, lines, sm := mdPaintExpandedFixture()
+	m := mdPreviewTestModel(lines)
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 3, Type: " ", Comment: "first comment"}) // raw row 2
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 5, Type: " ", Comment: "second comment"})
+
+	painted, gotMap := m.mdPreviewPaintAnnotationsTracked(rendered, sm)
+
+	require.Len(t, gotMap.annots, 2)
+	assert.Equal(t, []int{0, 1}, []int{gotMap.annots[0].ord, gotMap.annots[1].ord},
+		"ord is the position among the BLOCK's annotations, so it must keep counting across splice points")
+	assert.Equal(t, []int{1, 1}, []int{gotMap.annots[0].block, gotMap.annots[1].block})
+	assert.Less(t, gotMap.annots[0].row, gotMap.annots[1].row, "annots must stay row-ascending for stops()")
+
+	rows := strings.Split(ansi.Strip(painted), "\n")
+	assert.Equal(t, "para one", rows[gotMap.annots[0].row-1])
+	assert.Equal(t, "para three", rows[gotMap.annots[1].row-1])
+}
+
+func TestMdPreviewPaintAnnotations_ExpandedStopsInterleaveLinesAndComments(t *testing.T) {
+	rendered, lines, sm := mdPaintExpandedFixture()
+	m := mdPreviewTestModel(lines)
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 3, Type: " ", Comment: "first comment"}) // raw row 2
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 5, Type: " ", Comment: "second comment"})
+
+	_, gotMap := m.mdPreviewPaintAnnotationsTracked(rendered, sm)
+
+	refs := make([]mdPreviewStopRef, 0, 6)
+	rows := make([]int, 0, 6)
+	for _, s := range gotMap.stops() {
+		refs = append(refs, s.ref)
+		rows = append(rows, s.row)
+	}
+	assert.Equal(t, []mdPreviewStopRef{
+		{block: 0},
+		{block: 1, onLine: true, line: 2},
+		{block: 1, onAnnot: true, annot: 0},
+		{block: 1, onLine: true, line: 3},
+		{block: 1, onLine: true, line: 4},
+		{block: 1, onAnnot: true, annot: 1},
+		{block: 2},
+	}, refs, "a comment sits between the raw line it belongs to and the next one")
+	assert.IsIncreasing(t, rows, "the merged stop list must stay row-ascending")
+}
+
+func TestMdPreviewPaintAnnotations_LiveInputPaintsUnderTheExpandedRawLine(t *testing.T) {
+	rendered, lines, sm := mdPaintExpandedFixture()
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	m.mdPreviewStartAnnotationAt(3) // "para two", nothing in the store for it yet
+	require.True(t, m.annot.annotating)
+	m.annot.input.SetValue("typing now")
+
+	painted, _ := m.mdPreviewPaintAnnotationsTracked(rendered, sm)
+
+	rows := strings.Split(ansi.Strip(painted), "\n")
+	at := -1
+	for i, r := range rows {
+		if strings.Contains(r, "typing now") {
+			at = i
+			break
+		}
+	}
+	require.Positive(t, at, "the input being typed must be visible before it is saved")
+	assert.Equal(t, "para two", rows[at-1],
+		"watching the text you type detach from the line you aimed at is what per-line splicing exists to prevent")
+}

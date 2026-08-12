@@ -100,6 +100,41 @@ func (sm mdPreviewSourceMap) resolveBlock(idx int, idxOK bool) int {
 	return 0
 }
 
+// spliceRow answers the two questions the annotation painter actually has:
+// under WHICH RENDERED ROW must this annotation's rows be spliced, and which
+// block do they belong to. idx/idxOK are the annotation's line already resolved
+// through mdPreviewLineIndex, exactly as resolveBlock takes them. Caller
+// guarantees len(sm.blocks()) > 0.
+//
+// Without expansion the two questions have one answer, which is why the painter
+// used to ask only for the block: every annotation of block i is spliced at
+// anchors[i].endRow. Inside an EXPANDED block that is wrong by the height of the
+// block — a comment on raw line 4 of a thirty-line table would paint below raw
+// line 30, and so would the input the reader is watching themselves type. So a
+// splice point is a ROW here, not a block.
+//
+// row is the raw line's own anchor row when idx is a line of the expanded block,
+// and the owning block's endRow otherwise. block follows the same split: the
+// LINE ANCHOR's own block for a raw line, rather than resolveBlock's answer,
+// which for nested constructs (a code fence inside an expanded blockquote) can
+// name an inner block whose rows sit elsewhere and would break the ascending-row
+// grouping stops() walks. Everything else is resolveBlock's answer with all
+// three of its outcomes unchanged, orphans and pre-first-block lines included.
+func (sm mdPreviewSourceMap) spliceRow(idx int, idxOK bool) (row, block int) {
+	if idxOK {
+		for _, la := range sm.lines {
+			if la.lineIdx == idx {
+				return la.row, la.block
+			}
+		}
+	}
+	block = sm.resolveBlock(idx, idxOK)
+	if block < 0 || block >= len(sm.anchors) {
+		return 0, block // defensive: resolveBlock cannot land out of range for a non-empty map
+	}
+	return sm.anchors[block].endRow, block
+}
+
 // anchorAtRow answers "which block did this rendered row come from?" — the one
 // question the whole feature reduces to, once a caller has the block it can
 // read the source line off it. It returns the index of the block owning row

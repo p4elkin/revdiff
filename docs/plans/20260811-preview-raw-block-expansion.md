@@ -531,17 +531,17 @@ Generalise the splice point, per the decision in question 3.
 - The live-input branch uses `spliceRow(liveIdx, true)` instead of `max(anchorAtLine(liveIdx), 0)`,
   which also unifies the two fallbacks that exist there today.
 
-- [ ] Add `spliceRow(idx int, idxOK bool) (row, block int)` to `mdPreviewSourceMap` in
+- [x] Add `spliceRow(idx int, idxOK bool) (row, block int)` to `mdPreviewSourceMap` in
   `app/ui/mdpreview_srcmap.go`, beside `resolveBlock`.
-- [ ] Change `mdPreviewCollectAnnotationRows` in `app/ui/mdpreview_annotate.go` to return runs keyed
+- [x] Change `mdPreviewCollectAnnotationRows` in `app/ui/mdpreview_annotate.go` to return runs keyed
   by splice row, with `mdPreviewAnnotRun` carrying its rows and its owning block.
-- [ ] Change `mdPreviewPaintAnnotationsTracked` to shift anchors by the prefix sum
+- [x] Change `mdPreviewPaintAnnotationsTracked` to shift anchors by the prefix sum
   `shift(r) = len(topRows) + Σ inserted[s] for s < r`, applied to `row` and `endRow` separately, and
   to `sm.lines` rows too.
-- [ ] Change the live-input branch to use `spliceRow(liveIdx, true)` instead of
+- [x] Change the live-input branch to use `spliceRow(liveIdx, true)` instead of
   `max(anchorAtLine(liveIdx), 0)`, unifying the two fallbacks.
-- [ ] Write tests in `app/ui/mdpreview_annotate_test.go` for `spliceRow` and the shifted painter.
-- [ ] run `go test ./app/ui/ -race -run 'TestMdPreviewPaintAnnotations|TestMdPreviewSpliceRow'` —
+- [x] Write tests in `app/ui/mdpreview_annotate_test.go` for `spliceRow` and the shifted painter.
+- [x] run `go test ./app/ui/ -race -run 'TestMdPreviewPaintAnnotations|TestMdPreviewSpliceRow'` —
   must pass before the next task
 
 **Files:**

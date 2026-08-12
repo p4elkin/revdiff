@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -39,10 +40,12 @@ import (
 // use the map this returns, not the one it was handed.
 //
 // The accounting is exact rather than estimated: file-level rows are prepended
-// ahead of every block, and block i's own annotation rows are inserted at its
-// endRow, which is always before block i+1's row. So block i moves by the
-// file-level row count plus every earlier block's annotation row count, and by
-// nothing else.
+// ahead of every block, and every other run of rows is inserted at a splice row
+// the map named (mdPreviewSourceMap.spliceRow). So a row moves by the file-level
+// row count plus everything inserted strictly above it — the prefix sum
+// mdPreviewRowShift computes, and the reason a block's row and its endRow are
+// shifted separately: with an expanded block a splice point can sit INSIDE a
+// block's span, so the two no longer move by the same amount.
 //
 // The map it returns also carries where each painted annotation landed
 // (mdPreviewAnnotAnchor, mdpreview_stops.go), which is what lets the cursor stop
@@ -75,23 +78,12 @@ func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPrevie
 	}
 
 	annotationMap, fileComment := m.buildAnnotationMap()
-	blockRows, blockRuns := m.mdPreviewCollectAnnotationRows(all, srcMap, annotationMap)
+	groups := m.mdPreviewCollectAnnotationRows(all, srcMap, annotationMap)
 
 	var top strings.Builder
 	m.renderFileAnnotationHeader(&top, fileComment)
 	topRows := mdPreviewRowsFromBuilder(&top)
-
-	// shifted anchors are a copy, never an in-place edit: srcMap's backing array
-	// belongs to the render cache (mdpreview_cache.go) and is handed to every
-	// later repaint.
-	shifted := make([]mdPreviewBlockAnchor, len(anchors))
-	delta := len(topRows)
-	for i := range anchors {
-		shifted[i] = anchors[i]
-		shifted[i].row += delta
-		shifted[i].endRow += delta
-		delta += len(blockRows[i])
-	}
+	shift := newMdPreviewRowShift(len(topRows), groups)
 
 	rows := strings.Split(rendered, "\n")
 	out := topRows
@@ -103,39 +95,136 @@ func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPrevie
 	if len(topRows) > 0 && m.hasFileAnnotation() && !liveFileAnnotating {
 		annots = append(annots, mdPreviewAnnotAnchor{block: mdPreviewFileStopBlock, row: 0, endRow: len(topRows) - 1})
 	}
-	bi := 0
+	// ords counts each block's annotations as they are painted. It is per block
+	// rather than per splice point because a block's annotations can now be
+	// spliced at several rows, and mdPreviewAnnotAnchor.ord is the position among
+	// the BLOCK's annotations — the identity mdPreviewStopRef holds on to.
+	ords := make(map[int]int, len(anchors))
+	si := 0
 	for i, line := range rows {
 		out = append(out, line)
-		for bi < len(anchors) && anchors[bi].endRow == i {
-			annots = appendMdPreviewAnnotAnchors(annots, blockRuns[bi], bi, len(out))
-			out = append(out, blockRows[bi]...)
-			bi++
+		for si < len(shift.rows) && shift.rows[si] <= i {
+			g := groups[shift.rows[si]]
+			annots = appendMdPreviewAnnotAnchors(annots, g.runs, len(out), ords)
+			out = append(out, g.rows...)
+			si++
 		}
 	}
-	// defensive: a block whose endRow never matched a row index (should not
-	// happen — endRow is derived from this same rendered string) still gets
-	// its annotations painted rather than silently dropped.
-	for ; bi < len(anchors); bi++ {
-		annots = appendMdPreviewAnnotAnchors(annots, blockRuns[bi], bi, len(out))
-		out = append(out, blockRows[bi]...)
+	// defensive: a splice row past the last row of this render (should not happen
+	// — every splice row is a row of this same string) still gets its annotations
+	// painted rather than silently dropped.
+	for ; si < len(shift.rows); si++ {
+		g := groups[shift.rows[si]]
+		annots = appendMdPreviewAnnotAnchors(annots, g.runs, len(out), ords)
+		out = append(out, g.rows...)
 	}
-	return strings.Join(out, "\n"), mdPreviewSourceMap{aligned: true, anchors: shifted, annots: annots}
+	return strings.Join(out, "\n"), mdPreviewSourceMap{
+		aligned: true, anchors: shift.blockAnchors(anchors), lines: shift.lineAnchors(srcMap.lines), annots: annots,
+	}
+}
+
+// mdPreviewSpliceGroup is everything painted at one splice row: the rendered
+// rows themselves, and the same rows described as one run per annotation so the
+// splice can turn them into row spans (see appendMdPreviewAnnotAnchors). One
+// struct rather than two parallel maps, because the two must stay in step — a
+// run whose rows went missing would anchor a stop on a row nobody painted.
+type mdPreviewSpliceGroup struct {
+	rows []string
+	runs []mdPreviewAnnotRun
+}
+
+// mdPreviewAddSplice records one painted annotation at splice row row. The map
+// holds group VALUES, so the read-modify-write is what lets a run be appended to
+// a group that does not exist yet.
+func mdPreviewAddSplice(groups map[int]mdPreviewSpliceGroup, row int, rows []string, run mdPreviewAnnotRun) {
+	g := groups[row]
+	g.rows = append(g.rows, rows...)
+	g.runs = append(g.runs, run)
+	groups[row] = g
+}
+
+// mdPreviewRowShift translates a row of the render the painter was handed into
+// its row in the painted frame: shift(r) = len(topRows) + Σ inserted[s] for
+// every splice row s < r.
+//
+// The comparison is strict because a group is spliced AFTER the row it is keyed
+// on, so that row itself never moves. The prefix sum is what a per-line splice
+// point forces: with every run inserted at its block's endRow, a block's row and
+// endRow moved by the same delta and one running total was enough. Once a splice
+// can sit INSIDE a block's span — a comment under raw line 4 of an expanded
+// block — the block's own row is above it and its endRow below, so each has to
+// be shifted on its own.
+type mdPreviewRowShift struct {
+	top   int
+	rows  []int // splice rows, ascending
+	cumul []int // cumul[i] = rows painted at every splice row before rows[i]; one entry longer than rows
+}
+
+// newMdPreviewRowShift builds the prefix sum over groups' splice rows.
+func newMdPreviewRowShift(top int, groups map[int]mdPreviewSpliceGroup) mdPreviewRowShift {
+	rows := make([]int, 0, len(groups))
+	for r := range groups {
+		rows = append(rows, r)
+	}
+	sort.Ints(rows)
+	cumul := make([]int, len(rows)+1)
+	for i, r := range rows {
+		cumul[i+1] = cumul[i] + len(groups[r].rows)
+	}
+	return mdPreviewRowShift{top: top, rows: rows, cumul: cumul}
+}
+
+// at returns row's index in the painted frame.
+func (s mdPreviewRowShift) at(row int) int {
+	return row + s.top + s.cumul[sort.SearchInts(s.rows, row)]
+}
+
+// blockAnchors re-expresses every block anchor in the painted frame's rows. The
+// result is a copy, never an in-place edit: the caller's backing array belongs to
+// the render cache (mdpreview_cache.go) and is handed to every later repaint.
+func (s mdPreviewRowShift) blockAnchors(anchors []mdPreviewBlockAnchor) []mdPreviewBlockAnchor {
+	out := make([]mdPreviewBlockAnchor, len(anchors))
+	for i, a := range anchors {
+		out[i] = a
+		out[i].row = s.at(a.row)
+		out[i].endRow = s.at(a.endRow)
+	}
+	return out
+}
+
+// lineAnchors re-expresses an expanded block's raw-line anchors in the painted
+// frame's rows, so a line stop still names the row its text is on after comments
+// have been spliced between the raw lines. nil in, nil out — the overwhelmingly
+// common case is no block expanded at all.
+func (s mdPreviewRowShift) lineAnchors(lines []mdPreviewLineAnchor) []mdPreviewLineAnchor {
+	if len(lines) == 0 {
+		return nil
+	}
+	out := make([]mdPreviewLineAnchor, len(lines))
+	for i, la := range lines {
+		out[i] = la
+		out[i].row = s.at(la.row)
+	}
+	return out
 }
 
 // mdPreviewCollectAnnotationRows renders this file's line-level annotations and
-// buckets them under the block each one belongs to: blockRows[i] is the rows to
-// splice under block i, blockRuns[i] the same rows described as one run per
-// annotation so the splice can turn them into row spans (see
-// appendMdPreviewAnnotAnchors). Both slices are indexed by block and are always
-// len(srcMap.blocks()) long.
+// buckets them by the RENDERED ROW each one is spliced under, keyed by that row:
+// a group's rows are the rows to insert there, its runs the same rows described
+// one per annotation so the splice can turn them into row spans (see
+// appendMdPreviewAnnotAnchors).
+//
+// Keyed by row rather than by block because of expansion: inside an expanded
+// block a comment belongs under the raw source line it was written against, not
+// at the bottom of the block. mdPreviewSourceMap.spliceRow is what decides which,
+// and it answers with the owning block too, so a run carries the block it belongs
+// to instead of the caller deriving it from a slice position.
 //
 // Split out of mdPreviewPaintAnnotationsTracked so that function stays under the
 // cyclomatic ceiling; the two halves are "what to paint" and "where it lands".
 func (m Model) mdPreviewCollectAnnotationRows(all []annotation.Annotation, srcMap mdPreviewSourceMap,
-	annotationMap map[annotLineKey]string) (blockRows [][]string, blockRuns [][]mdPreviewAnnotRun) {
-	anchors := srcMap.blocks()
-	blockRows = make([][]string, len(anchors))
-	blockRuns = make([][]mdPreviewAnnotRun, len(anchors))
+	annotationMap map[annotLineKey]string) map[int]mdPreviewSpliceGroup {
+	groups := make(map[int]mdPreviewSpliceGroup, len(all))
 
 	liveIdx, liveOK := m.mdPreviewLiveInputTarget()
 	liveCovered := false
@@ -147,11 +236,10 @@ func (m Model) mdPreviewCollectAnnotationRows(all []annotation.Annotation, srcMa
 		// of m.file.lines, and it used to run three times per annotation per
 		// repaint (inside resolve, inside render, and for the liveIdx compare).
 		idx, idxOK := m.mdPreviewLineIndex(a.Line, a.Type)
-		bi := srcMap.resolveBlock(idx, idxOK)
+		row, bi := srcMap.spliceRow(idx, idxOK)
 		painted := m.mdPreviewRenderOne(a, annotationMap, idx, idxOK)
-		blockRows[bi] = append(blockRows[bi], painted...)
-		blockRuns[bi] = append(blockRuns[bi],
-			mdPreviewAnnotRun{rows: len(painted), line: a.Line, changeType: a.Type, stored: true})
+		mdPreviewAddSplice(groups, row, painted,
+			mdPreviewAnnotRun{rows: len(painted), block: bi, line: a.Line, changeType: a.Type, stored: true})
 		if liveOK && idxOK && idx == liveIdx {
 			// mdPreviewRenderOne already routed through renderAnnotationOrInput for
 			// this exact idx, which draws the live input in place of the stored
@@ -164,53 +252,59 @@ func (m Model) mdPreviewCollectAnnotationRows(all []annotation.Annotation, srcMa
 	// a brand-new annotation (nothing in the store yet for this line) has no
 	// entry in `all` for the loop above to iterate, so renderAnnotationOrInput
 	// was never called for it — without this, the input a reader is actively
-	// typing would stay invisible until the moment it is saved. anchorAtLine
-	// resolves the same containing-block case resolveBlock's own success path
-	// does; the idx==0 fallback only matters for a defensive out-of-range
-	// diffCursor, since every caller of mdPreviewStartAnnotation and
-	// mdPreviewClickDiff targets an exact block's startLine.
+	// typing would stay invisible until the moment it is saved. It goes through
+	// the same spliceRow the stored ones do, which is both what puts the live box
+	// under the raw line being typed against and what replaces the two separate
+	// fallbacks this branch used to carry (anchorAtLine, then max(..., 0)) with
+	// resolveBlock's own three.
 	if liveOK && !liveCovered {
-		bi := max(srcMap.anchorAtLine(liveIdx), 0)
+		row, bi := srcMap.spliceRow(liveIdx, true)
 		var b strings.Builder
 		m.renderAnnotationOrInput(&b, liveIdx, annotationMap)
 		rows := mdPreviewRowsFromBuilder(&b)
-		blockRows[bi] = append(blockRows[bi], rows...)
 		// stored=false: the store holds nothing for this line yet, so the row is
 		// a live input rather than a deletable annotation. It still counts toward
 		// the row offsets of the annotations painted after it, which is why it is
 		// recorded at all instead of being left out of the run list.
-		blockRuns[bi] = append(blockRuns[bi], mdPreviewAnnotRun{rows: len(rows)})
+		mdPreviewAddSplice(groups, row, rows, mdPreviewAnnotRun{rows: len(rows), block: bi})
 	}
-	return blockRows, blockRuns
+	return groups
 }
 
-// mdPreviewAnnotRun is one painted annotation's row count plus the store key
-// that identifies it, collected while the rows are rendered and turned into
-// row spans once the splice point is known. stored is false for a live input
-// row — it takes up rows like any other, so it must be counted, but there is
-// nothing in the store behind it to select or delete.
+// mdPreviewAnnotRun is one painted annotation's row count plus the block it
+// belongs to and the store key that identifies it, collected while the rows are
+// rendered and turned into row spans once the splice point is known. stored is
+// false for a live input row — it takes up rows like any other, so it must be
+// counted, but there is nothing in the store behind it to select or delete.
 type mdPreviewAnnotRun struct {
 	rows       int
+	block      int
 	line       int
 	changeType string
 	stored     bool
 }
 
-// appendMdPreviewAnnotAnchors turns one block's runs into row spans, given the
-// painted row the block's annotation rows start at. Runs are laid out back to
-// back in the order they were rendered, which is ascending store order, so the
-// spans follow from the row counts alone. A run of zero rows contributes no
-// anchor — there is nothing on screen to put a cursor on.
+// appendMdPreviewAnnotAnchors turns one splice point's runs into row spans, given
+// the painted row those rows start at. Runs are laid out back to back in the
+// order they were rendered, so the spans follow from the row counts alone. A run
+// of zero rows contributes no anchor — there is nothing on screen to put a cursor
+// on.
+//
+// ords carries each block's running annotation count ACROSS splice points, and
+// the caller shares one map over the whole walk: a block's annotations can now
+// land at several rows, while mdPreviewAnnotAnchor.ord stays "position among this
+// block's annotations, in paint order" — the identity mdPreviewStopRef holds. The
+// walk visits splice rows in ascending order, so paint order is row order.
 func appendMdPreviewAnnotAnchors(dst []mdPreviewAnnotAnchor, runs []mdPreviewAnnotRun,
-	block, start int) []mdPreviewAnnotAnchor {
-	row, ord := start, 0
+	start int, ords map[int]int) []mdPreviewAnnotAnchor {
+	row := start
 	for _, r := range runs {
 		if r.stored && r.rows > 0 {
 			dst = append(dst, mdPreviewAnnotAnchor{
-				block: block, ord: ord, row: row, endRow: row + r.rows - 1,
+				block: r.block, ord: ords[r.block], row: row, endRow: row + r.rows - 1,
 				line: r.line, changeType: r.changeType,
 			})
-			ord++
+			ords[r.block]++
 		}
 		row += r.rows
 	}
