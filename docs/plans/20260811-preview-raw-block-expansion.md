@@ -414,12 +414,12 @@ is refused at all.
   or `""`. Code fence by kind, mermaid by fence text on a single-line span, "nothing to show" when
   every raw line is blank.
 
-- [ ] Write `mdPreviewRawLines` in `app/ui/mdpreview_expand.go`: walk `startLine..endLine`, skip
+- [x] Write `mdPreviewRawLines` in `app/ui/mdpreview_expand.go`: walk `startLine..endLine`, skip
   `ChangeDivider` rows, replace tabs, drop C0 control bytes and DEL, mark blank rows.
-- [ ] Write `mdPreviewExpandRefusal` in `app/ui/mdpreview_expand.go`: refuse code fences by kind,
+- [x] Write `mdPreviewExpandRefusal` in `app/ui/mdpreview_expand.go`: refuse code fences by kind,
   mermaid diagrams by fence text on a single-line span, and blocks where every raw line is blank.
-- [ ] Write tests for both functions in `app/ui/mdpreview_expand_test.go`.
-- [ ] run `go test ./app/ui/ -race -run 'TestMdPreviewRawLines|TestMdPreviewExpandRefusal'` — must
+- [x] Write tests for both functions in `app/ui/mdpreview_expand_test.go`.
+- [x] run `go test ./app/ui/ -race -run 'TestMdPreviewRawLines|TestMdPreviewExpandRefusal'` — must
   pass before the next task
 
 **Files:**
