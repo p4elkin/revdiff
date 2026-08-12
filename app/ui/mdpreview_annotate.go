@@ -95,6 +95,13 @@ func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPrevie
 	if len(topRows) > 0 && m.hasFileAnnotation() && !liveFileAnnotating {
 		annots = append(annots, mdPreviewAnnotAnchor{block: mdPreviewFileStopBlock, row: 0, endRow: len(topRows) - 1})
 	}
+	// a file-level input being typed occupies exactly the prepended rows, which
+	// is why it is recorded here rather than by the splice walk below: it is
+	// never spliced at a row of the render at all.
+	var live mdPreviewRowSpan
+	if len(topRows) > 0 && liveFileAnnotating {
+		live = mdPreviewRowSpan{row: 0, endRow: len(topRows) - 1, ok: true}
+	}
 	// ords counts each block's annotations as they are painted. It is per block
 	// rather than per splice point because a block's annotations can now be
 	// spliced at several rows, and mdPreviewAnnotAnchor.ord is the position among
@@ -105,7 +112,7 @@ func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPrevie
 		out = append(out, line)
 		for si < len(shift.rows) && shift.rows[si] <= i {
 			g := groups[shift.rows[si]]
-			annots = appendMdPreviewAnnotAnchors(annots, g.runs, len(out), ords)
+			annots, live = appendMdPreviewAnnotAnchors(annots, live, g.runs, len(out), ords)
 			out = append(out, g.rows...)
 			si++
 		}
@@ -115,11 +122,12 @@ func (m Model) mdPreviewPaintAnnotationsTracked(rendered string, srcMap mdPrevie
 	// painted rather than silently dropped.
 	for ; si < len(shift.rows); si++ {
 		g := groups[shift.rows[si]]
-		annots = appendMdPreviewAnnotAnchors(annots, g.runs, len(out), ords)
+		annots, live = appendMdPreviewAnnotAnchors(annots, live, g.runs, len(out), ords)
 		out = append(out, g.rows...)
 	}
 	return strings.Join(out, "\n"), mdPreviewSourceMap{
-		aligned: true, anchors: shift.blockAnchors(anchors), lines: shift.lineAnchors(srcMap.lines), annots: annots,
+		aligned: true, anchors: shift.blockAnchors(anchors), lines: shift.lineAnchors(srcMap.lines),
+		annots: annots, liveInput: live,
 	}
 }
 
@@ -238,9 +246,14 @@ func (m Model) mdPreviewCollectAnnotationRows(all []annotation.Annotation, srcMa
 		idx, idxOK := m.mdPreviewLineIndex(a.Line, a.Type)
 		row, bi := srcMap.spliceRow(idx, idxOK)
 		painted := m.mdPreviewRenderOne(a, annotationMap, idx, idxOK)
+		// live: this stored annotation's rows ARE the input box while the reader
+		// edits it (renderAnnotationOrInput draws the input in place of the
+		// comment for the annotated line), so the rows to keep on screen are the
+		// same rows — recorded here rather than by a second branch below.
+		editing := liveOK && idxOK && idx == liveIdx
 		mdPreviewAddSplice(groups, row, painted,
-			mdPreviewAnnotRun{rows: len(painted), block: bi, line: a.Line, changeType: a.Type, stored: true})
-		if liveOK && idxOK && idx == liveIdx {
+			mdPreviewAnnotRun{rows: len(painted), block: bi, line: a.Line, changeType: a.Type, stored: true, live: editing})
+		if editing {
 			// mdPreviewRenderOne already routed through renderAnnotationOrInput for
 			// this exact idx, which draws the live input in place of the stored
 			// comment (see renderAnnotationOrInput's own annotating/diffCursor
@@ -266,7 +279,7 @@ func (m Model) mdPreviewCollectAnnotationRows(all []annotation.Annotation, srcMa
 		// a live input rather than a deletable annotation. It still counts toward
 		// the row offsets of the annotations painted after it, which is why it is
 		// recorded at all instead of being left out of the run list.
-		mdPreviewAddSplice(groups, row, rows, mdPreviewAnnotRun{rows: len(rows), block: bi})
+		mdPreviewAddSplice(groups, row, rows, mdPreviewAnnotRun{rows: len(rows), block: bi, live: true})
 	}
 	return groups
 }
@@ -282,6 +295,7 @@ type mdPreviewAnnotRun struct {
 	line       int
 	changeType string
 	stored     bool
+	live       bool // these rows are the annotation input the reader is typing into
 }
 
 // appendMdPreviewAnnotAnchors turns one splice point's runs into row spans, given
@@ -295,8 +309,14 @@ type mdPreviewAnnotRun struct {
 // land at several rows, while mdPreviewAnnotAnchor.ord stays "position among this
 // block's annotations, in paint order" — the identity mdPreviewStopRef holds. The
 // walk visits splice rows in ascending order, so paint order is row order.
-func appendMdPreviewAnnotAnchors(dst []mdPreviewAnnotAnchor, runs []mdPreviewAnnotRun,
-	start int, ords map[int]int) []mdPreviewAnnotAnchor {
+//
+// live is threaded through rather than returned on its own because the live
+// input's span is found by the same arithmetic and at most one run in the whole
+// walk carries it: a run marked live overwrites it, every other run passes the
+// caller's value back unchanged. That is what lets the visibility step scroll to
+// the input without re-scanning the painted string for it.
+func appendMdPreviewAnnotAnchors(dst []mdPreviewAnnotAnchor, live mdPreviewRowSpan, runs []mdPreviewAnnotRun,
+	start int, ords map[int]int) ([]mdPreviewAnnotAnchor, mdPreviewRowSpan) {
 	row := start
 	for _, r := range runs {
 		if r.stored && r.rows > 0 {
@@ -306,9 +326,12 @@ func appendMdPreviewAnnotAnchors(dst []mdPreviewAnnotAnchor, runs []mdPreviewAnn
 			})
 			ords[r.block]++
 		}
+		if r.live && r.rows > 0 {
+			live = mdPreviewRowSpan{row: row, endRow: row + r.rows - 1, ok: true}
+		}
 		row += r.rows
 	}
-	return dst
+	return dst, live
 }
 
 // mdPreviewAnnotateDegraded lists every one of this file's annotations —
@@ -499,8 +522,15 @@ const mdPreviewUnanchorableHint = "Preview cannot anchor this document — press
 // viewport.YOffset around the call is what keeps that math from silently
 // repositioning the preview; it is also what makes ActionConfirm safe to
 // dispatch regardless of pane focus (see the mdPreviewAllowedActions comment
-// on the confirm case) — the viewport never moves, so there is nothing for a
-// stale TOC-jump-shaped side effect to have gotten wrong.
+// on the confirm case) — no diff-line-coordinate scroll survives the call, so
+// there is nothing for a stale TOC-jump-shaped side effect to have gotten
+// wrong.
+//
+// The restore is followed by ensureMdPreviewInputVisible, which does the same
+// job the discarded scroll was meant to do, in preview row coordinates. So the
+// viewport may still move — by the smallest amount that brings the input on
+// screen, and only when it was off screen. What it may never do is move because
+// of a number computed in diff-line coordinates.
 //
 // The content refresh after restoring the offset is what makes the freshly
 // started input actually visible: mdPreviewPaintAnnotationsTracked only draws
@@ -546,7 +576,45 @@ func (m *Model) mdPreviewStartAnnotationAt(idx int) tea.Cmd {
 	cmd := m.startAnnotation()
 	m.layout.viewport.SetYOffset(savedOffset)
 	m.layout.viewport.SetContent(m.renderDiff())
+	m.ensureMdPreviewInputVisible()
 	return cmd
+}
+
+// ensureMdPreviewInputVisible scrolls the preview the least it can so the
+// annotation input the reader is about to type into is on screen.
+//
+// It replaces what the save/restore in mdPreviewStartAnnotationAt takes away,
+// rather than putting it back. Restoring the offset is what stops
+// ensureLineAnnotationInputVisible (app/ui/annotate.go) repositioning the preview
+// off diff-line coordinates that mean nothing against a glamour render — that is
+// still exactly what it is for. But the consequence was that NOTHING then
+// scrolled to reveal the input: mid-document nobody noticed, because the input is
+// spliced directly under the block the reader is already looking at, and at the
+// bottom edge of the viewport — the last block above all — it landed below the
+// visible window and the reader typed blind.
+//
+// So this is the same job done again in PREVIEW row coordinates. The row span
+// comes from the painter that put the input there (mdPreviewSourceMap.liveInput),
+// never from re-scanning the painted string, for the reason every other anchor in
+// this file is recorded at splice time: a scan would be a second source of truth
+// about where a row is, free to drift from the one that placed it.
+//
+// Order matters at the call sites: the frame carrying the input must already be
+// in the viewport before this runs, because SetYOffset clamps against the
+// viewport's own content buffer and would otherwise clamp the input's row away.
+//
+// A no-op whenever there is no input painted in this frame — startAnnotation
+// refused (a divider, a collapsed-hidden line), or the map could anchor nothing
+// and the painter took its degraded path.
+func (m *Model) ensureMdPreviewInputVisible() {
+	if !m.modes.mdPreview || !m.file.markdownPreviewable {
+		return // not showing a preview frame; preview row numbers would mean nothing
+	}
+	_, srcMap := m.mdPreviewBody()
+	if !srcMap.liveInput.ok {
+		return
+	}
+	m.syncMdPreviewViewportToRows(srcMap.liveInput.row, srcMap.liveInput.endRow)
 }
 
 // mdPreviewClickDiff handles a left-click press in the diff viewport while

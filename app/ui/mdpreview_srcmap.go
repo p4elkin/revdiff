@@ -69,11 +69,30 @@ type mdPreviewBlockAnchor struct {
 // The order the two run in is load-bearing: expansion first, so the painter
 // receives a map already in expanded row coordinates and needs no knowledge of
 // expansion for its own shifting to stay exact.
+//
+// liveInput is owned by the same painter and is the one row span that is not a
+// cursor stop: the annotation input the reader is typing into right now. It is
+// recorded because nothing else can say where it landed — a live input is not in
+// the store, so it gets no mdPreviewAnnotAnchor, and the row it is spliced at
+// depends on the block's height, the expansion state and every annotation
+// painted above it. See ensureMdPreviewInputVisible for what reads it.
 type mdPreviewSourceMap struct {
-	aligned bool
-	anchors []mdPreviewBlockAnchor
-	lines   []mdPreviewLineAnchor
-	annots  []mdPreviewAnnotAnchor
+	aligned   bool
+	anchors   []mdPreviewBlockAnchor
+	lines     []mdPreviewLineAnchor
+	annots    []mdPreviewAnnotAnchor
+	liveInput mdPreviewRowSpan
+}
+
+// mdPreviewRowSpan is an inclusive row range in the painted frame, plus whether
+// there is a range at all. ok is a field rather than a (span, bool) return
+// because the span is carried inside mdPreviewSourceMap, where the zero value
+// would otherwise read as "rows 0..0" — a real span, and the first row of the
+// document at that.
+type mdPreviewRowSpan struct {
+	row    int
+	endRow int
+	ok     bool
 }
 
 // blocks returns the anchors in document order.
