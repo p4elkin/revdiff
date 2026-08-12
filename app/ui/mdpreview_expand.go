@@ -3,6 +3,8 @@ package ui
 import (
 	"strings"
 
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/umputun/revdiff/app/diff"
 )
 
@@ -114,6 +116,114 @@ func mdPreviewExpandRefusal(a mdPreviewBlockAnchor, lines []diff.DiffLine) strin
 		}
 	}
 	return mdPreviewExpandNothingHint
+}
+
+// mdPreviewLineAnchor is one painted raw source line's place in the frame,
+// recorded by the pass that put it there. It is the raw-row counterpart of
+// mdPreviewAnnotAnchor and is produced the same way and for the same reason: as
+// a side effect of the splice that created the row, never by scanning the
+// painted string afterwards, because a scan would be a second source of truth
+// about where a row is and free to drift from the one that placed it.
+//
+// row is a row index into the render mdPreviewExpandBlock returned, and lineIdx
+// the index into the []diff.DiffLine that row's text came from — the coordinate
+// mdPreviewBlockAnchor.startLine and m.nav.diffCursor share, so annotating a raw
+// line needs no translation. block is the expanded block the row belongs to;
+// only one block is ever expanded, but carrying it keeps the stop list's
+// grouping the same shape it already has for annotations.
+//
+// One source line is one rendered row, so there is no endRow: a line stop's span
+// is the single row.
+type mdPreviewLineAnchor struct {
+	block   int
+	row     int
+	lineIdx int
+}
+
+// mdPreviewExpandBlock redraws one block as its raw markdown source: the block's
+// rendered rows are replaced by one row per source line, and the map is returned
+// re-expressed in the resulting render's own row numbers.
+//
+// It has mdPreviewPaintAnnotationsTracked's shape — (rendered, srcMap) ->
+// (rendered', srcMap') — and runs BEFORE it, so the painter receives rows and
+// anchors that already account for the expansion and needs no knowledge of it.
+//
+// Nothing is expanded when block is negative (no block selected), the map is not
+// aligned, the block index is out of range, or the block has no source lines to
+// show. In every one of those cases it returns the string it was HANDED, not a
+// rebuilt copy: mdPreviewScrollCache.forBody compares bodies by value, which is
+// O(1) on a shared backing pointer and a full memcmp on a copy, so a rebuilt
+// no-op string would cost the whole document on every repaint.
+//
+// The trailing blank rows of the block's span are kept rather than replaced. A
+// non-last block's span runs to the row before the next block starts, so it
+// includes the padding glamour puts between blocks, and the last block's span
+// runs to the end of the document. Replacing the whole span would swallow that
+// padding and make the document jump on every toggle.
+//
+// srcMap.annots is carried through untouched. It is always empty here in
+// production — the painter that fills it runs after this pass — and a caller
+// that inverted the order would get stale annotation rows, which is exactly the
+// second-correction-pass failure the ordering exists to avoid.
+func mdPreviewExpandBlock(rendered string, srcMap mdPreviewSourceMap, block int,
+	lines []diff.DiffLine, tabSpaces string) (string, mdPreviewSourceMap) {
+	anchors := srcMap.blocks()
+	if !srcMap.aligned || block < 0 || block >= len(anchors) {
+		return rendered, srcMap
+	}
+	raw := mdPreviewRawLines(lines, anchors[block], tabSpaces)
+	if len(raw) == 0 {
+		return rendered, srcMap
+	}
+	rows := strings.Split(rendered, "\n")
+	start := anchors[block].row
+	if start < 0 || start >= len(rows) {
+		return rendered, srcMap // an anchor that does not describe this render; refuse rather than guess
+	}
+
+	end := min(anchors[block].endRow, len(rows)-1)
+	replaced := end - mdPreviewTrailingBlankRows(rows, start, end) - start + 1
+	out := make([]string, 0, len(rows)-replaced+len(raw))
+	out = append(out, rows[:start]...)
+	lineAnchors := make([]mdPreviewLineAnchor, 0, len(raw))
+	for i, rl := range raw {
+		out = append(out, rl.text)
+		if !rl.blank {
+			// a blank raw line paints a row but gets no anchor: mdPreviewHighlight
+			// skips blank rows, so a stop there would be invisible.
+			lineAnchors = append(lineAnchors, mdPreviewLineAnchor{block: block, row: start + i, lineIdx: rl.lineIdx})
+		}
+	}
+	out = append(out, rows[start+replaced:]...)
+
+	// shifted anchors are a copy, never an in-place edit: srcMap's backing array
+	// belongs to the render cache (mdpreview_cache.go) and is handed to every
+	// later repaint.
+	delta := len(raw) - replaced
+	shifted := make([]mdPreviewBlockAnchor, len(anchors))
+	copy(shifted, anchors)
+	shifted[block].endRow += delta
+	for i := block + 1; i < len(shifted); i++ {
+		shifted[i].row += delta
+		shifted[i].endRow += delta
+	}
+	return strings.Join(out, "\n"),
+		mdPreviewSourceMap{aligned: true, anchors: shifted, lines: lineAnchors, annots: srcMap.annots}
+}
+
+// mdPreviewTrailingBlankRows counts the blank rendered rows at the end of the
+// span start..end. It never counts the span's first row, so a block always has
+// at least one row to replace — a block whose every rendered row looks blank
+// (ANSI-only padding, say) still expands instead of painting its source twice.
+func mdPreviewTrailingBlankRows(rows []string, start, end int) int {
+	n := 0
+	for r := end; r > start; r-- {
+		if strings.TrimSpace(ansi.Strip(rows[r])) != "" {
+			break
+		}
+		n++
+	}
+	return n
 }
 
 // mdPreviewMermaidFenceLine reports whether content is a fence opening whose

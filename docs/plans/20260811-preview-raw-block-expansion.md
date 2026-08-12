@@ -439,15 +439,15 @@ the map is not aligned, or `block` is out of range. Otherwise: count trailing bl
 the signed delta, set the expanded block's own `endRow`, and record one `mdPreviewLineAnchor` per
 non-blank raw line.
 
-- [ ] Add `lines []mdPreviewLineAnchor` to `mdPreviewSourceMap` in `app/ui/mdpreview_srcmap.go`, and
+- [x] Add `lines []mdPreviewLineAnchor` to `mdPreviewSourceMap` in `app/ui/mdpreview_srcmap.go`, and
   update its doc comment to name both `annots` and `lines` and the pass that owns each.
-- [ ] Write `mdPreviewExpandBlock` in `app/ui/mdpreview_expand.go`: return the inputs untouched (same
+- [x] Write `mdPreviewExpandBlock` in `app/ui/mdpreview_expand.go`: return the inputs untouched (same
   string value) when `block < 0`, the map is not aligned, or `block` is out of range.
-- [ ] In `mdPreviewExpandBlock`, count trailing blank rows in `[row .. endRow]`, replace
+- [x] In `mdPreviewExpandBlock`, count trailing blank rows in `[row .. endRow]`, replace
   `[row .. endRow-trailing]` with the raw rows, shift every later anchor by the signed delta, set the
   expanded block's own `endRow`, and record one `mdPreviewLineAnchor` per non-blank raw line.
-- [ ] Write tests for `mdPreviewExpandBlock` in `app/ui/mdpreview_expand_test.go`.
-- [ ] run `go test ./app/ui/ -race -run 'TestMdPreviewExpandBlock'` — must pass before the next task
+- [x] Write tests for `mdPreviewExpandBlock` in `app/ui/mdpreview_expand_test.go`.
+- [x] run `go test ./app/ui/ -race -run 'TestMdPreviewExpandBlock'` — must pass before the next task
 
 **Files:**
 - Modify: `app/ui/mdpreview_srcmap.go` — add `lines []mdPreviewLineAnchor` to `mdPreviewSourceMap`,

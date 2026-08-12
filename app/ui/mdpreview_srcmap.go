@@ -47,14 +47,25 @@ type mdPreviewBlockAnchor struct {
 // the zero mdPreviewSourceMap, and mdPreviewBuildSourceMap is the only place
 // that ever sets aligned=true. Both fields are unexported so no caller outside
 // this package's preview files can construct a value that breaks it.
-// annots is the one field NOT produced here. It is where the annotation rows
-// spliced into the render ended up, and only mdPreviewPaintAnnotationsTracked —
-// the pass that splices them — can know that, so a map straight out of
-// mdPreviewRenderWithMap always has it empty. See mdPreviewAnnotAnchor and
-// mdPreviewSourceMap.stops (mdpreview_stops.go).
+// Two fields are NOT produced here, and each is owned by exactly one later
+// pass over the render — the pass that created the rows it describes, because
+// that pass is the only place that knows where they landed. A map straight out
+// of mdPreviewRenderWithMap always has both empty.
+//
+//   - lines is where the raw source rows of an expanded block ended up, owned
+//     by mdPreviewExpandBlock (mdpreview_expand.go). One entry per painted
+//     non-blank raw line. Empty whenever no block is expanded.
+//   - annots is where the annotation rows spliced into the render ended up,
+//     owned by mdPreviewPaintAnnotationsTracked (mdpreview_annotate.go). See
+//     mdPreviewAnnotAnchor and mdPreviewSourceMap.stops (mdpreview_stops.go).
+//
+// The order the two run in is load-bearing: expansion first, so the painter
+// receives a map already in expanded row coordinates and needs no knowledge of
+// expansion for its own shifting to stay exact.
 type mdPreviewSourceMap struct {
 	aligned bool
 	anchors []mdPreviewBlockAnchor
+	lines   []mdPreviewLineAnchor
 	annots  []mdPreviewAnnotAnchor
 }
 
