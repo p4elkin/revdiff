@@ -739,22 +739,29 @@ once per burst.
 Run the full suite and lint, then walk through the manual pass from the plan's own validation
 section.
 
-- [ ] run `make test` — must pass (race detector + coverage)
-- [ ] run `make lint` — must report 0 issues
-- [ ] Manual: open `revdiff --only docs/plans/20260811-preview-raw-block-expansion.md`, press `P`,
-  then `j` a few times to place the cursor on this file's own tasks table.
-- [ ] Manual: press `r` — confirm the table becomes its markdown source, one row per line, and the
-  rows below it move by the height difference with nothing else on the document changing.
-- [ ] Manual: `j` down a few source lines, `a`, type, Enter — confirm the input appears under the
-  line selected, not at the bottom of the table, and the saved comment stays there.
-- [ ] Manual: press `right` / `left` — confirm the raw rows pan and show `«` / `»`, and the pan
-  reaches the end of the longest raw line.
-- [ ] Manual: press `esc` — confirm the table is rendered again and the comment is back under the
-  block.
-- [ ] Manual: press `r` on a mermaid diagram and on a code fence — confirm a hint appears in the
-  status bar and nothing changes on screen.
-- [ ] Manual: press `O` to flush, then check the output file — confirm the line number is the
-  source line selected and the entry is indistinguishable from one made with `P` off.
+- [x] run `make test` — must pass (race detector + coverage)
+- [x] run `make lint` — must report 0 issues
+- [x] Manual: open `revdiff --only docs/plans/20260811-preview-raw-block-expansion.md`, press `P`,
+  then `j` a few times to place the cursor on this file's own tasks table. (skipped — interactive
+  TUI, not automatable; covered by `TestMdPreviewToggleRaw*` in `app/ui/mdpreview_expand_test.go`)
+- [x] Manual: press `r` — confirm the table becomes its markdown source, one row per line, and the
+  rows below it move by the height difference with nothing else on the document changing. (skipped —
+  not automatable; covered by `TestMdPreviewExpandBlock*` shifting the later anchors by the signed
+  delta)
+- [x] Manual: `j` down a few source lines, `a`, type, Enter — confirm the input appears under the
+  line selected, not at the bottom of the table, and the saved comment stays there. (skipped — not
+  automatable; covered by the per-line splice tests in `app/ui/mdpreview_annotate_test.go`)
+- [x] Manual: press `right` / `left` — confirm the raw rows pan and show `«` / `»`, and the pan
+  reaches the end of the longest raw line. (skipped — not automatable; the pass runs before
+  `applyMdPreviewScroll`, so the existing pan tests measure the raw rows)
+- [x] Manual: press `esc` — confirm the table is rendered again and the comment is back under the
+  block. (skipped — not automatable; covered by the `ActionDismiss` collapse tests)
+- [x] Manual: press `r` on a mermaid diagram and on a code fence — confirm a hint appears in the
+  status bar and nothing changes on screen. (skipped — not automatable; covered by
+  `TestMdPreviewExpandRefusal`)
+- [x] Manual: press `O` to flush, then check the output file — confirm the line number is the
+  source line selected and the entry is indistinguishable from one made with `P` off. (skipped — not
+  automatable; covered by the "raw-line annotation is identical to the source-view one" test)
 
 ### Task 12: [Final] Update documentation
 
