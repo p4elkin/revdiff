@@ -80,14 +80,14 @@ func TestMdPreviewRawLines_ClampsOutOfRangeSpan(t *testing.T) {
 func TestMdPreviewExpandRefusal_AllowsOrdinaryBlocks(t *testing.T) {
 	lines := mdLines("# Title\n\nsome prose\n\n| a | b |\n| - | - |")
 
-	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockH1, startLine: 0, endLine: 0}, lines))
-	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 2, endLine: 2}, lines))
-	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockTable, startLine: 4, endLine: 5}, lines))
+	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockH1, startLine: 0, endLine: 0}, lines, "    "))
+	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 2, endLine: 2}, lines, "    "))
+	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockTable, startLine: 4, endLine: 5}, lines, "    "))
 }
 
 func TestMdPreviewExpandRefusal_CodeBlockByKind(t *testing.T) {
 	lines := mdLines("```go\nfunc main() {}\n```")
-	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockCodeBlock, startLine: 1, endLine: 1}, lines)
+	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockCodeBlock, startLine: 1, endLine: 1}, lines, "    ")
 	assert.Equal(t, mdPreviewExpandCodeHint, got)
 }
 
@@ -95,12 +95,12 @@ func TestMdPreviewExpandRefusal_MermaidFenceOnSingleLineSpan(t *testing.T) {
 	lines := mdLines("```mermaid\nflowchart TD\n  a --> b\n```")
 	// joinWithMermaidFences attributes the whole art to the opening fence line,
 	// so the block arrives as a paragraph whose span is that one line.
-	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 0, endLine: 0}, lines)
+	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 0, endLine: 0}, lines, "    ")
 	assert.Equal(t, mdPreviewExpandMermaidHint, got)
 
 	tilde := mdLines("~~~MERMAID title=x\nflowchart TD\n~~~")
 	assert.Equal(t, mdPreviewExpandMermaidHint,
-		mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 0, endLine: 0}, tilde),
+		mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 0, endLine: 0}, tilde, "    "),
 		"the info string is read the same way joinWithMermaidFences reads it")
 }
 
@@ -108,12 +108,12 @@ func TestMdPreviewExpandRefusal_MermaidTextOnMultiLineSpanIsNotADiagram(t *testi
 	// a paragraph that merely starts with fence-looking text but spans more than
 	// one line is not the collapsed-diagram shape, so it expands normally.
 	lines := mdLines("```mermaid\nstill the same paragraph")
-	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 0, endLine: 1}, lines))
+	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 0, endLine: 1}, lines, "    "))
 }
 
 func TestMdPreviewExpandRefusal_AllBlankSpan(t *testing.T) {
 	lines := mdLines("text\n   \n\t\nmore")
-	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 1, endLine: 2}, lines)
+	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 1, endLine: 2}, lines, "    ")
 	assert.Equal(t, mdPreviewExpandNothingHint, got)
 }
 
@@ -122,7 +122,7 @@ func TestMdPreviewExpandRefusal_DividerOnlySpan(t *testing.T) {
 	lines[1].ChangeType = diff.ChangeDivider
 	lines[1].Content = "⋯ 3 lines ⋯"
 
-	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 1, endLine: 1}, lines)
+	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 1, endLine: 1}, lines, "    ")
 	assert.Equal(t, mdPreviewExpandNothingHint, got, "a divider is not source the reader can annotate")
 }
 
@@ -290,12 +290,107 @@ func TestMdPreviewExpandBlock_CarriesAnnotAnchorsThrough(t *testing.T) {
 }
 
 func TestMdPreviewExpandBlock_AnchorOutsideTheRenderIsRefused(t *testing.T) {
-	rendered, lines, sm := mdExpandFixture()
-	sm.anchors[1].row = 99 // a map built against a different render
+	tests := []struct {
+		name string
+		edit func(sm *mdPreviewSourceMap)
+	}{
+		{"row past the render", func(sm *mdPreviewSourceMap) { sm.anchors[1].row = 99 }},
+		{"endRow past the render", func(sm *mdPreviewSourceMap) { sm.anchors[1].endRow = 99 }},
+		{"endRow before row", func(sm *mdPreviewSourceMap) { sm.anchors[1].endRow = 0 }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rendered, lines, sm := mdExpandFixture()
+			tt.edit(&sm) // a map built against a different render
+
+			got, gotMap := mdPreviewExpandBlock(rendered, sm, 1, lines, "    ")
+			assert.True(t, sameStringValue(rendered, got),
+				"a malformed span must be refused outright, not clamped into a map whose rows are off")
+			assert.Equal(t, sm, gotMap)
+		})
+	}
+}
+
+func TestMdPreviewExpandBlock_AllBlankSpanIsRefused(t *testing.T) {
+	rendered, _, sm := mdExpandFixture()
+	lines := mdLines("# Heading\n\n   \n\t\n \n\ntail")
 
 	got, gotMap := mdPreviewExpandBlock(rendered, sm, 1, lines, "    ")
-	assert.True(t, sameStringValue(rendered, got))
+	assert.True(t, sameStringValue(rendered, got),
+		"expanding would paint blank rows and record no anchor, so the stop list would say nothing is expanded")
 	assert.Equal(t, sm, gotMap)
+}
+
+// TestMdPreviewClipRawSpan pins the clip itself: a container's span stops at the
+// first source line the NEXT block claims, and an ordinary block is untouched.
+func TestMdPreviewClipRawSpan(t *testing.T) {
+	anchors := []mdPreviewBlockAnchor{
+		{kind: mdBlockItem, row: 2, endRow: 2, startLine: 0, endLine: 6},
+		{kind: mdBlockCodeBlock, row: 3, endRow: 5, startLine: 3, endLine: 3},
+		{kind: mdBlockParagraph, row: 6, endRow: 8, startLine: 8, endLine: 8},
+	}
+
+	assert.Equal(t, 2, mdPreviewClipRawSpan(anchors, 0).endLine,
+		"the item's span must stop before the nested fence's own first line")
+	assert.Equal(t, 0, mdPreviewClipRawSpan(anchors, 0).startLine, "the start is never moved")
+	assert.Equal(t, anchors[1], mdPreviewClipRawSpan(anchors, 1),
+		"a block the next one does not reach into keeps its whole span")
+	assert.Equal(t, anchors[2], mdPreviewClipRawSpan(anchors, 2), "the last block has nothing to clip against")
+}
+
+// TestMdPreviewToggleRaw_NestedBlockIsNotPaintedTwice is the regression the clip
+// exists for. A list item holding a fenced code block spans the fence's source
+// lines while owning only the rows above it, so painting the whole span put the
+// fence body and the trailing paragraph on screen as source AND left them
+// rendered right underneath.
+func TestMdPreviewToggleRaw_NestedBlockIsNotPaintedTwice(t *testing.T) {
+	docs := map[string]string{
+		"list item":  "- para a\n\n  ```go\n  x := 1\n  ```\n\n  para b\n\nafter\n",
+		"blockquote": "> quoted a\n>\n> ```go\n> y := 2\n> ```\n>\n> quoted b\n\nafter\n",
+	}
+	for name, doc := range docs {
+		t.Run(name, func(t *testing.T) {
+			m := mdPreviewStyledModel(t, doc)
+			_, sm := m.mdPreviewBody()
+			require.True(t, sm.aligned, "fixture sanity: the document must align")
+			require.Greater(t, len(sm.blocks()), 1, "fixture sanity: the container plus its nested fence")
+			require.Less(t, sm.blocks()[1].startLine, sm.blocks()[0].endLine,
+				"fixture sanity: the nested block's source sits inside the container's span")
+
+			m.setMdPreviewBlockCursor(0)
+			m.mdPreviewToggleRaw()
+			require.Equal(t, 0, m.mdPreviewExpandedBlock(), "the container must still expand")
+
+			body, _ := m.mdPreviewBody()
+			rows := strings.Split(ansi.Strip(body), "\n")
+			counts := map[string]int{}
+			for _, r := range rows {
+				if t := strings.TrimSpace(r); t != "" {
+					counts[t]++
+				}
+			}
+			for _, text := range []string{"x := 1", "y := 2", "para b", "quoted b"} {
+				assert.LessOrEqual(t, counts[text], 1, "%q must appear at most once on screen, not rendered AND as source", text)
+			}
+		})
+	}
+}
+
+// TestMdPreviewToggleRaw_ClippedSpanStopsAtTheNestedBlock states the positive
+// half of the clip: the container's own leading lines are what gets painted, and
+// the lines the nested block owns are left to it.
+func TestMdPreviewToggleRaw_ClippedSpanStopsAtTheNestedBlock(t *testing.T) {
+	m := mdPreviewStyledModel(t, "- para a\n\n  ```go\n  x := 1\n  ```\n\n  para b\n\nafter\n")
+	m.setMdPreviewBlockCursor(0)
+	m.mdPreviewToggleRaw()
+
+	_, sm := m.mdPreviewBody()
+	got := make([]int, 0, len(sm.lines))
+	for _, la := range sm.lines {
+		got = append(got, la.lineIdx)
+	}
+	assert.Equal(t, []int{0, 2}, got,
+		"only the item's own lines up to the fence get anchors; line 1 is blank so it paints without one")
 }
 
 // toggleRawDoc is the fixture for the `r` tests: a heading (block 0), a
@@ -485,6 +580,199 @@ func TestMdPreviewToggleRaw_NotPreviewableIsANoOp(t *testing.T) {
 
 	assert.Equal(t, -1, m.mdPreviewExpandedBlock())
 	assert.Empty(t, m.preview.hint)
+}
+
+// TestMdPreviewCollapseRaw_NotPreviewableReportsNothingToCollapse pins the guard
+// esc depends on: with preview stuck on for a non-previewable file the collapse
+// must report false, so ActionDismiss still falls through to handleEscKey.
+func TestMdPreviewCollapseRaw_NotPreviewableReportsNothingToCollapse(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock())
+	m.file.markdownPreviewable = false
+
+	assert.False(t, m.mdPreviewCollapseRaw())
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "nothing may be mutated on the false path")
+}
+
+// TestMdPreviewToggleRaw_KeyPressExpandsAndCollapses drives the real `r`
+// keystroke through Update — key -> keymap.Resolve -> dispatchAction ->
+// handleMdPreviewAction. Every other preview key has a press round trip, and
+// without one the chain is proved only in two disconnected halves.
+func TestMdPreviewToggleRaw_KeyPressExpandsAndCollapses(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+
+	m = pressKey(t, m, "r")
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "`r` must reach mdPreviewToggleRaw through the real dispatch chain")
+	ref, ok := m.mdPreviewCursorRef()
+	require.True(t, ok)
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 2}, ref)
+
+	m = pressKey(t, m, "r")
+	assert.Equal(t, -1, m.mdPreviewExpandedBlock(), "a second press must collapse")
+	ref, ok = m.mdPreviewCursorRef()
+	require.True(t, ok)
+	assert.Equal(t, mdPreviewStopRef{block: 1}, ref)
+}
+
+// TestMdPreviewToggleRaw_KeyPressOutsidePreviewChangesNothing: `r` is a global
+// default binding, so the press has to be harmless in source view. It falls
+// through dispatchResolvedAction to the pane handlers, which is why this asserts
+// on the preview state and the store rather than on "nothing at all happened".
+func TestMdPreviewToggleRaw_KeyPressOutsidePreviewChangesNothing(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.modes.mdPreview = false
+
+	got := pressKey(t, m, "r")
+
+	assert.Equal(t, -1, got.mdPreviewExpandedBlock(), "toggle_raw must do nothing with preview off")
+	assert.False(t, got.modes.mdPreview, "and must not turn preview on")
+	assert.Empty(t, got.preview.hint)
+	assert.Empty(t, got.store.Get("plan.md"), "and must not touch the annotation store")
+}
+
+// TestMdPreviewToggleRaw_RefusesAMermaidDiagram reaches the mermaid refusal
+// through the key rather than through mdPreviewExpandRefusal alone: only the key
+// path can show that the hint reaches m.preview.hint.
+func TestMdPreviewToggleRaw_RefusesAMermaidDiagram(t *testing.T) {
+	m := mdPreviewStyledModel(t, "# Title\n\n```mermaid\nflowchart TD\n  a --> b\n```\n")
+	_, sm := m.mdPreviewBody()
+	require.True(t, sm.aligned, "fixture sanity: the diagram document must align")
+	require.Len(t, sm.blocks(), 2, "fixture sanity: the heading plus the collapsed diagram paragraph")
+	require.Equal(t, sm.blocks()[1].startLine, sm.blocks()[1].endLine,
+		"fixture sanity: the diagram's span is the single fence-opening line")
+	m.setMdPreviewBlockCursor(1)
+
+	m = pressKey(t, m, "r")
+
+	assert.Equal(t, mdPreviewExpandMermaidHint, m.preview.hint)
+	assert.Equal(t, -1, m.mdPreviewExpandedBlock())
+}
+
+// TestMdPreviewToggleRaw_RefusesABlockWithNothingToShow reaches the "Nothing to
+// show" refusal through the key. It is built on a hand-made map because a block
+// whose every source line is blank cannot be produced by rendering a document —
+// which is also why the guard it exercises had no test at all.
+func TestMdPreviewToggleRaw_RefusesABlockWithNothingToShow(t *testing.T) {
+	m := toggleRawModel(t)
+	for i := range m.file.lines {
+		if i >= 2 && i <= 3 {
+			m.file.lines[i].Content = "   " // blank out the paragraph the cursor is on
+		}
+	}
+	m.setMdPreviewBlockCursor(1)
+
+	m = pressKey(t, m, "r")
+
+	assert.Equal(t, mdPreviewExpandNothingHint, m.preview.hint)
+	assert.Equal(t, -1, m.mdPreviewExpandedBlock())
+}
+
+// TestMdPreviewToggleRaw_StaleCursorFallsBackToTheCenterSeed: a cursor left
+// pointing at a block index the current map no longer has resolves no stop at
+// all, so `r` seeds at the viewport center exactly as it does with no cursor —
+// which is why mdPreviewExpandTarget's own out-of-range guard below that is
+// unreachable in practice and kept purely as a net.
+func TestMdPreviewToggleRaw_StaleCursorFallsBackToTheCenterSeed(t *testing.T) {
+	m := mdPreviewStyledModel(t, stopsDoc)
+	_, sm := m.mdPreviewBody()
+	want := m.mdPreviewCenterBlock(sm)
+	require.GreaterOrEqual(t, want, 0, "fixture sanity: the center seed must resolve a block")
+	m.setMdPreviewCursorRef(mdPreviewStopRef{block: 99, onAnnot: true})
+
+	m.mdPreviewToggleRaw()
+
+	assert.Equal(t, want, m.mdPreviewExpandedBlock(), "a ref no map can resolve must not be read as a block index")
+}
+
+// TestMdPreviewToggleRaw_RawRowsCarryNoStyling pins the "plain, unprefixed,
+// unstyled" decision on the UNSTRIPPED body: --no-colors promises a preview with
+// no ANSI in it, and comparing against ansi.Strip(body) — which every other test
+// here does — would pass just as happily on a dim-styled row.
+func TestMdPreviewToggleRaw_RawRowsCarryNoStyling(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+
+	body, sm := m.mdPreviewBody()
+	rows := strings.Split(body, "\n")
+	require.NotEmpty(t, sm.lines)
+	for _, la := range sm.lines {
+		require.Less(t, la.row, len(rows))
+		assert.Equal(t, ansi.Strip(rows[la.row]), rows[la.row], "a raw row must carry no escape sequences at all")
+	}
+}
+
+// TestMdPreviewToggleRaw_HighlightsTheSelectedRawLine: the cursor's own stop
+// inside an expanded block is a single row, and the bar has to reach the pane
+// edge there — a raw row is never padded by glamour, so without the line-stop
+// case in mdPreviewHighlight the mark stops at the end of the text.
+func TestMdPreviewToggleRaw_HighlightsTheSelectedRawLine(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+
+	body, sm := m.mdPreviewBody()
+	require.Len(t, sm.lines, 2)
+	frame := strings.Split(m.mdPreviewFrame(body, sm), "\n")
+	require.Less(t, sm.lines[0].row, len(frame))
+
+	bg := mdPreviewHighlightBg(m)
+	require.NotEmpty(t, bg, "fixture sanity: the styled model must carry a search background")
+	assert.Contains(t, frame[sm.lines[0].row], bg, "the cursor's raw line must be painted")
+	assert.NotContains(t, frame[sm.lines[1].row], bg, "and only that one")
+	assert.GreaterOrEqual(t, ansi.StringWidth(frame[sm.lines[0].row]), m.mdPreviewCutWidth(),
+		"the bar must span the pane, not stop at the end of an 18-column source line")
+}
+
+// TestMdPreviewToggleRaw_PanReachesTheEndOfTheWidestRawLine: the raw rows are
+// what the pan clamp must measure once a block is expanded. Every other pan test
+// runs on a collapsed document, so the widening was asserted nowhere.
+func TestMdPreviewToggleRaw_PanReachesTheEndOfTheWidestRawLine(t *testing.T) {
+	wide := strings.Repeat("wide ", 60) // one source line far wider than the pane
+	m := mdPreviewStyledModel(t, "# Title\n\n"+wide+"\n")
+	m.setMdPreviewBlockCursor(1)
+
+	collapsedBody, _ := m.mdPreviewBody()
+	collapsedMax := m.mdPreviewMaxOffset(collapsedBody, m.mdPreviewCutWidth())
+
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the paragraph must expand")
+
+	expandedBody, _ := m.mdPreviewBody()
+	expandedMax := m.mdPreviewMaxOffset(expandedBody, m.mdPreviewCutWidth())
+	assert.Greater(t, expandedMax, collapsedMax,
+		"an unwrapped raw row is wider than the wrapped render, so the clamp must grow with it")
+	assert.Equal(t, ansi.StringWidth(m.file.lines[2].Content)-m.mdPreviewCutWidth(), expandedMax,
+		"the clamp must be measured against the raw row's own width")
+
+	for range expandedMax + 5 {
+		m.panMarkdownPreview(1)
+	}
+	assert.Equal(t, expandedMax, m.layout.scrollX, "panning right must reach the end of the longest raw line and stop")
+}
+
+// TestMdPreviewToggleRaw_SurvivesAWidthChange is the one path where an expanded
+// cursor meets a map it was not built against: a resize re-renders the base and
+// re-runs expansion against fresh anchors.
+func TestMdPreviewToggleRaw_SurvivesAWidthChange(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock())
+
+	m.layout.viewport.Width = 48
+	body, sm := m.mdPreviewBody()
+
+	assert.Equal(t, 1, sm.expandedBlock(), "the narrower render must still expand the same block")
+	stop, ok := m.mdPreviewCursorStop(sm)
+	require.True(t, ok, "the cursor's raw-line stop must still resolve against the re-rendered map")
+	rows := strings.Split(ansi.Strip(body), "\n")
+	require.Less(t, stop.row, len(rows))
+	assert.Equal(t, m.file.lines[2].Content, rows[stop.row], "and still name the row its own source line is on")
 }
 
 func TestMdPreviewRawStopLine(t *testing.T) {

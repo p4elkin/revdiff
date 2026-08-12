@@ -4,6 +4,8 @@ TUI for reviewing diffs, files, and documents with inline annotations, built wit
 
 **Architecture**: see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for system design, data flows, interfaces, and design decisions.
 
+**This checkout is the `md-preview` fork, not upstream master.** [PATCH.md](PATCH.md) is the fork's durable design record — what markdown preview mode is, every file the patch adds or edits, the accepted limitations, and the rebase notes for each key this fork claims (`P` / `toggle_preview`, `r` / `toggle_raw`). Read it before touching anything under `app/ui/mdpreview*.go` or adding a default keybinding.
+
 ## Commands
 - Build: `make build` (output: `.bin/revdiff`)
 - Test: `make test` (race detector + coverage, excludes mocks)

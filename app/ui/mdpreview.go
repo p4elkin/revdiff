@@ -56,6 +56,23 @@ func mdFencePrefix(s string) (rune, int) {
 	return ch, n
 }
 
+// mdFenceLang is a fence opening's info string: the first whitespace-delimited
+// token after the fence marker, lowercased, or "" when the fence carries none.
+// CommonMark allows extra data after the language (e.g. "```mermaid title=foo"),
+// which is why only the first token counts. trimmed is the line with surrounding
+// whitespace already removed and n the marker length mdFencePrefix reported.
+//
+// One definition, shared by the walk that substitutes mermaid fences
+// (joinWithMermaidFences) and the check that refuses to expand one
+// (mdPreviewMermaidFenceLine): two readings of the same info string would let the
+// two disagree about which fences are diagrams.
+func mdFenceLang(trimmed string, n int) string {
+	if fields := strings.Fields(trimmed[n:]); len(fields) > 0 {
+		return strings.ToLower(fields[0])
+	}
+	return ""
+}
+
 // renderMermaidFences joins source lines into a single markdown document,
 // replacing every ```mermaid (or ~~~mermaid) fence with its rendered
 // box-drawing art. Fence tracking is CommonMark-compliant, matching
@@ -133,15 +150,10 @@ func joinWithMermaidFences(lines []diff.DiffLine,
 
 		switch {
 		case fenceChar == 0 && n >= 3:
-			// opening fence: the info string is the first whitespace-delimited
-			// token after the fence marker (CommonMark allows extra data after
-			// the language, e.g. "```mermaid title=foo").
+			// opening fence; mdFenceLang owns how the info string is read
 			fenceChar = ch
 			fenceLen = n
-			fenceLang = ""
-			if fields := strings.Fields(trimmed[n:]); len(fields) > 0 {
-				fenceLang = strings.ToLower(fields[0])
-			}
+			fenceLang = mdFenceLang(trimmed, n)
 			fenceStart = i
 			fenceBody, fenceBodyOrigins = nil, nil
 			if fenceLang != "mermaid" {
@@ -965,11 +977,14 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     (mdpreview_expand.go) for what it refuses and what it says when it
 //     does.
 //   - confirm (a/enter) opens an annotation input on whatever the cursor is
-//     stopped on: a line-level annotation anchored to the block on a block stop
-//     (seeding that cursor at the viewport center when the reader has not placed
-//     it yet — mdPreviewHighlightAnchor), or an EDIT of the selected annotation
-//     on an annotation stop, aimed at its own (Line, Type) so startAnnotation's
-//     pre-fill loads the current text and Store.Add replaces it. That is the
+//     stopped on, and there are three cases. On a RAW SOURCE LINE of an expanded
+//     block it aims at that exact source line — the case raw expansion exists
+//     for, and the only one that can target a line inside a block. On a BLOCK
+//     stop it anchors a line-level annotation to the block (seeding that cursor
+//     at the viewport center when the reader has not placed it yet —
+//     mdPreviewHighlightAnchor). On an ANNOTATION stop it EDITS that annotation,
+//     aimed at its own (Line, Type) so startAnnotation's pre-fill loads the
+//     current text and Store.Add replaces it. That is the
 //     same edit path the diff pane has always had, multi-line stash included —
 //     see mdPreviewStartAnnotation, mdpreview_annotate.go. It is routed INSIDE
 //     handleMdPreviewAction above rather than left to fall through: its

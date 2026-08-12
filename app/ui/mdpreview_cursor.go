@@ -137,8 +137,15 @@ func (m *Model) setMdPreviewCursorRef(ref mdPreviewStopRef) {
 // narrow exception rather than a change to the rule: a stop that names any other
 // block, or no block at all, still falls through to the plain setter and
 // collapses.
-func (m *Model) setMdPreviewCursorRefKeepingExpansion(ref mdPreviewStopRef) {
-	if bi := m.mdPreviewExpandedBlock(); bi >= 0 && ref.block == bi {
+//
+// expandedBlock is the block the PAINTED map says is drawn as source
+// (mdPreviewSourceMap.expandedBlock), passed in rather than re-read off the
+// cursor. The two can disagree — the cursor still says expanded while
+// mdPreviewExpandBlock refused, e.g. against a map built at another width — and
+// on that disagreement the screen shows rendered rows, so the cursor must
+// collapse to match it rather than hold a raw-line stop no map can resolve.
+func (m *Model) setMdPreviewCursorRefKeepingExpansion(ref mdPreviewStopRef, expandedBlock int) {
+	if bi := expandedBlock; bi >= 0 && ref.block == bi {
 		m.preview.cursor = mdPreviewCursorState{
 			set: true, ref: ref, file: m.file.name, seq: m.file.loadSeq, expanded: true,
 		}
@@ -257,9 +264,14 @@ func (m *Model) moveMdPreviewCursor(delta int) {
 		return
 	}
 
+	// the clamp reads expansion off the PAINTED map, not off the cursor: the stop
+	// list it is clamping into is that map's, so asking the cursor instead could
+	// narrow j/k to one block's stops in a frame that is not showing raw source at
+	// all — and leave the reader unable to step out of it.
+	expanded := srcMap.expandedBlock()
 	lo, hi := 0, len(stops)-1
-	if bi := m.mdPreviewExpandedBlock(); bi >= 0 {
-		if blockLo, blockHi, ok := mdPreviewBlockStopRange(stops, bi); ok {
+	if expanded >= 0 {
+		if blockLo, blockHi, ok := mdPreviewBlockStopRange(stops, expanded); ok {
 			lo, hi = blockLo, blockHi
 		}
 	}
@@ -275,7 +287,7 @@ func (m *Model) moveMdPreviewCursor(delta int) {
 	} else {
 		i = min(max(i+delta, lo), hi)
 	}
-	m.setMdPreviewCursorRefKeepingExpansion(stops[i].ref)
+	m.setMdPreviewCursorRefKeepingExpansion(stops[i].ref, expanded)
 
 	// content first, offset second: SetYOffset clamps against the viewport's own
 	// content buffer, so a frame that has not been pushed yet would clamp the
@@ -370,7 +382,9 @@ func (m *Model) dropMdPreviewCursorIfHidden() {
 // or k can continue from, and mdPreviewNearestStop picks within it the same way
 // the seeding press does.
 func (m *Model) reseatMdPreviewCursorInExpandedBlock(srcMap mdPreviewSourceMap, top, bottom int) bool {
-	bi := m.mdPreviewExpandedBlock()
+	// the painted map, not the cursor: srcMap is the frame on screen, and
+	// re-seating onto raw-line stops it does not have would be aiming at nothing
+	bi := srcMap.expandedBlock()
 	if bi < 0 {
 		return false
 	}
@@ -388,7 +402,7 @@ func (m *Model) reseatMdPreviewCursorInExpandedBlock(srcMap mdPreviewSourceMap, 
 	if i < 0 {
 		return false
 	}
-	m.setMdPreviewCursorRefKeepingExpansion(own[i].ref)
+	m.setMdPreviewCursorRefKeepingExpansion(own[i].ref, bi)
 	return true
 }
 

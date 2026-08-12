@@ -74,6 +74,35 @@ func mdPreviewRawText(content, tabSpaces string) string {
 	}, expanded)
 }
 
+// mdPreviewClipRawSpan is the anchor of block, with its source span cut short at
+// the line where the next block's source begins.
+//
+// A container — a list item or a blockquote — claims a span that runs to the end
+// of its own content, but swallowedSpan (mdpreview_blocks.go) EXCLUDES any
+// boundary child from the aggregation while leaving it inside the resulting
+// min/max range. So an item holding a fenced code block between two of its own
+// paragraphs spans all of those source lines, while the rendered rows it owns
+// stop at the row before the fence's own rows begin. Painting the whole span into
+// those few rows would draw the fence body and the trailing paragraph as source
+// AND leave them rendered directly underneath — the reader sees them twice.
+//
+// Clipping keeps the pass's one real invariant: the rows a block owns and the
+// source lines painted into them describe the same part of the document. The
+// lines beyond the cut are not lost to the reader — they belong to the nested
+// block, which is a stop of its own and can be expanded (or, for a code fence,
+// already shows its source).
+//
+// Anchors are strictly increasing in startLine (enforced by
+// mdPreviewBuildSourceMap), so only the immediately following anchor can fall
+// inside this one's span, and the clipped span can never end before it starts.
+func mdPreviewClipRawSpan(anchors []mdPreviewBlockAnchor, block int) mdPreviewBlockAnchor {
+	a := anchors[block]
+	if next := block + 1; next < len(anchors) && anchors[next].startLine <= a.endLine {
+		a.endLine = anchors[next].startLine - 1
+	}
+	return a
+}
+
 // Refusal messages for mdPreviewExpandRefusal. Each says what the reader can do
 // instead, because a hint that only says "no" is barely better than the silent
 // refusal mdPreviewUnanchorableHint's doc comment argues against.
@@ -98,10 +127,17 @@ const (
 //     "paragraph", the same as prose.
 //   - a block whose every source line is blank has no source to show.
 //
+// The blankness question is asked of mdPreviewRawLines rather than of the source
+// text directly, so this function and the pass that paints the rows share ONE
+// definition of blank. They differ: a line holding nothing but a control byte is
+// non-blank as source text and blank once mdPreviewRawLines has dropped it, and
+// two answers to "is this block worth expanding" is exactly the drift the
+// refusal exists to prevent.
+//
 // The two other refusals in the feature — an unaligned map and a cursor sitting
 // on the file-level annotation — are not block properties and are decided by
 // the caller (see mdPreviewToggleRaw).
-func mdPreviewExpandRefusal(a mdPreviewBlockAnchor, lines []diff.DiffLine) string {
+func mdPreviewExpandRefusal(a mdPreviewBlockAnchor, lines []diff.DiffLine, tabSpaces string) string {
 	if a.kind == mdBlockCodeBlock {
 		return mdPreviewExpandCodeHint
 	}
@@ -109,13 +145,10 @@ func mdPreviewExpandRefusal(a mdPreviewBlockAnchor, lines []diff.DiffLine) strin
 		mdPreviewMermaidFenceLine(lines[a.startLine].Content) {
 		return mdPreviewExpandMermaidHint
 	}
-	start, end := max(a.startLine, 0), min(a.endLine, len(lines)-1)
-	for i := start; i <= end; i++ {
-		if lines[i].ChangeType != diff.ChangeDivider && strings.TrimSpace(lines[i].Content) != "" {
-			return ""
-		}
+	if _, ok := mdPreviewRawStopLine(mdPreviewRawLines(lines, a, tabSpaces), -1); !ok {
+		return mdPreviewExpandNothingHint
 	}
-	return mdPreviewExpandNothingHint
+	return ""
 }
 
 // mdPreviewLineAnchor is one painted raw source line's place in the frame,
@@ -131,6 +164,13 @@ func mdPreviewExpandRefusal(a mdPreviewBlockAnchor, lines []diff.DiffLine) strin
 // line needs no translation. block is the expanded block the row belongs to;
 // only one block is ever expanded, but carrying it keeps the stop list's
 // grouping the same shape it already has for annotations.
+//
+// Invariant: every anchor in one map carries the SAME block, because
+// mdPreviewExpandBlock is the only producer and writes its single block argument
+// into all of them. mdPreviewSourceMap.expandedBlock reads it back off the first
+// one, and that answer — not the cursor's expanded flag — is what the frame is
+// actually painted from, so every reader holding a painted map asks it rather
+// than the cursor (see moveMdPreviewCursor's clamp for what disagreeing cost).
 //
 // One source line is one rendered row, so there is no endRow: a line stop's span
 // is the single row.
@@ -149,11 +189,17 @@ type mdPreviewLineAnchor struct {
 // anchors that already account for the expansion and needs no knowledge of it.
 //
 // Nothing is expanded when block is negative (no block selected), the map is not
-// aligned, the block index is out of range, or the block has no source lines to
-// show. In every one of those cases it returns the string it was HANDED, not a
+// aligned, the block index is out of range, the block has no source line the
+// reader could see selected, or the block's own row span does not describe this
+// render. In every one of those cases it returns the string it was HANDED, not a
 // rebuilt copy: mdPreviewScrollCache.forBody compares bodies by value, which is
 // O(1) on a shared backing pointer and a full memcmp on a copy, so a rebuilt
 // no-op string would cost the whole document on every repaint.
+//
+// The source span is CLIPPED at the next block's first source line
+// (mdPreviewClipRawSpan), so a container holding a nested block never paints that
+// block's lines into rows it does not own — see that function for the shape and
+// what going without it looked like on screen.
 //
 // The trailing blank rows of the block's span are kept rather than replaced. A
 // non-last block's span runs to the row before the next block starts, so it
@@ -171,17 +217,23 @@ func mdPreviewExpandBlock(rendered string, srcMap mdPreviewSourceMap, block int,
 	if !srcMap.aligned || block < 0 || block >= len(anchors) {
 		return rendered, srcMap
 	}
-	raw := mdPreviewRawLines(lines, anchors[block], tabSpaces)
-	if len(raw) == 0 {
+	raw := mdPreviewRawLines(lines, mdPreviewClipRawSpan(anchors, block), tabSpaces)
+	if _, ok := mdPreviewRawStopLine(raw, -1); !ok {
+		// no source lines at all, or none the highlight could show: expanding
+		// would blank the block's rows and record no line anchor, leaving the
+		// stop list claiming nothing is expanded over a block painted empty.
 		return rendered, srcMap
 	}
 	rows := strings.Split(rendered, "\n")
-	start := anchors[block].row
-	if start < 0 || start >= len(rows) {
-		return rendered, srcMap // an anchor that does not describe this render; refuse rather than guess
+	start, end := anchors[block].row, anchors[block].endRow
+	if start < 0 || start >= len(rows) || end < start || end >= len(rows) {
+		// an anchor that does not describe this render; refuse rather than guess.
+		// endRow matters as much as row: it is what the replaced-row count and
+		// every later anchor's shift are computed from, so clamping it instead
+		// would silently hand back a map whose rows are off by the difference.
+		return rendered, srcMap
 	}
 
-	end := min(anchors[block].endRow, len(rows)-1)
 	replaced := end - mdPreviewTrailingBlankRows(rows, start, end) - start + 1
 	out := make([]string, 0, len(rows)-replaced+len(raw))
 	out = append(out, rows[:start]...)
@@ -294,6 +346,12 @@ func (m *Model) mdPreviewToggleRaw() {
 // Collapsing is a plain cursor placement: setMdPreviewBlockCursor assigns a
 // fresh mdPreviewCursorState, so expanded goes back to false and the next
 // mdPreviewBody paints the rendered rows again. Nothing has to be un-done.
+//
+// This is the one reader that asks the CURSOR rather than the painted map, and
+// deliberately: it is the escape hatch. Where the two disagree — the cursor says
+// expanded and mdPreviewExpandBlock refused, so the screen shows rendered rows —
+// `r` and `esc` must still be able to clear the flag, or the reader is left with
+// a cursor stuck inside a block that is not expanded on screen.
 func (m *Model) mdPreviewCollapseRaw() bool {
 	if !m.file.markdownPreviewable {
 		return false // preview stuck on for a file renderDiff will not preview
@@ -323,26 +381,29 @@ func (m *Model) mdPreviewExpandTarget(srcMap mdPreviewSourceMap) (block, lineIdx
 		m.preview.hint = mdPreviewExpandFileHint
 		return 0, 0, false
 	}
-	bi := m.mdPreviewCenterBlock(srcMap)
-	if hasStop {
-		bi = stop.ref.block
+	bi := stop.ref.block
+	if !hasStop {
+		// only pay for the center seed when there is no cursor to read the block
+		// off: mdPreviewCenterBlock builds the whole stop list.
+		bi = m.mdPreviewCenterBlock(srcMap)
 	}
 	if bi < 0 || bi >= len(anchors) {
 		m.preview.hint = mdPreviewUnanchorableHint
 		return 0, 0, false
 	}
-	if hint := mdPreviewExpandRefusal(anchors[bi], m.file.lines); hint != "" {
+	span := mdPreviewClipRawSpan(anchors, bi)
+	if hint := mdPreviewExpandRefusal(span, m.file.lines, m.cfg.tabSpaces); hint != "" {
 		m.preview.hint = hint
 		return 0, 0, false
 	}
 
-	want := -1 // no source line is index -1, so this asks for the block's first
+	want := mdPreviewNoWantedLine
 	if hasStop && stop.ref.onAnnot {
-		if idx, found := m.mdPreviewLineIndex(stop.line, stop.changeType); found {
-			want = idx
-		}
+		want = m.mdPreviewWantedLine(stop)
 	}
-	raw := mdPreviewRawLines(m.file.lines, anchors[bi], m.cfg.tabSpaces)
+	// the same clipped span the pass will paint, so the line `r` lands on is
+	// always a line the frame actually has a row for.
+	raw := mdPreviewRawLines(m.file.lines, span, m.cfg.tabSpaces)
 	lineIdx, ok = mdPreviewRawStopLine(raw, want)
 	if !ok {
 		// mdPreviewExpandRefusal already rules this out for every block it
@@ -354,11 +415,31 @@ func (m *Model) mdPreviewExpandTarget(srcMap mdPreviewSourceMap) (block, lineIdx
 	return bi, lineIdx, true
 }
 
+// mdPreviewNoWantedLine is "no line in particular", the value that asks
+// mdPreviewRawStopLine and mdPreviewSourceMap.lineStopFor for a block's FIRST
+// stoppable raw line. It is -1 because no source line is index -1, so one walk
+// serves both "land on this line" and "land on the first one".
+const mdPreviewNoWantedLine = -1
+
+// mdPreviewWantedLine is the source-line index the annotation stop names, or
+// mdPreviewNoWantedLine when the file no longer has that line — an orphan, which
+// has no line for the cursor to return to.
+//
+// Both callers that place the cursor on a raw line after acting on a comment
+// (mdPreviewExpandTarget above and mdPreviewCursorAfterDelete, mdpreview_stops.go)
+// need exactly this, and asking it in two places is how the two would drift.
+func (m Model) mdPreviewWantedLine(stop mdPreviewStop) int {
+	if idx, ok := m.mdPreviewLineIndex(stop.line, stop.changeType); ok {
+		return idx
+	}
+	return mdPreviewNoWantedLine
+}
+
 // mdPreviewRawStopLine picks the source line a fresh expansion stops on: want
 // when the block paints it as a non-blank raw row, and the block's first
-// non-blank raw line otherwise. ok is false when the block has no stoppable raw
-// line at all — every one of its lines is blank, so every painted row would be
-// invisible to the highlight.
+// non-blank raw line otherwise (see mdPreviewNoWantedLine). ok is false when the
+// block has no stoppable raw line at all — every one of its lines is blank, so
+// every painted row would be invisible to the highlight.
 func mdPreviewRawStopLine(raw []mdPreviewRawLine, want int) (lineIdx int, ok bool) {
 	first, found := 0, false
 	for _, rl := range raw {
@@ -376,15 +457,14 @@ func mdPreviewRawStopLine(raw []mdPreviewRawLine, want int) (lineIdx int, ok boo
 }
 
 // mdPreviewMermaidFenceLine reports whether content is a fence opening whose
-// info string names mermaid. It reads the info string exactly the way
-// joinWithMermaidFences does — first whitespace-delimited token after the fence
-// marker, lowercased — so the two agree on which fences are diagrams.
+// info string names mermaid. It reads the info string through mdFenceLang, the
+// same helper joinWithMermaidFences reads it through, so the two cannot disagree
+// about which fences are diagrams.
 func mdPreviewMermaidFenceLine(content string) bool {
 	trimmed := strings.TrimSpace(content)
 	_, n := mdFencePrefix(trimmed)
 	if n < 3 {
 		return false
 	}
-	fields := strings.Fields(trimmed[n:])
-	return len(fields) > 0 && strings.EqualFold(fields[0], "mermaid")
+	return mdFenceLang(trimmed, n) == "mermaid"
 }

@@ -153,8 +153,9 @@ func (sm mdPreviewSourceMap) lineAt(row int) (mdPreviewLineAnchor, bool) {
 
 // lineStopFor picks which raw source line of block the cursor should land on:
 // want when that line is one of the block's stoppable raw rows, and the block's
-// first such row otherwise. ok is false when the block paints no stoppable raw
-// row at all — it is not the expanded block, or every one of its lines is blank.
+// first such row otherwise (see mdPreviewNoWantedLine, mdpreview_expand.go). ok
+// is false when the block paints no stoppable raw row at all — it is not the
+// expanded block, or every one of its lines is blank.
 //
 // It is mdPreviewRawStopLine (mdpreview_expand.go) asked of the PAINTED map
 // rather than of freshly prepared raw lines. A caller that already holds the map
@@ -428,16 +429,14 @@ func (m *Model) mdPreviewDeleteAnnotation() tea.Cmd {
 // line is the fallback for a comment whose line is not a stoppable raw row: an
 // orphan, or a blank line, which paints a row but gets no anchor.
 func (m *Model) mdPreviewCursorAfterDelete(stop mdPreviewStop, srcMap mdPreviewSourceMap) {
-	bi := m.mdPreviewExpandedBlock()
+	// the painted map's answer, not the cursor's: srcMap is the frame the reader
+	// deleted from, and its raw-line rows are the ones the cursor can land on
+	bi := srcMap.expandedBlock()
 	if bi < 0 || bi != stop.ref.block {
 		m.setMdPreviewBlockCursor(max(stop.ref.block, 0))
 		return
 	}
-	want := -1 // no source line is index -1, so this asks for the block's first
-	if idx, ok := m.mdPreviewLineIndex(stop.line, stop.changeType); ok {
-		want = idx
-	}
-	lineIdx, ok := srcMap.lineStopFor(bi, want)
+	lineIdx, ok := srcMap.lineStopFor(bi, m.mdPreviewWantedLine(stop))
 	if !ok {
 		m.setMdPreviewBlockCursor(bi) // an expanded block with no stoppable raw row; collapse rather than aim at nothing
 		return
@@ -454,11 +453,17 @@ func (m *Model) mdPreviewCursorAfterDelete(stop mdPreviewStop, srcMap mdPreviewS
 // is cutting. A cursor whose ref no longer resolves is cleared rather than
 // clamped to a neighbor — there is no honest neighbor for a stop that stopped
 // existing.
+//
+// Clearing the cursor is also what COLLAPSES an expanded block, so the body has
+// to be painted again afterwards: the first body was composed while the cursor
+// still reported expanded, and painting it would leave raw source on screen for a
+// model that no longer says anything is expanded.
 func (m *Model) repaintMdPreviewAfterStopChange() {
 	body, srcMap := m.mdPreviewBody()
 	stop, ok := m.mdPreviewCursorStop(srcMap)
 	if !ok {
 		m.clearMdPreviewBlockCursor()
+		body, srcMap = m.mdPreviewBody()
 	}
 	// content first, offset second, for the reason moveMdPreviewCursor gives:
 	// SetYOffset clamps against the viewport's own content buffer.

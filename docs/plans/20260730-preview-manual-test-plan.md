@@ -359,6 +359,39 @@ block (section 9.3's list is a good starting point; add a second comment to the 
 - [ ] after all of this press `P` to leave preview — source view shows exactly the comments that
       survived, on the same lines, and `-o` output (press `O`) matches
 
+### 9.8 Raw source expansion (`r`)
+
+Press `r` on the block the preview cursor marks and that block is redrawn as its raw markdown
+source, one rendered row per source line. `j`/`k` then step between those source lines, `a`
+annotates the exact line, and `r` again (or `esc`) puts the block back.
+
+Open `revdiff --only docs/plans/completed/20260811-preview-raw-block-expansion.md` and press `P`.
+These steps were never run by hand — the implementation run was unattended — so treat every one of
+them as unverified until it is ticked here.
+
+- [ ] press `j` a few times to place the cursor on that file's own tasks table
+- [ ] press `r` — the table becomes its markdown source, one row per line, and the rows below it
+      move by the height difference with nothing else on the document changing
+- [ ] the highlighted source line's bar spans the whole pane, not just the width of its text
+- [ ] `j` down a few source lines, `a`, type something, Enter — the input appears UNDER the line you
+      selected, not at the bottom of the table, and the saved comment stays there
+- [ ] `j` at the LAST source line of the block stays there rather than stepping onto the next block,
+      and `k` at the first does the same
+- [ ] press `right` / `left` — the raw rows pan and show `«` / `»`, and the pan reaches the end of
+      the longest raw line
+- [ ] press `esc` — the table is rendered again and the comment is back under the block
+- [ ] press `r` on a mermaid diagram and on a code fence — a hint appears in the status bar and
+      nothing changes on screen
+- [ ] press `r` on a bullet-list item that contains a fenced code block (this plan file has one) —
+      the item's own lines up to the fence show as source, the fence body is NOT drawn twice, and
+      nothing below the item is duplicated
+- [ ] press `O` to flush and check the output file — the line number is the source line you
+      selected, and the entry is indistinguishable from one made with `P` off
+- [ ] with a block expanded, scroll with `J`/`K` past the block's own rows while part of the block
+      is still visible — the block stays expanded and the highlight re-seats inside it. Scroll until
+      the whole block is off screen — the expansion ends
+- [ ] press `r` with preview OFF (press `P` first) — nothing happens
+
 ## Notes
 
 Anything you want changed, annotate on the line. The two open questions I would most like an

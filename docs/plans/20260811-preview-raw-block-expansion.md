@@ -392,8 +392,16 @@ Only one upstream-owned file is touched: `app/keymap/keymap.go`, four hunks, all
 action". `app/ui/model.go` is **not** touched — `dispatchAction` already routes every action through
 `handleMdPreviewAction` while preview is on, and both the allowlist and the handler live in
 fork-owned `mdpreview.go`. An action that reaches `dispatchResolvedAction` outside preview mode and
-matches no case falls through to the pane handlers and does nothing, so `r` in source view is a
-silent no-op with no new guard (verified at `app/ui/model.go:1132`, the `default:` arm).
+matches no case falls through to the pane handlers, so `r` in source view needs no new guard
+(verified at `app/ui/model.go:1132`, the `default:` arm).
+
+⚠️ Correction, made during the review pass after implementation: "falls through to the pane
+handlers" is not the same as "does nothing", and this section originally said it was. The pane
+handlers' own default arms do run — with the file tree focused they clear `pendingAnnotJump` and
+`nav.pendingHunkJump`, and with the markdown TOC pane focused they run `EnsureVisible` +
+`syncDiffToTOCCursor`, which reassigns `m.nav.diffCursor` and top-aligns the viewport. That is what
+any unbound key already does, so it is not a regression and the conclusion (no new guard) stands —
+but the guarantee as written was wrong. PATCH.md carries the corrected wording.
 
 Everything else lands in fork-owned files plus one new pair, so the rebase surface grows by four
 hunks in one file.
@@ -762,6 +770,12 @@ section.
 - [x] Manual: press `O` to flush, then check the output file — confirm the line number is the
   source line selected and the entry is indistinguishable from one made with `P` off. (skipped — not
   automatable; covered by the "raw-line annotation is identical to the source-view one" test)
+
+⚠️ Every one of the seven manual steps above was SKIPPED, not run. The review pass moved them into
+`docs/plans/20260730-preview-manual-test-plan.md` §9.8 (unticked, plus three steps the original list
+did not have), which is where they live durably — this plan is a record of how the work happened,
+not a place anyone will look for a test to run. The automated tests named in each bracket are real
+and do cover the behavior; they are not a substitute for looking at the screen.
 
 ### Task 12: [Final] Update documentation
 

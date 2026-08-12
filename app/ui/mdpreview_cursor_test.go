@@ -448,10 +448,31 @@ func TestMdPreviewEsc_FallsThroughWhenNothingIsExpanded(t *testing.T) {
 	m := toggleRawModel(t)
 	m.setMdPreviewBlockCursor(1)
 	require.Equal(t, -1, m.mdPreviewExpandedBlock(), "fixture sanity: nothing is expanded")
+	before := m.preview
 
-	_, _, handled := m.handleMdPreviewAction(keymap.ActionDismiss)
+	model, _, handled := m.handleMdPreviewAction(keymap.ActionDismiss)
 
 	assert.False(t, handled, "esc must fall through when there is no expansion to collapse")
+	// "nothing is mutated on that false path" is load-bearing, not incidental:
+	// dispatchAction DISCARDS the returned model when handled is false, so a
+	// mutation made here would be silently thrown away rather than applied.
+	got := model.(Model)
+	assert.Equal(t, before, got.preview, "the false path must leave the preview state untouched")
+	assert.Equal(t, m.layout.scrollX, got.layout.scrollX)
+}
+
+// TestSetMdPreviewBlockCursor_NegativeClears: callers that computed "no block"
+// pass the result through unguarded, so a negative index has to clear rather
+// than place a cursor on a block that does not exist.
+func TestSetMdPreviewBlockCursor_NegativeClears(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	require.NotNil(t, mustMdPreviewRef(t, m))
+
+	m.setMdPreviewBlockCursor(-1)
+
+	_, ok := m.mdPreviewCursorRef()
+	assert.False(t, ok, "a negative block index must take the cursor off every stop")
 }
 
 // TestMoveMdPreviewCursor_ClampsAtTheLastRawLineOfAnExpandedBlock is the

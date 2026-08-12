@@ -205,8 +205,10 @@ func TestMdPreviewBody_CollapsedReturnsTheCachedRenderUntouched(t *testing.T) {
 func TestMdPreviewBody_ExpansionMissesTheScrollCache(t *testing.T) {
 	m, _, _ := mdPreviewExpandedCursorModel(-1)
 
+	// warmed through mdPreviewMaxOffset, the production reader of the memo, so
+	// this pins the path a pan actually takes rather than a hand-primed cache
 	collapsed, _ := m.mdPreviewBody()
-	collapsedWidest := m.mdPreviewCache.scroll.widestOf(collapsed)
+	collapsedWidest := m.mdPreviewMaxOffset(collapsed, 0)
 	require.True(t, m.mdPreviewCache.scroll.haveWidest, "fixture sanity: the collapsed body must warm the memo")
 
 	m.preview.cursor = mdPreviewCursorState{
@@ -216,7 +218,7 @@ func TestMdPreviewBody_ExpansionMissesTheScrollCache(t *testing.T) {
 	expanded, _ := m.mdPreviewBody()
 	require.NotEqual(t, collapsed, expanded, "fixture sanity: expansion must change the body")
 
-	expandedWidest := m.mdPreviewCache.scroll.widestOf(expanded)
+	expandedWidest := m.mdPreviewMaxOffset(expanded, 0)
 
 	assert.Equal(t, expanded, m.mdPreviewCache.scroll.body, "the memo must re-key on the expanded body")
 	assert.Equal(t, mdPreviewMaxLineWidth(expanded), expandedWidest,

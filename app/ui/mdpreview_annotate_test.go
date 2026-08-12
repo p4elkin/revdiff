@@ -887,9 +887,12 @@ func TestMdPreviewSpliceRow_CollapsedDocumentSplicesAtTheBlockEndRow(t *testing.
 func TestMdPreviewSpliceRow_ExpandedBlockSplicesAtTheRawLineItself(t *testing.T) {
 	_, _, sm := mdPaintExpandedFixture()
 
-	for i, wantRow := range map[int]int{2: 2, 3: 3, 4: 4} {
-		row, block := sm.spliceRow(i, true)
-		assert.Equal(t, wantRow, row, "a comment on raw line %d belongs under that line, not at the block's end", i)
+	// a slice, not a map: a map range is unordered, so a failure would report a
+	// different case on every run
+	for _, tc := range []struct{ idx, wantRow int }{{2, 2}, {3, 3}, {4, 4}} {
+		row, block := sm.spliceRow(tc.idx, true)
+		assert.Equal(t, tc.wantRow, row,
+			"a comment on raw line %d belongs under that line, not at the block's end", tc.idx)
 		assert.Equal(t, 1, block, "the block is the line anchor's own, so the runs stay grouped by ascending row")
 	}
 
@@ -1010,14 +1013,15 @@ func TestMdPreviewPaintAnnotations_LiveInputPaintsUnderTheExpandedRawLine(t *tes
 	painted, _ := m.mdPreviewPaintAnnotationsTracked(rendered, sm)
 
 	rows := strings.Split(ansi.Strip(painted), "\n")
-	at := -1
+	at, found := 0, false
 	for i, r := range rows {
 		if strings.Contains(r, "typing now") {
-			at = i
+			at, found = i, true
 			break
 		}
 	}
-	require.Positive(t, at, "the input being typed must be visible before it is saved")
+	require.True(t, found, "the input being typed must be visible before it is saved")
+	require.GreaterOrEqual(t, at, 1, "and must be painted under a row, never as the document's first")
 	assert.Equal(t, "para two", rows[at-1],
 		"watching the text you type detach from the line you aimed at is what per-line splicing exists to prevent")
 }
@@ -1141,6 +1145,71 @@ func TestMdPreviewDeleteAnnotation_StaysOnTheRawLineInsideAnExpandedBlock(t *tes
 	_, sm := m.mdPreviewBody()
 	_, ok := sm.stopAt(ref)
 	assert.True(t, ok, "and that stop must really exist in the repainted map")
+}
+
+// TestMdPreviewDeleteAnnotation_FallsBackToTheBlocksFirstRawLine covers
+// lineStopFor's fallback arm: the deleted comment sat on a source line that
+// paints no stoppable raw row, so there is no "the line it was attached to" to
+// return to and the block's first raw line answers instead.
+func TestMdPreviewDeleteAnnotation_FallsBackToTheBlocksFirstRawLine(t *testing.T) {
+	// a paragraph whose middle source line is blank: it paints a row but gets no
+	// anchor, so a comment on it is inside the block yet on no raw-line stop.
+	m := mdPreviewStyledModel(t, "# Title\n\nAlpha one.\nAlpha two.\n\ntail\n")
+	m.file.lines[3].Content = "   "
+	annotateLine(m, 4, "on the blank source line") // store Line is 1-based: index 3
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the paragraph must expand")
+
+	_, sm := m.mdPreviewBody()
+	require.Len(t, sm.lines, 1, "fixture sanity: only the non-blank source line gets an anchor")
+	m.moveMdPreviewCursor(1) // step onto the comment, which keeps the block expanded
+	require.True(t, mustMdPreviewRef(t, m).onAnnot, "fixture sanity: the cursor must be on the comment")
+
+	m.mdPreviewDeleteAnnotation()
+
+	assert.Equal(t, 0, m.store.Count())
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "deleting must not collapse the block")
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 2}, mustMdPreviewRef(t, m),
+		"with no stoppable row for the comment's own line, the block's first raw line answers")
+}
+
+// TestMdPreviewDeleteAnnotation_StoreNoLongerHoldsIt: the cursor names a stop
+// whose annotation is already gone from the store. Nothing is removed, so `d`
+// says so rather than repainting an unchanged frame silently.
+func TestMdPreviewDeleteAnnotation_StoreNoLongerHoldsIt(t *testing.T) {
+	m := stopsModel(t)
+	annotateLine(m, 3, "on alpha")
+	_, sm := m.mdPreviewBody()
+	stop, ok := sm.stopAt(mdPreviewStopRef{block: 1, onAnnot: true, annot: 0})
+	require.True(t, ok, "fixture sanity: the comment must be a stop")
+	m.setMdPreviewCursorRef(stop.ref)
+	require.True(t, m.store.Delete("plan.md", stop.line, stop.changeType), "removed behind the cursor's back")
+
+	cmd := m.mdPreviewDeleteAnnotation()
+
+	assert.Nil(t, cmd)
+	assert.Equal(t, mdPreviewDeleteNeedsAnnotationHint, m.preview.hint)
+}
+
+// TestMdPreviewClickDiff_OnANonAnchoredRowOfAnExpandedBlockCollapsesIt pins the
+// accepted rough edge documented on mdPreviewClickDiff: a click on a row of an
+// expanded block that carries no line anchor — a blank source line, or a comment
+// spliced between raw lines — falls through to anchorAtRow and collapses.
+func TestMdPreviewClickDiff_OnANonAnchoredRowOfAnExpandedBlockCollapsesIt(t *testing.T) {
+	m := mdPreviewStyledModel(t, "# Title\n\nAlpha one.\nAlpha two.\n\ntail\n")
+	m.file.lines[3].Content = "   " // paints a row, gets no anchor
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	_, sm := m.mdPreviewBody()
+	require.Len(t, sm.lines, 1, "fixture sanity: only the non-blank source line gets an anchor")
+	blank := sm.lines[0].row + 1
+
+	result, _ := m.mdPreviewClickDiff(blank - m.layout.viewport.YOffset + m.diffTopRow())
+
+	got := result.(Model)
+	assert.Equal(t, -1, got.mdPreviewExpandedBlock(), "a click the map cannot resolve to a line still collapses")
+	assert.Equal(t, mdPreviewStopRef{block: 1}, mustMdPreviewRef(t, got), "and lands on the block around it")
 }
 
 // TestMdPreviewClickDiff_OnARawLineAnnotatesThatLine is the mouse half of `a` on

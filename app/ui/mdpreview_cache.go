@@ -350,15 +350,19 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 		return rendered
 	}
 
-	// pad the bar out to the pane only on a panned frame. There, cutMdPreviewLine
-	// has cut each row at wherever its own content ended, so a row that does not
-	// continue to the right is shorter than the pane and the bar would stop short
-	// of the edge — ragged, in exactly the mode (a wide diagram or table) panning
-	// exists for. Unpanned, glamour has already padded prose rows to its own wrap
-	// width and padding further would widen every highlighted row past the shape
-	// the rest of the document has.
+	// pad the bar out to the pane on a panned frame, and on a raw source line in
+	// any frame. Panned, cutMdPreviewLine has cut each row at wherever its own
+	// content ended, so a row that does not continue to the right is shorter than
+	// the pane and the bar would stop short of the edge — ragged, in exactly the
+	// mode (a wide diagram or table) panning exists for. A raw row is short for a
+	// different reason and needs the same fix: mdPreviewExpandBlock paints the
+	// source line and nothing else, so unlike a glamour row it was never padded to
+	// the wrap width, and an 18-column line would otherwise get an 18-column bar
+	// where every rendered block gets a full-width one. Unpanned rendered rows are
+	// left alone: glamour has already padded them, and padding further would widen
+	// every highlighted row past the shape the rest of the document has.
 	padTo := 0
-	if m.layout.scrollX > 0 {
+	if m.layout.scrollX > 0 || stop.ref.onLine {
 		padTo = m.mdPreviewCutWidth()
 	}
 	rows := strings.Split(rendered, "\n")
