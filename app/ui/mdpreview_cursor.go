@@ -137,6 +137,26 @@ func (m *Model) setMdPreviewBlockCursor(bi int) {
 	m.setMdPreviewCursorRef(mdPreviewStopRef{block: bi})
 }
 
+// setMdPreviewLineCursor places the cursor on one raw source line of block bi
+// and marks that block expanded. lineIdx is the index into m.file.lines the row
+// was painted from (mdPreviewLineAnchor.lineIdx), which is what the ref carries
+// — see mdPreviewStopRef for why a line's identity is its source index and not
+// its position among the block's rows.
+//
+// This is the only writer of expanded=true in production. Every other placement
+// assigns a fresh mdPreviewCursorState literal and therefore collapses, which is
+// what makes "one block expanded at a time, and it is always the block the
+// cursor is in" hold without a single line of invalidation code.
+func (m *Model) setMdPreviewLineCursor(bi, lineIdx int) {
+	m.preview.cursor = mdPreviewCursorState{
+		set:      true,
+		ref:      mdPreviewStopRef{block: bi, onLine: true, line: lineIdx},
+		file:     m.file.name,
+		seq:      m.file.loadSeq,
+		expanded: true,
+	}
+}
+
 // clearMdPreviewBlockCursor takes the cursor off every stop, so nothing is
 // highlighted until the reader moves it again.
 func (m *Model) clearMdPreviewBlockCursor() {

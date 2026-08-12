@@ -226,6 +226,129 @@ func mdPreviewTrailingBlankRows(rows []string, start, end int) int {
 	return n
 }
 
+// mdPreviewExpandFileHint is the refusal for `r` pressed with the cursor on the
+// file-level annotation. That stop owns no block (see mdPreviewFileStopBlock),
+// so there is no source to show; the message names the way to a block rather
+// than only saying no, the same as the block-level refusals above.
+const mdPreviewExpandFileHint = "Select a block with j/k to show its source"
+
+// mdPreviewToggleRaw is `r` inside markdown preview: redraw the block the cursor
+// is on as its raw markdown source, or collapse it back when it already is.
+//
+// Collapsing is a plain re-place of the cursor on the block's own stop:
+// setMdPreviewBlockCursor writes a fresh mdPreviewCursorState, whose expanded is
+// false, and the next mdPreviewBody therefore paints the rendered rows again.
+// Nothing has to be un-done, which is the whole reason expansion lives on the
+// cursor.
+//
+// Expanding resolves the target the same way `a` does, so the key that shows the
+// source and the key that comments on it can never aim at different things:
+// the cursor's own block when one is placed, and otherwise a fresh seed at the
+// block nearest the viewport center (mdPreviewCenterBlock). From an ANNOTATION
+// stop it expands the owning block and lands on the raw line that annotation is
+// attached to — the reader is looking at a comment on a line, and `r` should show
+// them that line — falling back to the block's first raw line when the
+// annotation's line is not one of the block's stoppable rows (an orphan, or a
+// blank line, which paints a row but gets no anchor).
+//
+// scrollX is reset in BOTH directions, following toggleMarkdownPreview's own
+// rule for the same reason: the rendered and the raw form of a block have
+// different natural widths, and showing a block's source starting at column 40
+// is not "show me this block's source".
+//
+// Every refusal sets m.preview.hint. A silent refusal is indistinguishable from
+// an unbound key — the argument mdPreviewUnanchorableHint's doc comment already
+// makes for `a`, unchanged here.
+func (m *Model) mdPreviewToggleRaw() {
+	if !m.file.markdownPreviewable {
+		return // preview stuck on for a file renderDiff will not preview; see panMarkdownPreview
+	}
+	if bi := m.mdPreviewExpandedBlock(); bi >= 0 {
+		m.setMdPreviewBlockCursor(bi)
+		m.layout.scrollX = 0
+		m.repaintMdPreviewAfterStopChange()
+		return
+	}
+	_, srcMap := m.mdPreviewBody()
+	bi, lineIdx, ok := m.mdPreviewExpandTarget(srcMap)
+	if !ok {
+		return // mdPreviewExpandTarget set the hint that says why
+	}
+	m.setMdPreviewLineCursor(bi, lineIdx)
+	m.layout.scrollX = 0
+	// repaint through the shared stop-change tail: the block's height just
+	// changed, so the frame has to be recomposed from a freshly painted body
+	// rather than patched, and the viewport has to follow the new stop.
+	m.repaintMdPreviewAfterStopChange()
+}
+
+// mdPreviewExpandTarget resolves what `r` expands and where it lands the cursor:
+// the block, and the index into m.file.lines of the raw line to stop on. ok is
+// false when expansion is refused, in which case the status-bar hint saying why
+// has already been set.
+func (m *Model) mdPreviewExpandTarget(srcMap mdPreviewSourceMap) (block, lineIdx int, ok bool) {
+	anchors := srcMap.blocks()
+	if !srcMap.aligned || len(anchors) == 0 {
+		m.preview.hint = mdPreviewUnanchorableHint
+		return 0, 0, false
+	}
+	stop, hasStop := m.mdPreviewCursorStop(srcMap)
+	if hasStop && stop.ref.block == mdPreviewFileStopBlock {
+		m.preview.hint = mdPreviewExpandFileHint
+		return 0, 0, false
+	}
+	bi := m.mdPreviewCenterBlock(srcMap)
+	if hasStop {
+		bi = stop.ref.block
+	}
+	if bi < 0 || bi >= len(anchors) {
+		m.preview.hint = mdPreviewUnanchorableHint
+		return 0, 0, false
+	}
+	if hint := mdPreviewExpandRefusal(anchors[bi], m.file.lines); hint != "" {
+		m.preview.hint = hint
+		return 0, 0, false
+	}
+
+	want := -1 // no source line is index -1, so this asks for the block's first
+	if hasStop && stop.ref.onAnnot {
+		if idx, found := m.mdPreviewLineIndex(stop.line, stop.changeType); found {
+			want = idx
+		}
+	}
+	raw := mdPreviewRawLines(m.file.lines, anchors[bi], m.cfg.tabSpaces)
+	lineIdx, ok = mdPreviewRawStopLine(raw, want)
+	if !ok {
+		// mdPreviewExpandRefusal already rules this out for every block it
+		// passes; keep the guard so a future refusal change cannot leave the
+		// cursor on a line stop no map can resolve.
+		m.preview.hint = mdPreviewExpandNothingHint
+		return 0, 0, false
+	}
+	return bi, lineIdx, true
+}
+
+// mdPreviewRawStopLine picks the source line a fresh expansion stops on: want
+// when the block paints it as a non-blank raw row, and the block's first
+// non-blank raw line otherwise. ok is false when the block has no stoppable raw
+// line at all — every one of its lines is blank, so every painted row would be
+// invisible to the highlight.
+func mdPreviewRawStopLine(raw []mdPreviewRawLine, want int) (lineIdx int, ok bool) {
+	first, found := 0, false
+	for _, rl := range raw {
+		if rl.blank {
+			continue // paints a row, gets no anchor: a stop there would be invisible
+		}
+		if rl.lineIdx == want {
+			return want, true
+		}
+		if !found {
+			first, found = rl.lineIdx, true
+		}
+	}
+	return first, found
+}
+
 // mdPreviewMermaidFenceLine reports whether content is a fence opening whose
 // info string names mermaid. It reads the info string exactly the way
 // joinWithMermaidFences does — first whitespace-delimited token after the fence

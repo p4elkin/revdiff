@@ -5,10 +5,13 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/umputun/revdiff/app/annotation"
 	"github.com/umputun/revdiff/app/diff"
+	"github.com/umputun/revdiff/app/keymap"
 )
 
 func TestMdPreviewRawLines_WholeSpanInOrder(t *testing.T) {
@@ -293,6 +296,218 @@ func TestMdPreviewExpandBlock_AnchorOutsideTheRenderIsRefused(t *testing.T) {
 	got, gotMap := mdPreviewExpandBlock(rendered, sm, 1, lines, "    ")
 	assert.True(t, sameStringValue(rendered, got))
 	assert.Equal(t, sm, gotMap)
+}
+
+// toggleRawDoc is the fixture for the `r` tests: a heading (block 0), a
+// two-source-line paragraph (block 1) and a fenced code block (block 2), which
+// is the one block expansion refuses by kind.
+const toggleRawDoc = "# Title\n\nAlpha line one.\nAlpha line two.\n\n```go\nfmt.Println(1)\n```\n"
+
+// toggleRawModel is toggleRawDoc in a styled preview model, with the block shape
+// the tests below name asserted once here rather than in each of them.
+func toggleRawModel(t *testing.T) Model {
+	t.Helper()
+	m := mdPreviewStyledModel(t, toggleRawDoc)
+	_, sm := m.mdPreviewBody()
+	require.True(t, sm.aligned, "fixture sanity: toggleRawDoc must align")
+	require.Len(t, sm.blocks(), 3, "fixture sanity: heading, paragraph, code fence")
+	require.Equal(t, 2, sm.blocks()[1].startLine, "fixture sanity: the paragraph starts at source line 2")
+	require.Equal(t, mdBlockCodeBlock, sm.blocks()[2].kind, "fixture sanity: block 2 is the code fence")
+	return m
+}
+
+// TestMdPreviewToggleRaw_ExpandsTheCursorBlock is the headline: `r` on a block
+// redraws it as its source, one row per line, and drops the cursor onto the
+// first of those lines so j/k and `a` work at line level straight away.
+func TestMdPreviewToggleRaw_ExpandsTheCursorBlock(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+
+	m.mdPreviewToggleRaw()
+
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "the block the cursor was on must now be drawn as source")
+	ref, ok := m.mdPreviewCursorRef()
+	require.True(t, ok, "expanding must leave the cursor placed")
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 2}, ref,
+		"the cursor must land on the block's first raw source line")
+
+	body, sm := m.mdPreviewBody()
+	rows := strings.Split(ansi.Strip(body), "\n")
+	require.Len(t, sm.lines, 2, "the paragraph's two source lines must each have painted a row")
+	for _, la := range sm.lines {
+		require.Less(t, la.row, len(rows))
+		assert.Equal(t, m.file.lines[la.lineIdx].Content, rows[la.row],
+			"a raw row must be the source line and nothing else — no prefix, no gutter")
+	}
+}
+
+// TestMdPreviewToggleRaw_SecondPressCollapses pins the toggle half: `r` again
+// puts the block back and leaves the cursor on the block's own stop, so the
+// reader is where they started rather than nowhere.
+func TestMdPreviewToggleRaw_SecondPressCollapses(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock())
+
+	m.mdPreviewToggleRaw()
+
+	assert.Equal(t, -1, m.mdPreviewExpandedBlock(), "the second press must collapse the block")
+	ref, ok := m.mdPreviewCursorRef()
+	require.True(t, ok, "collapsing must leave the cursor on the block, not clear it")
+	assert.Equal(t, mdPreviewStopRef{block: 1}, ref)
+
+	_, sm := m.mdPreviewBody()
+	assert.Empty(t, sm.lines, "a collapsed document paints no raw rows")
+}
+
+// TestMdPreviewToggleRaw_SeedsAtTheViewportCenter covers `r` pressed with
+// nothing selected — the state every preview session starts in. It seeds exactly
+// where `a` would, so the two keys can never aim at different blocks.
+func TestMdPreviewToggleRaw_SeedsAtTheViewportCenter(t *testing.T) {
+	m := mdPreviewStyledModel(t, stopsDoc)
+	_, sm := m.mdPreviewBody()
+	want := m.mdPreviewCenterBlock(sm)
+	require.GreaterOrEqual(t, want, 0, "fixture sanity: the center seed must resolve a block")
+	_, hasCursor := m.mdPreviewCursorRef()
+	require.False(t, hasCursor, "fixture sanity: nothing is selected yet")
+
+	m.mdPreviewToggleRaw()
+
+	assert.Equal(t, want, m.mdPreviewExpandedBlock(), "`r` must expand the block `a` would have annotated")
+	ref, ok := m.mdPreviewCursorRef()
+	require.True(t, ok)
+	assert.True(t, ref.onLine, "and land on one of its raw lines")
+}
+
+// TestMdPreviewToggleRaw_FromAnnotationStopLandsOnTheAnnotatedLine: the reader
+// is looking at a comment on a line, so `r` shows them that line rather than the
+// top of the block it happens to sit in.
+func TestMdPreviewToggleRaw_FromAnnotationStopLandsOnTheAnnotatedLine(t *testing.T) {
+	m := toggleRawModel(t)
+	annotateLine(m, 4, "on alpha line two") // store Line is 1-based: source index 3
+	m.setMdPreviewCursorRef(mdPreviewStopRef{block: 1, onAnnot: true})
+	_, sm := m.mdPreviewBody()
+	_, ok := m.mdPreviewCursorStop(sm)
+	require.True(t, ok, "fixture sanity: the annotation stop must resolve")
+
+	m.mdPreviewToggleRaw()
+
+	ref, ok := m.mdPreviewCursorRef()
+	require.True(t, ok)
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 3}, ref,
+		"`r` on a comment must expand its block and land on the line the comment is attached to")
+}
+
+// TestMdPreviewToggleRaw_RefusesTheFileLevelStop: the file-level annotation owns
+// no block, so there is no source to show. The refusal says how to reach one.
+func TestMdPreviewToggleRaw_RefusesTheFileLevelStop(t *testing.T) {
+	m := toggleRawModel(t)
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 0, Type: "", Comment: "about the whole file"})
+	m.setMdPreviewCursorRef(mdPreviewStopRef{block: mdPreviewFileStopBlock, onAnnot: true})
+
+	m.mdPreviewToggleRaw()
+
+	assert.Equal(t, mdPreviewExpandFileHint, m.preview.hint)
+	assert.Equal(t, -1, m.mdPreviewExpandedBlock(), "nothing may expand")
+}
+
+// TestMdPreviewToggleRaw_RefusesACodeFence proves the block-level refusals reach
+// the key: a code fence already shows its own source, and the cursor stays where
+// it was rather than being moved by a press that changed nothing.
+func TestMdPreviewToggleRaw_RefusesACodeFence(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(2)
+
+	m.mdPreviewToggleRaw()
+
+	assert.Equal(t, mdPreviewExpandCodeHint, m.preview.hint)
+	assert.Equal(t, -1, m.mdPreviewExpandedBlock())
+	ref, ok := m.mdPreviewCursorRef()
+	require.True(t, ok)
+	assert.Equal(t, mdPreviewStopRef{block: 2}, ref, "a refused press must not move the cursor")
+}
+
+// TestMdPreviewToggleRaw_RefusesAnUnanchorableDocument: a document the map
+// cannot anchor has no block to expand, and a silent refusal there would be
+// indistinguishable from an unbound key.
+func TestMdPreviewToggleRaw_RefusesAnUnanchorableDocument(t *testing.T) {
+	m := mdPreviewStyledModel(t, "")
+	_, sm := m.mdPreviewBody()
+	require.Empty(t, sm.blocks(), "fixture sanity: an empty document anchors nothing")
+
+	m.mdPreviewToggleRaw()
+
+	assert.Equal(t, mdPreviewUnanchorableHint, m.preview.hint)
+	assert.Equal(t, -1, m.mdPreviewExpandedBlock())
+}
+
+// TestMdPreviewToggleRaw_ResetsTheHorizontalPan: the rendered and the raw form of
+// a block have different natural widths, so showing the source starting at
+// column 40 is not "show me this block's source". Both directions, matching
+// toggleMarkdownPreview's own rule.
+func TestMdPreviewToggleRaw_ResetsTheHorizontalPan(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.layout.scrollX = 12
+
+	m.mdPreviewToggleRaw()
+	assert.Equal(t, 0, m.layout.scrollX, "expanding must reset the pan")
+
+	m.layout.scrollX = 7
+	m.mdPreviewToggleRaw()
+	assert.Equal(t, 0, m.layout.scrollX, "and so must collapsing")
+}
+
+// TestMdPreviewToggleRaw_ThroughTheKeyPath covers the wiring rather than the
+// behavior: the action must be on the preview allowlist and routed inside
+// handleMdPreviewAction, or `r` is a dead key in the only mode it means anything.
+func TestMdPreviewToggleRaw_ThroughTheKeyPath(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+
+	model, cmd, handled := m.handleMdPreviewAction(keymap.ActionToggleRaw)
+
+	require.True(t, handled, "preview must handle toggle_raw itself, never let it fall through")
+	assert.Nil(t, cmd, "expanding is a pure state change plus a viewport swap")
+	assert.Equal(t, 1, model.(Model).mdPreviewExpandedBlock())
+}
+
+// TestMdPreviewToggleRaw_NotPreviewableIsANoOp: preview can be stuck on for a
+// file renderDiff will not preview, and running the markdown pipeline there
+// would expand a block of a document that is not on screen.
+func TestMdPreviewToggleRaw_NotPreviewableIsANoOp(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.file.markdownPreviewable = false
+
+	m.mdPreviewToggleRaw()
+
+	assert.Equal(t, -1, m.mdPreviewExpandedBlock())
+	assert.Empty(t, m.preview.hint)
+}
+
+func TestMdPreviewRawStopLine(t *testing.T) {
+	raw := []mdPreviewRawLine{
+		{text: "", lineIdx: 4, blank: true},
+		{text: "one", lineIdx: 5},
+		{text: "two", lineIdx: 6},
+	}
+
+	got, ok := mdPreviewRawStopLine(raw, 6)
+	assert.True(t, ok)
+	assert.Equal(t, 6, got, "a wanted line that painted a stoppable row is used as-is")
+
+	got, ok = mdPreviewRawStopLine(raw, 4)
+	assert.True(t, ok)
+	assert.Equal(t, 5, got, "a blank line paints a row but is no stop, so the first non-blank one answers")
+
+	got, ok = mdPreviewRawStopLine(raw, -1)
+	assert.True(t, ok)
+	assert.Equal(t, 5, got, "no wanted line means the block's first raw line")
+
+	_, ok = mdPreviewRawStopLine([]mdPreviewRawLine{{lineIdx: 1, blank: true}}, -1)
+	assert.False(t, ok, "an all-blank block has no line the reader could see selected")
 }
 
 func TestMdPreviewTrailingBlankRows(t *testing.T) {

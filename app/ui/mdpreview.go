@@ -848,6 +848,9 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 		}
 		cmd := m.mdPreviewStartAnnotation()
 		return m, cmd, true
+	case keymap.ActionToggleRaw:
+		m.mdPreviewToggleRaw()
+		return m, nil, true
 	case keymap.ActionScrollLeft:
 		m.panMarkdownPreview(-1)
 		return m, nil, true
@@ -944,6 +947,16 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //
 //   - toggle_preview must stay allowed so P can turn the mode back
 //     off — this is the mode's only exit key.
+//   - toggle_raw (r) redraws the block the cursor is on as its raw markdown
+//     source, one row per source line, so j/k can step between those lines
+//     and `a` can comment on the exact one. It is routed INSIDE
+//     handleMdPreviewAction above and exists only in this mode: it reads the
+//     preview cursor and rewrites the preview body, and nothing outside
+//     preview has either. Outside preview the action reaches
+//     dispatchResolvedAction, matches no case, and falls through to the pane
+//     handlers as a silent no-op — see mdPreviewToggleRaw
+//     (mdpreview_expand.go) for what it refuses and what it says when it
+//     does.
 //   - confirm (a/enter) opens an annotation input on whatever the cursor is
 //     stopped on: a line-level annotation anchored to the block on a block stop
 //     (seeding that cursor at the viewport center when the reader has not placed
@@ -1072,6 +1085,7 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 // navigate, then press P again on the next markdown file.
 var mdPreviewAllowedActions = map[keymap.Action]bool{
 	keymap.ActionTogglePreview:    true,
+	keymap.ActionToggleRaw:        true,
 	keymap.ActionConfirm:          true,
 	keymap.ActionQuit:             true,
 	keymap.ActionDiscardQuit:      true,

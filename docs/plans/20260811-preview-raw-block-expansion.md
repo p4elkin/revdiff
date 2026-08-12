@@ -571,22 +571,22 @@ Four hunks in the upstream-owned keymap file, one allowlist entry, one handler c
 - On an annotation stop, `r` expands the owning block and lands on the raw line that annotation is
   attached to, falling back to the first raw line.
 
-- [ ] Add `ActionToggleRaw Action = "toggle_raw"` to the const block, `validActions`,
+- [x] Add `ActionToggleRaw Action = "toggle_raw"` to the const block, `validActions`,
   `defaultDescriptions()` (`{ActionToggleRaw, "toggle raw source for the selected preview block",
   "View"}`), and `"r": ActionToggleRaw` in `defaultBindings()`, all in `app/keymap/keymap.go`.
-- [ ] Add `keymap.ActionToggleRaw: true` to `mdPreviewAllowedActions` in `app/ui/mdpreview.go`, with
+- [x] Add `keymap.ActionToggleRaw: true` to `mdPreviewAllowedActions` in `app/ui/mdpreview.go`, with
   its own bullet in that map's doc comment.
-- [ ] Add `case keymap.ActionToggleRaw:` to `handleMdPreviewAction` in `app/ui/mdpreview.go`.
-- [ ] Write `mdPreviewToggleRaw()` in `app/ui/mdpreview_expand.go`: collapse when already expanded;
+- [x] Add `case keymap.ActionToggleRaw:` to `handleMdPreviewAction` in `app/ui/mdpreview.go`.
+- [x] Write `mdPreviewToggleRaw()` in `app/ui/mdpreview_expand.go`: collapse when already expanded;
   otherwise resolve the target block (the cursor's block, or a fresh seed at the viewport centre when
   nothing is selected, matching `a`), check `mdPreviewExpandRefusal`, set the cursor to the block's
   first raw-line stop with `expanded: true`, reset `scrollX`, and finish through
   `repaintMdPreviewAfterStopChange`.
-- [ ] In `mdPreviewToggleRaw()`, handle the case where the cursor is on an annotation stop: expand
+- [x] In `mdPreviewToggleRaw()`, handle the case where the cursor is on an annotation stop: expand
   the owning block and land on the raw line that annotation is attached to, falling back to the
   first raw line.
-- [ ] Write tests in `app/keymap/keymap_test.go` and `app/ui/mdpreview_expand_test.go`.
-- [ ] run `go test ./app/keymap/ ./app/ui/ -race -run 'TestActionToggleRaw|TestMdPreviewToggleRaw'`
+- [x] Write tests in `app/keymap/keymap_test.go` and `app/ui/mdpreview_expand_test.go`.
+- [x] run `go test ./app/keymap/ ./app/ui/ -race -run 'TestActionToggleRaw|TestMdPreviewToggleRaw'`
   — must pass before the next task
 
 **Files:**
