@@ -100,6 +100,14 @@ func (m Model) mdPreviewBlockCursor() int {
 	return m.preview.cursor.blockOf(m.file.name, m.file.loadSeq)
 }
 
+// mdPreviewExpandedBlock is the block drawn as its raw markdown source, or -1
+// when none is — the read mdPreviewBody hands to mdPreviewExpandBlock on every
+// frame. See mdPreviewCursorState.expandedBlockOf for why the cursor, and not a
+// state struct of its own, is what carries expansion.
+func (m Model) mdPreviewExpandedBlock() int {
+	return m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq)
+}
+
 // mdPreviewCursorStop resolves the cursor against a source map — the painted
 // map, whose row numbers are the frame's own. ok is false when nothing is
 // selected or the stop no longer exists in this map (a block index past the end

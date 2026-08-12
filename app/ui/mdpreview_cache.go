@@ -67,6 +67,17 @@ type mdPreviewCacheKey struct {
 //     is what keeps the cursor OUT of every key here: a cursor move misses
 //     nothing, because the pass it changes runs after the last memo. Moving
 //     the highlight inside the cut memo would need the cursor in that key.
+//
+// Raw source expansion (mdPreviewExpandBlock, mdpreview_expand.go) is out of
+// this key too, and for a different reason than the cursor. It really does
+// change the document's CONTENT — one block's rendered rows become its source
+// lines — but it changes it DOWNSTREAM of this memo: it rewrites the finished
+// render rather than being an input to it, so pressing `r` must not, and does
+// not, cost a fresh glamour pass. Putting expansion in this key would throw a
+// perfectly correct entry away on every toggle. What expansion does change is
+// the body string, and the scroll memos below key on exactly that, so they
+// miss and redo the width scan and the cut — which is precisely what a
+// document that just grew wider raw rows needs.
 type mdPreviewRenderCache struct {
 	key      mdPreviewCacheKey
 	valid    bool
@@ -193,17 +204,28 @@ func (m Model) mdPreviewBaseRender() (string, mdPreviewSourceMap) {
 	return rendered, srcMap
 }
 
-// mdPreviewBody is the full-width, uncut preview body: the cached base render
-// with this file's annotations painted into it, plus the source map re-expressed
-// in the painted render's own row numbers (see
-// mdPreviewPaintAnnotationsTracked).
+// mdPreviewBody is the full-width, uncut preview body: the cached base render,
+// with the expanded block redrawn as its raw source and this file's annotations
+// painted in, plus the source map re-expressed in the resulting render's own row
+// numbers.
+//
+// Three stages, and their order is load-bearing. Expansion
+// (mdPreviewExpandBlock) runs first, so the painter receives a map already in
+// expanded row coordinates and needs no knowledge of expansion for its own
+// shifting to stay exact; the reverse order would leave every annotation anchor
+// stale the moment a block changed height. Both stages return the string they
+// were handed when they have nothing to do, so a collapsed document with no
+// annotations still shares one backing pointer with the cached base render and
+// the scroll memo's body compare stays O(1).
 //
 // This is the render the pan clamp must measure — mdPreviewMaxOffset needs the
-// widest row of the string that will actually be cut — and the one
-// applyMdPreviewScroll cuts. The block highlight is deliberately NOT part of it;
-// see mdPreviewFinalRender for why it lands after the cut.
+// widest row of the string that will actually be cut, and after expansion those
+// are the raw source rows — and the one applyMdPreviewScroll cuts. The block
+// highlight is deliberately NOT part of it; see mdPreviewFinalRender for why it
+// lands after the cut.
 func (m Model) mdPreviewBody() (string, mdPreviewSourceMap) {
 	rendered, srcMap := m.mdPreviewBaseRender()
+	rendered, srcMap = mdPreviewExpandBlock(rendered, srcMap, m.mdPreviewExpandedBlock(), m.file.lines, m.cfg.tabSpaces)
 	return m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
 }
 

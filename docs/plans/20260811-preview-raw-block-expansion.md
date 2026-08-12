@@ -502,14 +502,14 @@ Assert the caching decision rather than trusting it: a test that toggles expansi
 base render cache still serves (no new glamour pass), and one that checks the scroll cache misses
 because the body changed.
 
-- [ ] Wire the expansion pass into `mdPreviewBody` in `app/ui/mdpreview_cache.go`, calling it
+- [x] Wire the expansion pass into `mdPreviewBody` in `app/ui/mdpreview_cache.go`, calling it
   between the cached base render and the annotation painter, reading the expanded block from the
   cursor.
-- [ ] Update the `mdPreviewRenderCache` doc comment's list of what is and is not in the key.
-- [ ] Write a test that toggles expansion and checks the base render cache still serves, with no new
+- [x] Update the `mdPreviewRenderCache` doc comment's list of what is and is not in the key.
+- [x] Write a test that toggles expansion and checks the base render cache still serves, with no new
   glamour pass.
-- [ ] Write a test that checks the scroll cache misses because the body changed.
-- [ ] run `go test ./app/ui/ -race -run 'TestMdPreviewBody|TestMdPreviewCache'` — must pass before
+- [x] Write a test that checks the scroll cache misses because the body changed.
+- [x] run `go test ./app/ui/ -race -run 'TestMdPreviewBody|TestMdPreviewCache'` — must pass before
   the next task
 
 **Files:**

@@ -142,6 +142,89 @@ func TestMdPreviewBaseRender_CacheMissComputesAndStores(t *testing.T) {
 	assert.Equal(t, srcMap, srcMap2, "the cached source map must round-trip unchanged")
 }
 
+// mdPreviewExpandedCursorModel loads mdExpandFixture's hand-built base render
+// straight into the render cache and puts an EXPANDED cursor on block bi. The
+// cached entry is the whole point: a sentinel render nothing glamour produces
+// could ever match, so any body derived from it proves the cache served rather
+// than a fresh render answering.
+func mdPreviewExpandedCursorModel(bi int) (m Model, rendered string, sm mdPreviewSourceMap) {
+	rendered, lines, sm := mdExpandFixture()
+	m = mdPreviewTestModel(lines)
+	m.mdPreviewCache.put(m.mdPreviewCacheKey(), rendered, sm)
+	if bi >= 0 {
+		m.preview.cursor = mdPreviewCursorState{
+			set: true, ref: mdPreviewStopRef{block: bi},
+			file: m.file.name, seq: m.file.loadSeq, expanded: true,
+		}
+	}
+	return m, rendered, sm
+}
+
+// TestMdPreviewBody_ExpansionServesTheCachedBaseRender is task 4's caching
+// claim asserted rather than trusted: pressing `r` costs no glamour pass. The
+// cached entry is a hand-built sentinel, so a body carrying its rows can only
+// have come from the cache, and the entry itself must still be there afterwards
+// — expansion rewrites the finished render and never writes back.
+func TestMdPreviewBody_ExpansionServesTheCachedBaseRender(t *testing.T) {
+	m, rendered, _ := mdPreviewExpandedCursorModel(1)
+
+	body, bodyMap := m.mdPreviewBody()
+
+	assert.Equal(t, []string{"  Heading", "", "para one", "para two", "para three", "", "  tail", ""},
+		strings.Split(body, "\n"),
+		"the expanded block's rows must come from the cached sentinel render, not from a fresh one")
+	require.True(t, bodyMap.aligned)
+	assert.Len(t, bodyMap.lines, 3, "the body map must be in expanded coordinates")
+
+	cached, cachedMap, ok := m.mdPreviewCache.get(m.mdPreviewCacheKey())
+	require.True(t, ok, "expansion must not evict the base render entry")
+	assert.True(t, sameStringValue(rendered, cached), "expansion must not write a rebuilt render back into the cache")
+	assert.Empty(t, cachedMap.lines, "the cached map must stay in unexpanded coordinates")
+}
+
+// TestMdPreviewBody_CollapsedReturnsTheCachedRenderUntouched is the other half
+// of the caching obligation: with nothing expanded and nothing annotated, the
+// body IS the cached render — the same string value, so
+// mdPreviewScrollCache.forBody's compare stays O(1) instead of a whole-document
+// memcmp on every repaint.
+func TestMdPreviewBody_CollapsedReturnsTheCachedRenderUntouched(t *testing.T) {
+	m, rendered, sm := mdPreviewExpandedCursorModel(-1)
+	require.Equal(t, -1, m.mdPreviewExpandedBlock(), "fixture sanity: nothing is expanded")
+
+	body, bodyMap := m.mdPreviewBody()
+
+	assert.True(t, sameStringValue(rendered, body), "a collapsed body must be the cached render itself, not a copy")
+	assert.Equal(t, sm, bodyMap)
+}
+
+// TestMdPreviewBody_ExpansionMissesTheScrollCache is the second half of the
+// caching decision: the scroll memos key on the body string, which expansion
+// changes, so they must miss and redo the width scan. That is not a cost to
+// avoid — the raw rows have a different widest row than the rendered ones and
+// the pan clamp has to see it.
+func TestMdPreviewBody_ExpansionMissesTheScrollCache(t *testing.T) {
+	m, _, _ := mdPreviewExpandedCursorModel(-1)
+
+	collapsed, _ := m.mdPreviewBody()
+	collapsedWidest := m.mdPreviewCache.scroll.widestOf(collapsed)
+	require.True(t, m.mdPreviewCache.scroll.haveWidest, "fixture sanity: the collapsed body must warm the memo")
+
+	m.preview.cursor = mdPreviewCursorState{
+		set: true, ref: mdPreviewStopRef{block: 1},
+		file: m.file.name, seq: m.file.loadSeq, expanded: true,
+	}
+	expanded, _ := m.mdPreviewBody()
+	require.NotEqual(t, collapsed, expanded, "fixture sanity: expansion must change the body")
+
+	expandedWidest := m.mdPreviewCache.scroll.widestOf(expanded)
+
+	assert.Equal(t, expanded, m.mdPreviewCache.scroll.body, "the memo must re-key on the expanded body")
+	assert.Equal(t, mdPreviewMaxLineWidth(expanded), expandedWidest,
+		"the width scan must be redone against the raw rows, not answered from the collapsed body")
+	assert.NotEqual(t, collapsedWidest, expandedWidest,
+		"fixture sanity: the two bodies must have different widest rows, or this proves nothing")
+}
+
 // fenceHeavyCorpusDoc reads a real, fence-heavy plan document from this
 // repo's own completed-plans corpus for the task 4 repaint-cost measurement.
 // Falls back to skipping the benchmark rather than failing the suite if the
