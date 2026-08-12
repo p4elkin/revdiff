@@ -397,7 +397,12 @@ func (m Model) mdPreviewLiveInputTarget() (int, bool) {
 // mdPreviewStartAnnotation is `a`/enter in preview: open an annotation input on
 // whatever the cursor is stopped on.
 //
-// Two cases, and both bottom out in the ordinary startAnnotation path:
+// Three cases, and all of them bottom out in the ordinary startAnnotation path:
+//   - on a RAW SOURCE LINE of an expanded block, it targets that exact line.
+//     This is the whole point of raw expansion: the ref already carries the
+//     line's index into m.file.lines (see mdPreviewStopRef), so there is nothing
+//     to resolve and no new save code — the comment it produces is
+//     byte-identical in the output to one made on the same line in source view.
 //   - on an ANNOTATION stop, it targets that annotation's own (Line, Type), so
 //     startAnnotation's existing pre-fill loads its current text and saving
 //     replaces it. That is how editing already works in the diff pane —
@@ -435,8 +440,13 @@ func (m Model) mdPreviewLiveInputTarget() (int, bool) {
 // compactState use for their own refusals, and clears on the next key press.
 func (m *Model) mdPreviewStartAnnotation() tea.Cmd {
 	_, srcMap := m.mdPreviewBody()
-	if stop, ok := m.mdPreviewCursorStop(srcMap); ok && stop.ref.onAnnot {
-		return m.mdPreviewEditAnnotationStop(stop, srcMap)
+	if stop, ok := m.mdPreviewCursorStop(srcMap); ok {
+		if stop.ref.onLine {
+			return m.mdPreviewStartAnnotationAt(stop.ref.line)
+		}
+		if stop.ref.onAnnot {
+			return m.mdPreviewEditAnnotationStop(stop, srcMap)
+		}
 	}
 	bi := m.mdPreviewHighlightAnchor(srcMap)
 	if bi < 0 {
@@ -537,6 +547,14 @@ func (m *Model) mdPreviewStartAnnotationAt(idx int) tea.Cmd {
 // somewhere sensible rather than doing nothing. A click when the map cannot
 // resolve any block at all (unaligned, or an empty document) is a no-op.
 //
+// A row painted from a RAW SOURCE LINE of an expanded block is resolved to that
+// line first, so a click inside an expanded block annotates the line it hit
+// rather than the block around it — the mouse equivalent of `a` on a raw-line
+// stop, and the same precision the expansion exists for. A click on one of the
+// block's other rows (a blank source line, which paints a row but gets no
+// anchor, or a comment spliced between the raw lines) falls through to the block
+// below, which collapses the expansion exactly as a click always has.
+//
 // Two more no-ops, matching this feature's siblings:
 //
 //   - not markdownPreviewable — the same double gate panMarkdownPreview and
@@ -555,6 +573,12 @@ func (m Model) mdPreviewClickDiff(y int) (tea.Model, tea.Cmd) {
 	}
 	row := (y - m.diffTopRow()) + m.layout.viewport.YOffset
 	_, srcMap := m.mdPreviewBody()
+	if la, ok := srcMap.lineAt(row); ok {
+		m.layout.focus = paneDiff
+		m.setMdPreviewLineCursor(la.block, la.lineIdx)
+		cmd := m.mdPreviewStartAnnotationAt(la.lineIdx)
+		return m, cmd
+	}
 	bi := srcMap.anchorAtRow(row)
 	if bi < 0 {
 		return m, nil

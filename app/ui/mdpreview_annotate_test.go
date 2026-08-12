@@ -1021,3 +1021,145 @@ func TestMdPreviewPaintAnnotations_LiveInputPaintsUnderTheExpandedRawLine(t *tes
 	assert.Equal(t, "para two", rows[at-1],
 		"watching the text you type detach from the line you aimed at is what per-line splicing exists to prevent")
 }
+
+// TestMdPreviewStartAnnotation_OnARawLineTargetsThatExactLine is the payoff of
+// the whole feature: with a block drawn as its source, `a` comments on the
+// source line the cursor is on rather than on the block around it. The fixture
+// aims at the block's SECOND line, so aiming at the block would visibly land
+// somewhere else.
+func TestMdPreviewStartAnnotation_OnARawLineTargetsThatExactLine(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	m.moveMdPreviewCursor(1)
+	require.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 3}, mustMdPreviewRef(t, m),
+		"fixture sanity: the cursor must be on the block's second raw line")
+
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating, "`a` on a raw line must open an input")
+	assert.False(t, m.annot.fileAnnotating, "a line-level one")
+	assert.Equal(t, 3, m.nav.diffCursor, "aimed at the raw line itself, not at the block's start line")
+
+	m.annot.input.SetValue("on alpha line two")
+	m.saveAnnotation()
+
+	got := m.store.Get("plan.md")
+	require.Len(t, got, 1)
+	assert.Equal(t, 4, got[0].Line, "the comment must carry the raw line's own 1-based line number")
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "and annotating must not collapse the block under the reader")
+}
+
+// TestMdPreviewStartAnnotation_BlockAndFirstRawLineAreOneAnnotation pins the
+// first of section 3's two properties: `a` on a collapsed block and `a` on the
+// first raw line of that same block resolve to the SAME source line, so
+// Store.Add replaces rather than adding a second comment meaning the same thing.
+// There is no way to end up with two.
+func TestMdPreviewStartAnnotation_BlockAndFirstRawLineAreOneAnnotation(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+
+	m.mdPreviewStartAnnotation()
+	require.True(t, m.annot.annotating)
+	blockTarget := m.nav.diffCursor
+	m.annot.input.SetValue("from the block")
+	m.saveAnnotation()
+	require.Equal(t, 1, m.store.Count())
+
+	m.mdPreviewToggleRaw()
+	require.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: blockTarget}, mustMdPreviewRef(t, m),
+		"fixture sanity: the block's first raw line is its own start line")
+
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating)
+	assert.Equal(t, "from the block", m.annot.input.Value(),
+		"`a` on the first raw line must open the comment the block-level `a` already put there")
+	m.annot.input.SetValue("from the raw line")
+	m.saveAnnotation()
+
+	got := m.store.Get("plan.md")
+	require.Len(t, got, 1, "both routes resolve to one (Line, Type), so there can only ever be one comment")
+	assert.Equal(t, "from the raw line", got[0].Comment, "the second one replaced the first")
+}
+
+// TestMdPreviewStartAnnotation_RawLineAnnotationMatchesSourceView pins the
+// second property: a comment made on a raw line is byte-identical in the store —
+// and so in the -o output — to one made on the same line with preview off. The
+// feature adds no save code at all; it only changes what the diff cursor is
+// aimed at before the ordinary path runs.
+func TestMdPreviewStartAnnotation_RawLineAnnotationMatchesSourceView(t *testing.T) {
+	const comment = "a note on alpha line two"
+
+	preview := toggleRawModel(t)
+	preview.setMdPreviewBlockCursor(1)
+	preview.mdPreviewToggleRaw()
+	preview.moveMdPreviewCursor(1)
+	ref := mustMdPreviewRef(t, preview)
+	require.True(t, ref.onLine, "fixture sanity: the cursor must be on a raw source line")
+
+	preview.mdPreviewStartAnnotation()
+	require.True(t, preview.annot.annotating)
+	preview.annot.input.SetValue(comment)
+	preview.saveAnnotation()
+
+	source := mdPreviewTestModel(mdLines(toggleRawDoc))
+	source.nav.diffCursor = ref.line
+	source.startAnnotation()
+	source.annot.input.SetValue(comment)
+	source.saveAnnotation()
+
+	previewAnns := preview.store.Get("plan.md")
+	sourceAnns := source.store.Get("plan.md")
+	require.Len(t, previewAnns, 1)
+	require.Len(t, sourceAnns, 1)
+	assert.Equal(t, sourceAnns[0], previewAnns[0],
+		"an annotation made on a raw line must be indistinguishable from one made in source view")
+}
+
+// TestMdPreviewDeleteAnnotation_StaysOnTheRawLineInsideAnExpandedBlock is `d`
+// inside an expanded block: the comment goes, the expansion stays, and the
+// cursor lands on the raw line the comment was attached to. Landing on the
+// block's own stop instead would collapse it and reflow the document under a
+// reader who only deleted a comment.
+func TestMdPreviewDeleteAnnotation_StaysOnTheRawLineInsideAnExpandedBlock(t *testing.T) {
+	m := toggleRawModel(t)
+	annotateLine(m, 4, "on alpha line two") // store Line is 1-based: source index 3
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	m.moveMdPreviewCursor(1) // the second raw line
+	m.moveMdPreviewCursor(1) // the comment spliced under it
+	require.True(t, mustMdPreviewRef(t, m).onAnnot, "fixture sanity: the cursor must be on the comment")
+
+	m.mdPreviewDeleteAnnotation()
+
+	assert.Equal(t, 0, m.store.Count(), "the selected comment must be gone")
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "deleting a comment must not collapse the block")
+	ref := mustMdPreviewRef(t, m)
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 3}, ref,
+		"the cursor must land on the raw line the deleted comment was attached to")
+	_, sm := m.mdPreviewBody()
+	_, ok := sm.stopAt(ref)
+	assert.True(t, ok, "and that stop must really exist in the repainted map")
+}
+
+// TestMdPreviewClickDiff_OnARawLineAnnotatesThatLine is the mouse half of `a` on
+// a raw line: the clicked row resolves to the source line painted on it, before
+// the fallback that resolves a row to the block around it.
+func TestMdPreviewClickDiff_OnARawLineAnnotatesThatLine(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	_, sm := m.mdPreviewBody()
+	require.Len(t, sm.lines, 2, "fixture sanity: the paragraph paints two raw rows")
+	target := sm.lines[1]
+
+	result, _ := m.mdPreviewClickDiff(target.row - m.layout.viewport.YOffset + m.diffTopRow())
+
+	got := result.(Model)
+	assert.Equal(t, target.lineIdx, got.nav.diffCursor, "a click on a raw row must annotate the line it hit")
+	assert.True(t, got.annot.annotating, "and open an input on it, as a click always does in preview")
+	assert.Equal(t, 1, got.mdPreviewExpandedBlock(), "clicking inside the block must not collapse it")
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: target.lineIdx}, mustMdPreviewRef(t, got),
+		"the click leaves the cursor on the line it hit, so a following j/k continues from there")
+}

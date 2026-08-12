@@ -137,6 +137,45 @@ func (sm mdPreviewSourceMap) lineStops(block int) []mdPreviewStop {
 	return out
 }
 
+// lineAt is the raw source line painted on row, or ok=false when row is not one
+// of an expanded block's raw rows. The test is equality rather than span
+// containment because one source line is one rendered row (see
+// mdPreviewLineAnchor), which is what lets a click resolve to the exact line it
+// hit instead of to the block around it.
+func (sm mdPreviewSourceMap) lineAt(row int) (mdPreviewLineAnchor, bool) {
+	for _, la := range sm.lines {
+		if la.row == row {
+			return la, true
+		}
+	}
+	return mdPreviewLineAnchor{}, false
+}
+
+// lineStopFor picks which raw source line of block the cursor should land on:
+// want when that line is one of the block's stoppable raw rows, and the block's
+// first such row otherwise. ok is false when the block paints no stoppable raw
+// row at all — it is not the expanded block, or every one of its lines is blank.
+//
+// It is mdPreviewRawStopLine (mdpreview_expand.go) asked of the PAINTED map
+// rather than of freshly prepared raw lines. A caller that already holds the map
+// the frame was built from should ask this one: re-deriving the raw lines would
+// be a second walk, free to disagree with what is on screen.
+func (sm mdPreviewSourceMap) lineStopFor(block, want int) (lineIdx int, ok bool) {
+	first, found := 0, false
+	for _, la := range sm.lines {
+		if la.block != block {
+			continue
+		}
+		if la.lineIdx == want {
+			return want, true
+		}
+		if !found {
+			first, found = la.lineIdx, true
+		}
+	}
+	return first, found
+}
+
 // stops lists everything the preview cursor can stop on, in the order they are
 // painted down the frame: the file-level annotation first (it sits above the
 // document body), then each block followed by the annotations painted under it.
@@ -333,11 +372,9 @@ const mdPreviewDeleteNeedsAnnotationHint = "Select an annotation with j/k to del
 // is cleared by mdPreviewStartAnnotationAt. Falling through would delete the
 // wrong comment or, far more often, silently nothing.
 //
-// Landing on the owning block afterwards is the one placement that is always
-// available: a block stop exists for every valid block index whatever the
-// annotations do, so the cursor can never be left pointing past the end of the
-// stop list. Deleting the FILE-level annotation has no owning block, so it lands
-// on the first block instead.
+// Where the cursor lands afterwards is mdPreviewCursorAfterDelete's rule: the
+// owning block normally, the raw source line the comment was attached to when
+// that block is drawn as its source.
 //
 // The tree filter is refreshed exactly the way the source-view delete refreshes
 // it, and a selection the refresh moved off this file is followed with a load —
@@ -361,7 +398,7 @@ func (m *Model) mdPreviewDeleteAnnotation() tea.Cmd {
 		return nil
 	}
 
-	m.setMdPreviewBlockCursor(max(stop.ref.block, 0))
+	m.mdPreviewCursorAfterDelete(stop, srcMap)
 	m.pendingAnnotJump = nil    // clear before RefreshFilter, which may trigger a file load
 	m.nav.pendingHunkJump = nil // same
 	m.tree.RefreshFilter(m.annotatedFiles())
@@ -370,6 +407,42 @@ func (m *Model) mdPreviewDeleteAnnotation() tea.Cmd {
 	}
 	m.repaintMdPreviewAfterStopChange()
 	return nil
+}
+
+// mdPreviewCursorAfterDelete places the cursor once `d` has removed the
+// annotation stop names. srcMap is the map the frame was painted from BEFORE the
+// delete, which is the one that still knows where the expanded block's raw rows
+// are.
+//
+// The owning block is the ordinary answer, and the one placement that is always
+// available: a block stop exists for every valid block index whatever the
+// annotations do, so the cursor can never be left pointing past the end of the
+// stop list. Deleting the FILE-level annotation has no owning block, so it lands
+// on the first block instead.
+//
+// An EXPANDED block is the exception, because landing on its own stop would
+// collapse it (setMdPreviewBlockCursor writes a fresh cursor state, whose
+// expanded is false). Deleting a comment is not a request to stop looking at the
+// source, so the cursor stays expanded and lands on the raw line the comment was
+// attached to — the line the reader was commenting on. The block's first raw
+// line is the fallback for a comment whose line is not a stoppable raw row: an
+// orphan, or a blank line, which paints a row but gets no anchor.
+func (m *Model) mdPreviewCursorAfterDelete(stop mdPreviewStop, srcMap mdPreviewSourceMap) {
+	bi := m.mdPreviewExpandedBlock()
+	if bi < 0 || bi != stop.ref.block {
+		m.setMdPreviewBlockCursor(max(stop.ref.block, 0))
+		return
+	}
+	want := -1 // no source line is index -1, so this asks for the block's first
+	if idx, ok := m.mdPreviewLineIndex(stop.line, stop.changeType); ok {
+		want = idx
+	}
+	lineIdx, ok := srcMap.lineStopFor(bi, want)
+	if !ok {
+		m.setMdPreviewBlockCursor(bi) // an expanded block with no stoppable raw row; collapse rather than aim at nothing
+		return
+	}
+	m.setMdPreviewLineCursor(bi, lineIdx)
 }
 
 // repaintMdPreviewAfterStopChange redraws the frame after something changed how

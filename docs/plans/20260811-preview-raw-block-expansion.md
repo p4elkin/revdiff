@@ -670,16 +670,16 @@ once per burst.
 - Test the two pinned properties from section 3: block `a` and first-raw-line `a` produce one
   annotation, and a raw-line annotation is identical to the source-view one for the same line.
 
-- [ ] Add a first branch to `mdPreviewStartAnnotation` in `app/ui/mdpreview_annotate.go` for a line
+- [x] Add a first branch to `mdPreviewStartAnnotation` in `app/ui/mdpreview_annotate.go` for a line
   stop: annotate that line's diff index via the existing `mdPreviewStartAnnotationAt`.
-- [ ] Change `mdPreviewDeleteAnnotation` in `app/ui/mdpreview_stops.go` so that when the block was
+- [x] Change `mdPreviewDeleteAnnotation` in `app/ui/mdpreview_stops.go` so that when the block was
   expanded, it stays expanded and lands on the raw line the deleted annotation was attached to,
   falling back to the block's first raw line.
-- [ ] Change `mdPreviewClickDiff` in `app/ui/mdpreview_annotate.go` to map the clicked row to a
+- [x] Change `mdPreviewClickDiff` in `app/ui/mdpreview_annotate.go` to map the clicked row to a
   raw-line stop when one covers it, before falling back to `anchorAtRow`.
-- [ ] Write a test that block-level `a` and first-raw-line `a` produce one annotation.
-- [ ] Write a test that a raw-line annotation is identical to the source-view one for the same line.
-- [ ] run `go test ./app/ui/ -race -run 'TestMdPreviewStartAnnotation|TestMdPreviewDeleteAnnotation|TestMdPreviewClickDiff'`
+- [x] Write a test that block-level `a` and first-raw-line `a` produce one annotation.
+- [x] Write a test that a raw-line annotation is identical to the source-view one for the same line.
+- [x] run `go test ./app/ui/ -race -run 'TestMdPreviewStartAnnotation|TestMdPreviewDeleteAnnotation|TestMdPreviewClickDiff'`
   — must pass before the next task
 
 **Files:**
