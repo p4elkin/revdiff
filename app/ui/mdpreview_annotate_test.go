@@ -1443,3 +1443,246 @@ func TestMdPreviewPaintAnnotations_ExpandedRawLineCommentUnchanged(t *testing.T)
 	assert.Equal(t, "Alpha one.", rows[at-1], "the comment stays under its own raw source line")
 	assert.Equal(t, "Alpha two.", rows[at+1], "and the block's remaining source continues below it")
 }
+
+// mdPreviewTallDoc is a document with far more blocks than the test viewport
+// (20 rows) can show at once, so the last block can only be reached by
+// scrolling. Every paragraph renders to a single row, which keeps the row
+// arithmetic in the visibility tests below readable.
+func mdPreviewTallDoc() string {
+	var b strings.Builder
+	b.WriteString("# Title\n\n")
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&b, "Paragraph number %d with some text in it.\n\n", i)
+	}
+	b.WriteString("Last block of the document.")
+	return b.String()
+}
+
+// mdPreviewVisibleRows is what the reader can actually see: the rows of the
+// composed frame inside the viewport's window. The visibility tests assert
+// against these rather than against a recorded row span alone, because the
+// recorded span is the thing under test.
+func mdPreviewVisibleRows(m Model) []string {
+	rows := strings.Split(m.mdPreviewFinalRender(), "\n")
+	top := max(0, m.layout.viewport.YOffset)
+	end := min(top+m.layout.viewport.Height, len(rows))
+	if top >= end {
+		return nil
+	}
+	out := make([]string, 0, end-top)
+	for _, r := range rows[top:end] {
+		out = append(out, ansi.Strip(r))
+	}
+	return out
+}
+
+// mdPreviewInputOnScreen reports whether the live annotation input's own row is
+// among the rows the reader can see. It matches on the input's prompt ("> "
+// after the annotation prefix) rather than on the placeholder, because an input
+// opened on an existing comment is pre-filled and shows no placeholder at all.
+func mdPreviewInputOnScreen(m Model) bool {
+	for _, r := range mdPreviewVisibleRows(m) {
+		if strings.Contains(r, "> ") && strings.Contains(r, ansi.Strip(m.annotPrefix())) {
+			return true
+		}
+	}
+	return false
+}
+
+// mdPreviewWalkCursorToLastBlock steers the preview cursor down to the last
+// block the way a reader holding `j` would, so the viewport ends up wherever
+// the ordinary minimal follow put it rather than at a position the test chose.
+func mdPreviewWalkCursorToLastBlock(t *testing.T, m *Model) {
+	t.Helper()
+	body, srcMap := m.mdPreviewBody()
+	m.layout.viewport.SetContent(m.mdPreviewFrame(body, srcMap))
+	last := len(srcMap.blocks()) - 1
+	require.Positive(t, last, "fixture sanity: the document needs several blocks")
+	for range len(srcMap.stops()) + 2 {
+		m.moveMdPreviewCursor(1)
+	}
+	ref, ok := m.mdPreviewCursorRef()
+	require.True(t, ok)
+	require.Equal(t, last, ref.block, "the walk must end on the last block")
+}
+
+// mdPreviewFirstBlockBelowFold is the first block whose last row falls outside
+// a fresh window of height rows, i.e. the first block that can be parked on the
+// bottom edge with content above it. Picking it by measurement rather than by a
+// hardcoded index keeps the fixture honest if glamour's row output ever shifts.
+func mdPreviewFirstBlockBelowFold(t *testing.T, anchors []mdPreviewBlockAnchor, height int) int {
+	t.Helper()
+	for i := range anchors {
+		if anchors[i].endRow >= height {
+			return i
+		}
+	}
+	require.Fail(t, "fixture sanity: no block falls below the first screenful")
+	return -1
+}
+
+// TestMdPreviewStartAnnotation_LastBlock_InputIsVisible is the named bug: with
+// the cursor on the last block of a document taller than the pane, the input
+// is spliced under the block's last row — which the minimal cursor follow has
+// put at the very bottom edge of the viewport — so before the preview grew its
+// own visibility step the input landed one row below the window and the reader
+// typed blind.
+func TestMdPreviewStartAnnotation_LastBlock_InputIsVisible(t *testing.T) {
+	m := mdPreviewTestModel(mdLines(mdPreviewTallDoc()))
+	m.modes.mdPreview = true
+	mdPreviewWalkCursorToLastBlock(t, &m)
+	require.False(t, mdPreviewInputOnScreen(m), "fixture sanity: no input open yet")
+
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating)
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.liveInput.ok, "the painter must record where it put the live input")
+	assert.GreaterOrEqual(t, srcMap.liveInput.row, m.layout.viewport.YOffset)
+	assert.Less(t, srcMap.liveInput.endRow, m.layout.viewport.YOffset+m.layout.viewport.Height)
+	assert.True(t, mdPreviewInputOnScreen(m),
+		"the annotation input must be on screen after `a` on the last block")
+}
+
+// TestMdPreviewStartAnnotation_BlockAtViewportBottom_ScrollsMinimally covers
+// the same failure away from the end of the document, and pins that the scroll
+// is the smallest one that works: exactly enough to bring the input's row into
+// the window, never a centering jump.
+func TestMdPreviewStartAnnotation_BlockAtViewportBottom_ScrollsMinimally(t *testing.T) {
+	m := mdPreviewTestModel(mdLines(mdPreviewTallDoc()))
+	m.modes.mdPreview = true
+
+	body, srcMap := m.mdPreviewBody()
+	m.layout.viewport.SetContent(m.mdPreviewFrame(body, srcMap))
+	anchors := srcMap.blocks()
+	target := mdPreviewFirstBlockBelowFold(t, anchors, m.layout.viewport.Height)
+	// park the block on the very bottom row of the viewport, which is where the
+	// cursor's own minimal follow leaves it after a downward walk
+	m.layout.viewport.SetYOffset(anchors[target].endRow - m.layout.viewport.Height + 1)
+	m.setMdPreviewCursorToBlock(target)
+	before := m.layout.viewport.YOffset
+	require.Equal(t, anchors[target].endRow, before+m.layout.viewport.Height-1,
+		"fixture sanity: the block must sit on the bottom row")
+
+	m.mdPreviewStartAnnotation()
+
+	_, srcMap = m.mdPreviewBody()
+	require.True(t, srcMap.liveInput.ok)
+	assert.Equal(t, before+1, m.layout.viewport.YOffset,
+		"one row of input below the bottom row must cost exactly one row of scroll")
+	assert.True(t, mdPreviewInputOnScreen(m))
+}
+
+// TestMdPreviewStartAnnotation_InputAlreadyVisible_DoesNotScroll is the other
+// half of "minimal": with room below the block, starting an annotation must
+// leave the viewport exactly where the reader put it. This is what the
+// save/restore of viewport.YOffset in mdPreviewStartAnnotationAt exists for,
+// and the new visibility step must not undo it.
+func TestMdPreviewStartAnnotation_InputAlreadyVisible_DoesNotScroll(t *testing.T) {
+	m := mdPreviewTestModel(mdLines(mdPreviewTallDoc()))
+	m.modes.mdPreview = true
+
+	body, srcMap := m.mdPreviewBody()
+	m.layout.viewport.SetContent(m.mdPreviewFrame(body, srcMap))
+	anchors := srcMap.blocks()
+	require.Greater(t, len(anchors), 4, "fixture sanity")
+	target := 3
+	m.layout.viewport.SetYOffset(0)
+	m.setMdPreviewCursorToBlock(target)
+	require.Less(t, anchors[target].endRow+1, m.layout.viewport.Height,
+		"fixture sanity: the input's row already fits in the window")
+
+	m.mdPreviewStartAnnotation()
+
+	assert.Equal(t, 0, m.layout.viewport.YOffset, "an input already on screen must not move the viewport")
+	assert.True(t, mdPreviewInputOnScreen(m))
+}
+
+// TestMdPreviewStartAnnotation_RawLineAtBottom_InputIsVisible is the same
+// property one level down: inside an expanded block the input is spliced under
+// the raw source line it was aimed at, not under the block, so the visibility
+// step has to read the row the painter really used.
+func TestMdPreviewStartAnnotation_RawLineAtBottom_InputIsVisible(t *testing.T) {
+	doc := mdPreviewTallDoc() + "\n\nA closing paragraph that is expanded to source."
+	m := mdPreviewTestModel(mdLines(doc))
+	m.modes.mdPreview = true
+	mdPreviewWalkCursorToLastBlock(t, &m)
+	m.mdPreviewToggleRaw()
+
+	_, srcMap := m.mdPreviewBody()
+	require.NotEmpty(t, srcMap.lines, "fixture sanity: the last block must expand to raw source")
+	lastLine := srcMap.lines[len(srcMap.lines)-1]
+	m.setMdPreviewLineCursor(lastLine.block, lastLine.lineIdx)
+	// park that raw row on the bottom edge, which is where a downward walk
+	// through the expanded block leaves it
+	m.layout.viewport.SetYOffset(lastLine.row - m.layout.viewport.Height + 1)
+
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating)
+	_, srcMap = m.mdPreviewBody()
+	require.True(t, srcMap.liveInput.ok)
+	assert.GreaterOrEqual(t, srcMap.liveInput.row, m.layout.viewport.YOffset)
+	assert.Less(t, srcMap.liveInput.endRow, m.layout.viewport.YOffset+m.layout.viewport.Height)
+	assert.True(t, mdPreviewInputOnScreen(m),
+		"the input under an expanded block's last raw line must be on screen")
+}
+
+// TestMdPreviewEditAnnotation_AtViewportBottom_InputIsVisible covers editing:
+// `a` on an annotation stop opens the input in place of that annotation's own
+// rows, so the rows to keep on screen are the annotation's, not a freshly
+// spliced row below the block.
+func TestMdPreviewEditAnnotation_AtViewportBottom_InputIsVisible(t *testing.T) {
+	m := mdPreviewTestModel(mdLines(mdPreviewTallDoc()))
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	anchors := srcMap.blocks()
+	last := len(anchors) - 1
+	lineNum := m.diffLineNum(m.file.lines[anchors[last].startLine])
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: lineNum, Type: " ", Comment: "a note to edit"})
+
+	body, srcMap := m.mdPreviewBody()
+	m.layout.viewport.SetContent(m.mdPreviewFrame(body, srcMap))
+	require.Len(t, srcMap.annots, 1, "fixture sanity: exactly one painted annotation")
+	annot := srcMap.annots[0]
+	m.setMdPreviewCursorRef(annot.stop().ref)
+	// scroll so the annotation's rows sit exactly one row BELOW the window
+	m.layout.viewport.SetYOffset(annot.endRow - m.layout.viewport.Height)
+	before := m.layout.viewport.YOffset
+	require.Positive(t, before, "fixture sanity: the annotation must be below the fold")
+	require.False(t, mdPreviewInputOnScreen(m))
+
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating)
+	_, srcMap = m.mdPreviewBody()
+	require.True(t, srcMap.liveInput.ok, "editing must record the rows the input replaced")
+	assert.Equal(t, before+1, m.layout.viewport.YOffset, "one hidden row must cost exactly one row of scroll")
+	assert.GreaterOrEqual(t, srcMap.liveInput.row, m.layout.viewport.YOffset)
+	assert.Less(t, srcMap.liveInput.endRow, m.layout.viewport.YOffset+m.layout.viewport.Height)
+	assert.True(t, mdPreviewInputOnScreen(m))
+}
+
+// TestMdPreviewClickAnnotate_BottomRow_InputIsVisible is the mouse half: a
+// click on the bottom visible row splices the input one row below it, which
+// without the visibility step is off screen exactly as the keyboard case was.
+func TestMdPreviewClickAnnotate_BottomRow_InputIsVisible(t *testing.T) {
+	m := mdPreviewTestModel(mdLines(mdPreviewTallDoc()))
+	m.modes.mdPreview = true
+
+	body, srcMap := m.mdPreviewBody()
+	m.layout.viewport.SetContent(m.mdPreviewFrame(body, srcMap))
+	anchors := srcMap.blocks()
+	target := mdPreviewFirstBlockBelowFold(t, anchors, m.layout.viewport.Height)
+	m.layout.viewport.SetYOffset(anchors[target].endRow - m.layout.viewport.Height + 1)
+	clickY := m.diffTopRow() + (anchors[target].row - m.layout.viewport.YOffset)
+
+	res, _ := m.mdPreviewClickDiff(clickY)
+	got := res.(Model)
+
+	require.True(t, got.annot.annotating)
+	_, srcMap = got.mdPreviewBody()
+	require.True(t, srcMap.liveInput.ok)
+	assert.True(t, mdPreviewInputOnScreen(got), "a click on the bottom row must still show the input it opened")
+}

@@ -308,16 +308,31 @@ func (m *Model) moveMdPreviewCursor(delta int) {
 // is the top-edge behavior of the old scroll-derived highlight that this
 // mechanism replaced.
 func (m *Model) syncMdPreviewViewportToStop(s mdPreviewStop) {
+	m.syncMdPreviewViewportToRows(s.row, s.endRow)
+}
+
+// syncMdPreviewViewportToRows is the row-span half of syncMdPreviewViewportToStop:
+// scroll the least it can so rows row..endRow are on screen, and not at all when
+// they already are. Split out because the annotation input the reader is typing
+// into needs exactly this and is not a cursor stop — it is not in the store, so
+// it has no stop to be (see mdPreviewSourceMap.liveInput).
+//
+// Every coordinate here is a PREVIEW row of the painted frame. That is the whole
+// reason this function exists beside syncViewportToCursor (app/ui/diffnav.go)
+// rather than reusing it: that one measures in diff-line coordinates
+// (cursorViewportY / wrappedLineCount), which say nothing about a whole-document
+// glamour render.
+func (m *Model) syncMdPreviewViewportToRows(row, endRow int) {
 	height := m.layout.viewport.Height
 	if height <= 0 {
 		return
 	}
 	top := m.layout.viewport.YOffset
 	switch {
-	case s.row < top:
-		m.layout.viewport.SetYOffset(s.row)
-	case s.endRow >= top+height:
-		m.layout.viewport.SetYOffset(min(s.endRow-height+1, s.row))
+	case row < top:
+		m.layout.viewport.SetYOffset(row)
+	case endRow >= top+height:
+		m.layout.viewport.SetYOffset(min(endRow-height+1, row))
 	}
 }
 

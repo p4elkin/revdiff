@@ -446,6 +446,38 @@ neither reads or assigns `m.nav.diffCursor` (a file-level annotation's `Line`
 is always 0, which `mdPreviewPaintAnnotationsTracked` already paints ahead of
 every block unconditionally) and neither touches the viewport.
 
+**Keeping the annotation input on screen in preview.** `mdPreviewStartAnnotationAt`
+saves and restores `viewport.YOffset` around `startAnnotation`, so that
+`ensureLineAnnotationInputVisible` (`app/ui/annotate.go`, upstream-owned) cannot
+reposition the preview off diff-line coordinates that mean nothing against a
+whole-document glamour render. That is still exactly what the save/restore is for
+and it has not changed. What it also did, until this fix, was leave NOTHING to
+scroll the input into view: the input is spliced under the block being annotated,
+so mid-document nobody noticed, but with the block on the bottom edge of the
+viewport — the last block of a document above all — the input landed one row
+below the window and the reader typed blind.
+
+So the preview grew its own visibility step, in preview row coordinates:
+
+- `mdPreviewSourceMap.liveInput` (`mdpreview_srcmap.go`) — the row span of the
+  input the reader is typing into, recorded by the painter that spliced it, the
+  same way every other anchor in that map is recorded rather than found by
+  scanning the painted string. It is the one span in the map that is not a cursor
+  stop, because a live input is not in the store and so has no
+  `mdPreviewAnnotAnchor`. `mdPreviewAnnotRun` gained a `live` flag to carry it out
+  of `mdPreviewCollectAnnotationRows`, set both for a brand-new input and for the
+  stored annotation whose rows ARE the input while it is being edited.
+- `ensureMdPreviewInputVisible` (`mdpreview_annotate.go`) — called at the tail of
+  `mdPreviewStartAnnotationAt`, after the content refresh so `SetYOffset` clamps
+  against a buffer that already holds the input's row.
+- `syncMdPreviewViewportToRows` (`mdpreview_cursor.go`) — the row-span half of
+  `syncMdPreviewViewportToStop`, which now delegates to it. Same minimal scroll,
+  never centering.
+
+No upstream-owned file gained a hunk for any of it. `A` (file-level) needed
+nothing: `startFileAnnotation` ends in `GotoTop`, and the file-level input is
+painted at row 0, so the top of the document IS the minimal scroll there.
+
 ⚠️ **The `ActionConfirm` focus branch takes focus rather than doing nothing.**
 With the tree/TOC pane focused it assigns `m.layout.focus = paneDiff` and
 returns, so the second press annotates — the same progression
