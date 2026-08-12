@@ -642,14 +642,14 @@ does.
 This covers the wheel too, at no extra cost — `flushPreviewWheelPending` already calls this function
 once per burst.
 
-- [ ] Add a rule to `dropMdPreviewCursorIfHidden` in `app/ui/mdpreview_cursor.go` for the expanded
+- [x] Add a rule to `dropMdPreviewCursorIfHidden` in `app/ui/mdpreview_cursor.go` for the expanded
   case: if any part of the expanded block's row span is still on screen, re-seat the cursor onto
   that block's raw-line stop nearest the viewport centre (`mdPreviewNearestStop`) instead of
   clearing it.
-- [ ] Keep clearing the cursor only when the whole expanded block is off screen, which collapses the
+- [x] Keep clearing the cursor only when the whole expanded block is off screen, which collapses the
   block.
-- [ ] Write tests in `app/ui/mdpreview_cursor_test.go` for both cases.
-- [ ] run `go test ./app/ui/ -race -run 'TestMdPreviewViewportOnlyScroll'` — must pass before the
+- [x] Write tests in `app/ui/mdpreview_cursor_test.go` for both cases.
+- [x] run `go test ./app/ui/ -race -run 'TestMdPreviewViewportOnlyScroll'` — must pass before the
   next task
 
 **Files:**

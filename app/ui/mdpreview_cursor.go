@@ -319,6 +319,15 @@ func (m *Model) syncMdPreviewViewportToStop(s mdPreviewStop) {
 // still partially visible keeps the cursor — it is still what the reader is
 // looking at.
 //
+// An EXPANDED block is the one case where a hidden stop does not clear the
+// cursor outright: while any part of that block's rows is still on screen the
+// cursor is re-seated onto the block's own stop nearest the viewport center
+// instead (reseatMdPreviewCursorInExpandedBlock). Clearing there would collapse
+// the block, so a page-down inside a thirty-line expanded table would reflow the
+// document under a reader who was only scrolling. Both invariants still hold:
+// the cursor still marks something on screen, and expansion still ends when the
+// block itself leaves the screen.
+//
 // Called from every viewport-only scroll path: afterMdPreviewViewportScroll for
 // the key paths, and flushPreviewWheelPending (mdpreview_cache.go) once per
 // wheel burst rather than once per event.
@@ -339,9 +348,48 @@ func (m *Model) dropMdPreviewCursorIfHidden() {
 	}
 	top := m.layout.viewport.YOffset
 	bottom := top + max(0, m.layout.viewport.Height) - 1
-	if stop.endRow < top || stop.row > bottom {
-		m.clearMdPreviewBlockCursor()
+	if stop.endRow >= top && stop.row <= bottom {
+		return // still at least partly on screen: it is what the reader is looking at
 	}
+	if m.reseatMdPreviewCursorInExpandedBlock(srcMap, top, bottom) {
+		return
+	}
+	m.clearMdPreviewBlockCursor()
+}
+
+// reseatMdPreviewCursorInExpandedBlock moves the cursor to the expanded block's
+// stop nearest the viewport center, and reports whether it did. False means
+// there is nothing expanded, or the expanded block has left the screen entirely
+// — in which case the caller clears the cursor, and the block collapses with it.
+//
+// The visibility test is the BLOCK's whole row span, not the cursor's own stop:
+// scrolling inside a block taller than the pane is ordinary reading, and it is
+// exactly the case where the raw line the cursor sits on goes off the edge while
+// the block does not. Re-seating uses the same stop list j/k is clamped to
+// (mdPreviewBlockStopRange), so a scroll leaves the cursor somewhere the next j
+// or k can continue from, and mdPreviewNearestStop picks within it the same way
+// the seeding press does.
+func (m *Model) reseatMdPreviewCursorInExpandedBlock(srcMap mdPreviewSourceMap, top, bottom int) bool {
+	bi := m.mdPreviewExpandedBlock()
+	if bi < 0 {
+		return false
+	}
+	anchors := srcMap.blocks()
+	if bi >= len(anchors) || anchors[bi].endRow < top || anchors[bi].row > bottom {
+		return false // the whole expanded block is off screen
+	}
+	stops := srcMap.stops()
+	lo, hi, ok := mdPreviewBlockStopRange(stops, bi)
+	if !ok {
+		return false // an expanded block with no stop of its own has nothing to re-seat onto
+	}
+	own := stops[lo : hi+1]
+	i := mdPreviewNearestStop(own, m.mdPreviewViewportCenter())
+	if i < 0 {
+		return false
+	}
+	m.setMdPreviewCursorRefKeepingExpansion(own[i].ref)
+	return true
 }
 
 // afterMdPreviewViewportScroll is the tail every preview key that moves the

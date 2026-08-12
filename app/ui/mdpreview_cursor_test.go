@@ -517,6 +517,84 @@ func TestMoveMdPreviewCursor_ReachesAnnotationsInsideAnExpandedBlock(t *testing.
 	assert.Equal(t, ref, mustMdPreviewRef(t, m), "which is the last stop of the block, so j clamps there")
 }
 
+// rawScrollDoc is the fixture for the expanded-block scroll rules: a heading, a
+// paragraph of ten source lines — taller than the pane these tests use once it
+// is expanded, which is what lets a scroll hide the cursor's own raw line while
+// the block itself stays on screen — and enough short paragraphs below it that
+// the viewport can also scroll clear past the whole block without being clamped
+// by the end of the document.
+const rawScrollDoc = "# Title\n\n" +
+	"Alpha line one.\nAlpha line two.\nAlpha line three.\nAlpha line four.\nAlpha line five.\n" +
+	"Alpha line six.\nAlpha line seven.\nAlpha line eight.\nAlpha line nine.\nAlpha line ten.\n\n" +
+	"Tail one.\n\nTail two.\n\nTail three.\n\nTail four.\n\nTail five.\n\nTail six.\n"
+
+// rawScrollModel is rawScrollDoc in a styled preview model with a short pane, so
+// ten raw rows cannot all be on screen at once.
+func rawScrollModel(t *testing.T) Model {
+	t.Helper()
+	m := mdPreviewStyledModel(t, rawScrollDoc)
+	m.layout.viewport.Height = 6
+	_, sm := m.mdPreviewBody()
+	require.True(t, sm.aligned, "fixture sanity: rawScrollDoc must align")
+	require.Greater(t, len(sm.blocks()), 3, "fixture sanity: a heading, the long paragraph, and tails below it")
+	require.Equal(t, 2, sm.blocks()[1].startLine, "fixture sanity: the long paragraph starts at source line 2")
+	return m
+}
+
+// TestMdPreviewViewportOnlyScroll_ReSeatsInsideAScrollingExpandedBlock is the
+// re-seat rule: scrolling inside a block taller than the pane is ordinary
+// reading, so when the cursor's own raw line goes off the edge the cursor moves
+// to the block's stop nearest the viewport center instead of being dropped.
+// Dropping it would collapse the block and reflow the document under a reader
+// who was only scrolling.
+func TestMdPreviewViewportOnlyScroll_ReSeatsInsideAScrollingExpandedBlock(t *testing.T) {
+	m := rawScrollModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the paragraph must be expanded")
+	_, sm := m.mdPreviewBody()
+	require.Len(t, sm.lines, 10, "fixture sanity: the paragraph paints ten raw rows")
+	first := mustMdPreviewRef(t, m)
+	m.layout.viewport.SetContent(m.renderMarkdownPreview())
+
+	m.scrollMarkdownPreview(sm.lines[3].row - m.layout.viewport.YOffset)
+
+	top := m.layout.viewport.YOffset
+	require.Equal(t, sm.lines[3].row, top, "fixture sanity: the scroll must land where it was aimed, unclamped")
+	require.Greater(t, top, sm.lines[0].row, "fixture sanity: the cursor's own raw line must be above the top edge")
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "a scroll inside the block must not collapse it")
+	ref := mustMdPreviewRef(t, m)
+	assert.True(t, ref.onLine, "the cursor must be re-seated onto a raw line, not left on a hidden one")
+	assert.NotEqual(t, first, ref, "and not on the raw line that just went off the top")
+	stop, ok := m.mdPreviewCursorStop(sm)
+	require.True(t, ok, "the re-seated ref must resolve against the frame's own map")
+	assert.GreaterOrEqual(t, stop.row, top, "the re-seated stop must be on screen")
+	assert.LessOrEqual(t, stop.row, top+m.layout.viewport.Height-1, "the re-seated stop must be on screen")
+}
+
+// TestMdPreviewViewportOnlyScroll_CollapsesAnExpandedBlockItScrollsPast is the
+// other half of the same rule: only when the WHOLE expanded block has left the
+// screen is the cursor cleared, and clearing it is what collapses the block.
+// Expansion ends when the block does, so nothing is left expanded off screen
+// with a row map the reader cannot see.
+func TestMdPreviewViewportOnlyScroll_CollapsesAnExpandedBlockItScrollsPast(t *testing.T) {
+	m := rawScrollModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the paragraph must be expanded")
+	_, sm := m.mdPreviewBody()
+	endRow := sm.blocks()[1].endRow
+	m.layout.viewport.SetContent(m.renderMarkdownPreview())
+
+	m.scrollMarkdownPreview(endRow + 1 - m.layout.viewport.YOffset)
+
+	require.Greater(t, m.layout.viewport.YOffset, endRow,
+		"fixture sanity: the scroll must carry the whole block off the top, unclamped")
+	assert.Equal(t, -1, m.mdPreviewExpandedBlock(), "a block scrolled entirely off screen must collapse")
+	_, ok := m.mdPreviewCursorRef()
+	assert.False(t, ok, "and the cursor must be cleared with it")
+}
+
 // mustMdPreviewRef reads the preview cursor's ref and fails the test when
 // nothing is selected.
 func mustMdPreviewRef(t *testing.T, m Model) mdPreviewStopRef {
