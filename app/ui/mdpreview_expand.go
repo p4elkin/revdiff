@@ -263,10 +263,7 @@ func (m *Model) mdPreviewToggleRaw() {
 	if !m.file.markdownPreviewable {
 		return // preview stuck on for a file renderDiff will not preview; see panMarkdownPreview
 	}
-	if bi := m.mdPreviewExpandedBlock(); bi >= 0 {
-		m.setMdPreviewBlockCursor(bi)
-		m.layout.scrollX = 0
-		m.repaintMdPreviewAfterStopChange()
+	if m.mdPreviewCollapseRaw() {
 		return
 	}
 	_, srcMap := m.mdPreviewBody()
@@ -280,6 +277,35 @@ func (m *Model) mdPreviewToggleRaw() {
 	// changed, so the frame has to be recomposed from a freshly painted body
 	// rather than patched, and the viewport has to follow the new stop.
 	m.repaintMdPreviewAfterStopChange()
+}
+
+// mdPreviewCollapseRaw puts an expanded block back to its rendered form and
+// leaves the cursor on that block's own stop, so the reader ends up where they
+// started rather than nowhere. It reports whether there was anything to
+// collapse.
+//
+// It is the shared collapse half of BOTH keys that end an expansion: the second
+// `r` (mdPreviewToggleRaw above) and `esc` (the ActionDismiss case in
+// handleMdPreviewAction, mdpreview.go). Sharing it is what keeps the two from
+// drifting on the parts that are easy to forget on one of them — the scrollX
+// reset and the recompose through repaintMdPreviewAfterStopChange, which the
+// height change makes mandatory.
+//
+// Collapsing is a plain cursor placement: setMdPreviewBlockCursor assigns a
+// fresh mdPreviewCursorState, so expanded goes back to false and the next
+// mdPreviewBody paints the rendered rows again. Nothing has to be un-done.
+func (m *Model) mdPreviewCollapseRaw() bool {
+	if !m.file.markdownPreviewable {
+		return false // preview stuck on for a file renderDiff will not preview
+	}
+	bi := m.mdPreviewExpandedBlock()
+	if bi < 0 {
+		return false
+	}
+	m.setMdPreviewBlockCursor(bi)
+	m.layout.scrollX = 0
+	m.repaintMdPreviewAfterStopChange()
+	return true
 }
 
 // mdPreviewExpandTarget resolves what `r` expands and where it lands the cursor:

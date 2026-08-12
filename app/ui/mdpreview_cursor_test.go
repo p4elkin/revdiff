@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/umputun/revdiff/app/keymap"
 )
 
 // TestMdPreviewBlockCursor_NothingSelectedUntilTheReaderMoves is behavior 1 and
@@ -413,4 +415,113 @@ func TestMdPreviewCursorState_ZeroValueSelectsNothing(t *testing.T) {
 	assert.Equal(t, -1, c.blockOf("plan.md", 3), "the file-level annotation stop names no block")
 	_, ok = c.refOf("plan.md", 3)
 	assert.True(t, ok, "but it is still a placed cursor")
+}
+
+// TestMdPreviewEsc_CollapsesTheExpandedBlock: esc is the second way out of raw
+// source, beside pressing r again, and the one every reader tries first. It
+// leaves the cursor on the block it collapsed, so the reader is where they
+// started rather than nowhere.
+func TestMdPreviewEsc_CollapsesTheExpandedBlock(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the block must be expanded first")
+	m.layout.scrollX = 9
+
+	model, cmd, handled := m.handleMdPreviewAction(keymap.ActionDismiss)
+
+	require.True(t, handled, "esc with a block expanded must be handled inside preview")
+	assert.Nil(t, cmd, "collapsing is a pure state change plus a viewport swap")
+	got := model.(Model)
+	assert.Equal(t, -1, got.mdPreviewExpandedBlock(), "esc must collapse the block")
+	ref, ok := got.mdPreviewCursorRef()
+	require.True(t, ok, "collapsing must leave the cursor on the block, not clear it")
+	assert.Equal(t, mdPreviewStopRef{block: 1}, ref)
+	assert.Equal(t, 0, got.layout.scrollX, "collapsing must reset the pan, exactly as the second r does")
+}
+
+// TestMdPreviewEsc_FallsThroughWhenNothingIsExpanded: with no expansion to
+// collapse, esc must report itself UNHANDLED so it keeps reaching handleEscKey
+// and clearing a leftover search-match highlight. Handling it unconditionally
+// would make esc a dead key for the search a reader ran before pressing P.
+func TestMdPreviewEsc_FallsThroughWhenNothingIsExpanded(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	require.Equal(t, -1, m.mdPreviewExpandedBlock(), "fixture sanity: nothing is expanded")
+
+	_, _, handled := m.handleMdPreviewAction(keymap.ActionDismiss)
+
+	assert.False(t, handled, "esc must fall through when there is no expansion to collapse")
+}
+
+// TestMoveMdPreviewCursor_ClampsAtTheLastRawLineOfAnExpandedBlock is the
+// overrun rule: j at the last raw line stays there instead of stepping onto the
+// next block's stop, which would collapse the expansion. A held-down j must
+// never throw away the reader's expansion and reflow the document under them.
+func TestMoveMdPreviewCursor_ClampsAtTheLastRawLineOfAnExpandedBlock(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	_, sm := m.mdPreviewBody()
+	require.Len(t, sm.lines, 2, "fixture sanity: the paragraph paints two raw rows")
+	require.Less(t, 2, len(sm.blocks()), "fixture sanity: a block must follow the expanded one")
+
+	m.moveMdPreviewCursor(1)
+	require.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 3}, mustMdPreviewRef(t, m),
+		"j must step to the block's second raw line")
+
+	m.moveMdPreviewCursor(1)
+
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 3}, mustMdPreviewRef(t, m),
+		"j at the last raw line must clamp, not step onto the next block")
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "and the block must still be expanded")
+}
+
+// TestMoveMdPreviewCursor_ClampsAtTheFirstRawLineOfAnExpandedBlock is the same
+// rule upward: k at the first raw line stays inside the expanded block instead
+// of escaping to the preceding one, which would collapse it just as silently.
+func TestMoveMdPreviewCursor_ClampsAtTheFirstRawLineOfAnExpandedBlock(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 2}, mustMdPreviewRef(t, m),
+		"fixture sanity: expansion lands on the block's first raw line")
+
+	m.moveMdPreviewCursor(-1)
+
+	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 2}, mustMdPreviewRef(t, m),
+		"k at the first raw line must clamp, not escape to the previous block")
+	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "and the block must still be expanded")
+}
+
+// TestMoveMdPreviewCursor_ReachesAnnotationsInsideAnExpandedBlock guards the
+// clamp against over-reaching: narrowing j/k to the expanded block must still
+// leave that block's OWN annotation stops reachable, or a comment made on a raw
+// line could not be selected — and therefore not deleted — without collapsing
+// first.
+func TestMoveMdPreviewCursor_ReachesAnnotationsInsideAnExpandedBlock(t *testing.T) {
+	m := toggleRawModel(t)
+	annotateLine(m, 4, "on alpha line two") // store Line is 1-based: source index 3
+	m.setMdPreviewBlockCursor(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity")
+
+	m.moveMdPreviewCursor(1) // second raw line
+	m.moveMdPreviewCursor(1) // the comment spliced under it
+
+	ref := mustMdPreviewRef(t, m)
+	assert.True(t, ref.onAnnot, "j must still reach the expanded block's own annotation stop")
+	assert.Equal(t, 1, ref.block, "and it must be the expanded block's annotation")
+
+	m.moveMdPreviewCursor(1)
+	assert.Equal(t, ref, mustMdPreviewRef(t, m), "which is the last stop of the block, so j clamps there")
+}
+
+// mustMdPreviewRef reads the preview cursor's ref and fails the test when
+// nothing is selected.
+func mustMdPreviewRef(t *testing.T, m Model) mdPreviewStopRef {
+	t.Helper()
+	ref, ok := m.mdPreviewCursorRef()
+	require.True(t, ok, "the cursor must be placed")
+	return ref
 }

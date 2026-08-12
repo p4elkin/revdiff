@@ -851,6 +851,13 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 	case keymap.ActionToggleRaw:
 		m.mdPreviewToggleRaw()
 		return m, nil, true
+	case keymap.ActionDismiss:
+		if !m.mdPreviewCollapseRaw() {
+			// nothing was expanded, and nothing was mutated either — fall
+			// through so esc keeps clearing a leftover search-match highlight.
+			return m, nil, false
+		}
+		return m, nil, true
 	case keymap.ActionScrollLeft:
 		m.panMarkdownPreview(-1)
 		return m, nil, true
@@ -985,9 +992,16 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     layout actions that never touch m.nav.diffCursor or the annotation
 //     store (theme_select and help open an overlay; toggle_tree only flips
 //     pane visibility).
-//   - dismiss (esc) only clears a leftover search-match highlight from a
-//     search that completed before preview was turned on; it never touches
-//     the cursor or the store either.
+//   - dismiss (esc) collapses an expanded block back to its rendered form —
+//     the second way out of raw source, beside pressing r again, and the one
+//     every reader tries first. It is routed INSIDE handleMdPreviewAction
+//     above, but only for that: with nothing expanded it reports itself
+//     unhandled and falls through unchanged to handleEscKey (handlers.go),
+//     which clears a leftover search-match highlight from a
+//     search that completed before preview was turned on. Neither half touches
+//     m.nav.diffCursor or the store, and the fall-through half mutates nothing
+//     at all, which is what makes reporting it unhandled safe (dispatchAction
+//     discards the returned model on that path — see app/ui/model.go).
 //   - scroll_diff_down/up (J/K) drive the viewport's YOffset directly rather
 //     than following the cursor — see pinDiffCursorTo's mdPreview guard in
 //     mouse.go for why that stays safe even though the same function also

@@ -264,6 +264,27 @@ func mdPreviewStopIndex(stops []mdPreviewStop, ref mdPreviewStopRef) int {
 	return -1
 }
 
+// mdPreviewBlockStopRange is the first and last index of block bi's own stops in
+// a stop list. ok is false when the block has no stop there at all.
+//
+// A block's stops are contiguous because stops() emits them in painted-row order
+// and every row a block owns — its own, its raw source rows while expanded, and
+// the annotation rows spliced under them — sits between that block's first row
+// and the next block's. That is what lets j/k be clamped to one block's stops by
+// two indices rather than by a per-step predicate.
+func mdPreviewBlockStopRange(stops []mdPreviewStop, bi int) (lo, hi int, ok bool) {
+	for i := range stops {
+		if stops[i].ref.block != bi {
+			continue
+		}
+		if !ok {
+			lo, ok = i, true
+		}
+		hi = i
+	}
+	return lo, hi, ok
+}
+
 // mdPreviewNearestStop returns the index of the stop nearest row center, or -1
 // for an empty list. This is the seeding rule shared by the first down/up press
 // and by `a` with no cursor placed.

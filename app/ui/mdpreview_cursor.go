@@ -126,6 +126,27 @@ func (m *Model) setMdPreviewCursorRef(ref mdPreviewStopRef) {
 	m.preview.cursor = mdPreviewCursorState{set: true, ref: ref, file: m.file.name, seq: m.file.loadSeq}
 }
 
+// setMdPreviewCursorRefKeepingExpansion places the cursor on one stop and keeps
+// the block drawn as raw source when that stop belongs to the expanded block.
+//
+// It exists for j/k, which step between the stops INSIDE an expanded block — its
+// raw lines and the comments spliced under them. Routing those through the plain
+// setter would collapse the block on the first press, because that setter assigns
+// a fresh mdPreviewCursorState and expanded therefore defaults back to false.
+// That default is the design (see mdPreviewCursorState), so this is the one
+// narrow exception rather than a change to the rule: a stop that names any other
+// block, or no block at all, still falls through to the plain setter and
+// collapses.
+func (m *Model) setMdPreviewCursorRefKeepingExpansion(ref mdPreviewStopRef) {
+	if bi := m.mdPreviewExpandedBlock(); bi >= 0 && ref.block == bi {
+		m.preview.cursor = mdPreviewCursorState{
+			set: true, ref: ref, file: m.file.name, seq: m.file.loadSeq, expanded: true,
+		}
+		return
+	}
+	m.setMdPreviewCursorRef(ref)
+}
+
 // setMdPreviewBlockCursor places the cursor on block bi's own stop. A negative
 // bi clears it, so callers that computed "no block" can pass the result through
 // unguarded.
@@ -211,6 +232,15 @@ func (m Model) mdPreviewCenterBlock(srcMap mdPreviewSourceMap) int {
 //     No wrap: arriving back at the top of a long document because a key was
 //     held down is never what was meant.
 //
+// While a block is drawn as its raw markdown source, the clamp narrows from the
+// whole document to that ONE block's stops — its raw lines and the annotations
+// spliced under them (mdPreviewBlockStopRange). Letting j run off the last raw
+// line onto the next block's stop would collapse the expansion, because every
+// ordinary placement assigns a fresh cursor state; a held-down j would then throw
+// away the reader's expansion silently and reflow the document under them. So
+// raw source is left only by the keys that mean it — r and esc — or by scrolling
+// the whole block off screen (dropMdPreviewCursorIfHidden).
+//
 // A document whose source map did not align (README.md is one, by design — see
 // mdPreviewBuildSourceMap) has no stops to steer between, so these keys fall
 // back to a one-row viewport scroll. That is what they did before the cursor
@@ -227,6 +257,13 @@ func (m *Model) moveMdPreviewCursor(delta int) {
 		return
 	}
 
+	lo, hi := 0, len(stops)-1
+	if bi := m.mdPreviewExpandedBlock(); bi >= 0 {
+		if blockLo, blockHi, ok := mdPreviewBlockStopRange(stops, bi); ok {
+			lo, hi = blockLo, blockHi
+		}
+	}
+
 	i := -1
 	if ref, ok := m.mdPreviewCursorRef(); ok {
 		i = mdPreviewStopIndex(stops, ref)
@@ -236,9 +273,9 @@ func (m *Model) moveMdPreviewCursor(delta int) {
 			return
 		}
 	} else {
-		i = min(max(i+delta, 0), len(stops)-1)
+		i = min(max(i+delta, lo), hi)
 	}
-	m.setMdPreviewCursorRef(stops[i].ref)
+	m.setMdPreviewCursorRefKeepingExpansion(stops[i].ref)
 
 	// content first, offset second: SetYOffset clamps against the viewport's own
 	// content buffer, so a frame that has not been pushed yet would clamp the

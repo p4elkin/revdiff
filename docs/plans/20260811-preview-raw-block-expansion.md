@@ -607,16 +607,16 @@ Four hunks in the upstream-owned keymap file, one allowlist entry, one handler c
   a test that `j` from the last raw line clamps instead of collapsing, and that `k` from the first
   raw line clamps rather than escaping to the previous block.
 
-- [ ] Add a `keymap.ActionDismiss` case to `handleMdPreviewAction` in `app/ui/mdpreview.go` that
+- [x] Add a `keymap.ActionDismiss` case to `handleMdPreviewAction` in `app/ui/mdpreview.go` that
   collapses the expanded block and returns handled; otherwise it falls through to `handleEscKey`'s
   search-highlight clear.
-- [ ] Update the `dismiss` bullet in the `mdPreviewAllowedActions` doc comment, which currently says
+- [x] Update the `dismiss` bullet in the `mdPreviewAllowedActions` doc comment, which currently says
   esc "only clears a leftover search-match highlight".
-- [ ] Write a test in `app/ui/mdpreview_cursor_test.go` that `j` from the last raw line clamps
+- [x] Write a test in `app/ui/mdpreview_cursor_test.go` that `j` from the last raw line clamps
   instead of collapsing.
-- [ ] Write a test that `k` from the first raw line clamps rather than escaping to the previous
+- [x] Write a test that `k` from the first raw line clamps rather than escaping to the previous
   block.
-- [ ] run `go test ./app/ui/ -race -run 'TestMdPreviewEsc|TestMoveMdPreviewCursor'` — must pass
+- [x] run `go test ./app/ui/ -race -run 'TestMdPreviewEsc|TestMoveMdPreviewCursor'` — must pass
   before the next task
 
 **Files:**
