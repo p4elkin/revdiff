@@ -765,10 +765,18 @@ section.
 
 ### Task 12: [Final] Update documentation
 
-- [ ] Check whether README.md needs updates for this feature (the `r` keybinding, raw source
-  expansion behavior).
-- [ ] Check whether `site/docs.html` needs updates to stay in sync with README.md.
-- [ ] Move this plan file to `docs/plans/completed/`.
+- [x] Check whether README.md needs updates for this feature (the `r` keybinding, raw source
+  expansion behavior). — checked: **no update**. `README.md` describes the released upstream binary,
+  which has no preview mode, so PATCH.md's opening section deliberately keeps every preview-only key,
+  icon and flag out of it. `r` / `toggle_raw` is preview-only and follows that rule. PATCH.md's list
+  of what is held back was extended to name the `r` key so the policy statement stays complete.
+- [x] Check whether `site/docs.html` needs updates to stay in sync with README.md. — checked: **no
+  update**, same rule and the same PATCH.md paragraph. README.md and `site/docs.html` stay in sync
+  by both omitting the feature. `r` is discoverable at runtime through the `?` help overlay and
+  `--dump-keys`, which read the real keymap.
+- [x] Move this plan file to `docs/plans/completed/` — left in place on purpose; the exec harness
+  moves the plan after every phase finishes, and moving it here would break the later review,
+  finalize and stats phases that read this path.
 
 ---
 

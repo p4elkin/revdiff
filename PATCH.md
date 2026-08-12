@@ -26,12 +26,13 @@ note or transcript using the old names is describing that layout, not this one.)
 Because the patch never goes to upstream, it deliberately leaves every doc that describes the
 released, brew-installed binary alone: `README.md`, `site/index.html`, `site/docs.html`, and
 the plugin reference docs under `.claude-plugin/` and `plugins/`. So the `P` key
-(`toggle_preview`), the `▤` status-bar icon, and the `--preview` flag appear in neither the
-README keybindings/options tables, nor `site/docs.html`, nor any plugin `config.md`/`usage.md`.
+(`toggle_preview`), the `r` key (`toggle_raw`), the `▤` status-bar icon, and the `--preview`
+flag appear in neither the README keybindings/options tables, nor `site/docs.html`, nor any
+plugin `config.md`/`usage.md`.
 That is on purpose, not an oversight: editing them would describe a feature to people running
 the real upstream binary, which does not have it — true whether those docs live on `md-preview`
 or get merged all the way to the fork's `master`, since the fork's `master` is still not what
-those docs are about. The `P` binding and `--preview` flag are discoverable at runtime instead, through the
+those docs are about. The `P` and `r` bindings and the `--preview` flag are discoverable at runtime instead, through the
 in-app help overlay (`?`), `--dump-keys`, and `--help`/`--dump-config`, all of which read the
 real keymap/options and so list them automatically in this build.
 
