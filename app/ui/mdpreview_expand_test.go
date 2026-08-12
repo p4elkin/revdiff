@@ -79,28 +79,34 @@ func TestMdPreviewRawLines_ClampsOutOfRangeSpan(t *testing.T) {
 
 func TestMdPreviewExpandRefusal_AllowsOrdinaryBlocks(t *testing.T) {
 	lines := mdLines("# Title\n\nsome prose\n\n| a | b |\n| - | - |")
+	anchors := []mdPreviewBlockAnchor{
+		{kind: mdBlockH1, startLine: 0, endLine: 0},
+		{kind: mdBlockParagraph, startLine: 2, endLine: 2},
+		{kind: mdBlockTable, startLine: 4, endLine: 5},
+	}
 
-	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockH1, startLine: 0, endLine: 0}, lines, "    "))
-	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 2, endLine: 2}, lines, "    "))
-	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockTable, startLine: 4, endLine: 5}, lines, "    "))
+	for i := range anchors {
+		assert.Empty(t, mdPreviewExpandRefusal(anchors, i, lines, "    "))
+	}
 }
 
 func TestMdPreviewExpandRefusal_CodeBlockByKind(t *testing.T) {
 	lines := mdLines("```go\nfunc main() {}\n```")
-	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockCodeBlock, startLine: 1, endLine: 1}, lines, "    ")
-	assert.Equal(t, mdPreviewExpandCodeHint, got)
+	anchors := []mdPreviewBlockAnchor{{kind: mdBlockCodeBlock, startLine: 1, endLine: 1}}
+	assert.Equal(t, mdPreviewExpandCodeHint, mdPreviewExpandRefusal(anchors, 0, lines, "    "))
 }
 
 func TestMdPreviewExpandRefusal_MermaidFenceOnSingleLineSpan(t *testing.T) {
 	lines := mdLines("```mermaid\nflowchart TD\n  a --> b\n```")
 	// joinWithMermaidFences attributes the whole art to the opening fence line,
-	// so the block arrives as a paragraph whose span is that one line.
-	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 0, endLine: 0}, lines, "    ")
-	assert.Equal(t, mdPreviewExpandMermaidHint, got)
+	// so the block arrives as a paragraph whose span is that one line. The test is
+	// against the anchor's OWN span, not the clipped one, which is why the extra
+	// source lines below the fence line do not make it look like prose.
+	anchors := []mdPreviewBlockAnchor{{kind: mdBlockParagraph, startLine: 0, endLine: 0}}
+	assert.Equal(t, mdPreviewExpandMermaidHint, mdPreviewExpandRefusal(anchors, 0, lines, "    "))
 
 	tilde := mdLines("~~~MERMAID title=x\nflowchart TD\n~~~")
-	assert.Equal(t, mdPreviewExpandMermaidHint,
-		mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 0, endLine: 0}, tilde, "    "),
+	assert.Equal(t, mdPreviewExpandMermaidHint, mdPreviewExpandRefusal(anchors, 0, tilde, "    "),
 		"the info string is read the same way joinWithMermaidFences reads it")
 }
 
@@ -108,21 +114,29 @@ func TestMdPreviewExpandRefusal_MermaidTextOnMultiLineSpanIsNotADiagram(t *testi
 	// a paragraph that merely starts with fence-looking text but spans more than
 	// one line is not the collapsed-diagram shape, so it expands normally.
 	lines := mdLines("```mermaid\nstill the same paragraph")
-	assert.Empty(t, mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 0, endLine: 1}, lines, "    "))
+	anchors := []mdPreviewBlockAnchor{{kind: mdBlockParagraph, startLine: 0, endLine: 1}}
+	assert.Empty(t, mdPreviewExpandRefusal(anchors, 0, lines, "    "))
 }
 
 func TestMdPreviewExpandRefusal_AllBlankSpan(t *testing.T) {
 	lines := mdLines("text\n   \n\t\nmore")
-	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 1, endLine: 2}, lines, "    ")
-	assert.Equal(t, mdPreviewExpandNothingHint, got)
+	anchors := []mdPreviewBlockAnchor{
+		{kind: mdBlockParagraph, startLine: 1, endLine: 2},
+		{kind: mdBlockParagraph, startLine: 3, endLine: 3},
+	}
+	assert.Equal(t, mdPreviewExpandNothingHint, mdPreviewExpandRefusal(anchors, 0, lines, "    "))
 }
 
 func TestMdPreviewExpandRefusal_DividerOnlySpan(t *testing.T) {
 	lines := mdLines("a\nplaceholder\nb")
 	lines[1].ChangeType = diff.ChangeDivider
 	lines[1].Content = "⋯ 3 lines ⋯"
+	anchors := []mdPreviewBlockAnchor{
+		{kind: mdBlockParagraph, startLine: 1, endLine: 1},
+		{kind: mdBlockParagraph, startLine: 2, endLine: 2},
+	}
 
-	got := mdPreviewExpandRefusal(mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 1, endLine: 1}, lines, "    ")
+	got := mdPreviewExpandRefusal(anchors, 0, lines, "    ")
 	assert.Equal(t, mdPreviewExpandNothingHint, got, "a divider is not source the reader can annotate")
 }
 
@@ -321,21 +335,48 @@ func TestMdPreviewExpandBlock_AllBlankSpanIsRefused(t *testing.T) {
 	assert.Equal(t, sm, gotMap)
 }
 
-// TestMdPreviewClipRawSpan pins the clip itself: a container's span stops at the
-// first source line the NEXT block claims, and an ordinary block is untouched.
+// TestMdPreviewClipRawSpan pins the re-cut itself, in both directions: a
+// container's span STOPS at the first source line the next block claims, and a
+// nested block's span GROWS to cover the container's trailing lines, because
+// those are rendered into rows the nested block owns.
 func TestMdPreviewClipRawSpan(t *testing.T) {
+	lines := mdLines("- para a\n\n  ```go\n  x := 1\n  ```\n\n  para b\n\nafter\n")
 	anchors := []mdPreviewBlockAnchor{
 		{kind: mdBlockItem, row: 2, endRow: 2, startLine: 0, endLine: 6},
 		{kind: mdBlockCodeBlock, row: 3, endRow: 5, startLine: 3, endLine: 3},
 		{kind: mdBlockParagraph, row: 6, endRow: 8, startLine: 8, endLine: 8},
 	}
 
-	assert.Equal(t, 2, mdPreviewClipRawSpan(anchors, 0).endLine,
+	assert.Equal(t, 2, mdPreviewClipRawSpan(anchors, 0, lines).endLine,
 		"the item's span must stop before the nested fence's own first line")
-	assert.Equal(t, 0, mdPreviewClipRawSpan(anchors, 0).startLine, "the start is never moved")
-	assert.Equal(t, anchors[1], mdPreviewClipRawSpan(anchors, 1),
-		"a block the next one does not reach into keeps its whole span")
-	assert.Equal(t, anchors[2], mdPreviewClipRawSpan(anchors, 2), "the last block has nothing to clip against")
+	assert.Equal(t, 0, mdPreviewClipRawSpan(anchors, 0, lines).startLine, "the start is never moved")
+	assert.Equal(t, 6, mdPreviewClipRawSpan(anchors, 1, lines).endLine,
+		"the fence's span must cover the item's trailing paragraph, whose rendered row the fence owns")
+	assert.Equal(t, 8, mdPreviewClipRawSpan(anchors, 2, lines).endLine,
+		"the last block runs to the end of the document, past its own recorded endLine")
+}
+
+// TestMdPreviewClipRawSpan_DropsTrailingBlankLines is the other end of the same
+// symmetry: mdPreviewExpandBlock keeps a block's trailing blank RENDERED rows, so
+// the span must not carry the blank SOURCE lines that produced them.
+func TestMdPreviewClipRawSpan_DropsTrailingBlankLines(t *testing.T) {
+	lines := mdLines("one\n\n\ntwo\n\n\n")
+	anchors := []mdPreviewBlockAnchor{
+		{kind: mdBlockParagraph, startLine: 0, endLine: 0},
+		{kind: mdBlockParagraph, startLine: 3, endLine: 3},
+	}
+
+	assert.Equal(t, 0, mdPreviewClipRawSpan(anchors, 0, lines).endLine, "the two blank lines before the next block go")
+	assert.Equal(t, 3, mdPreviewClipRawSpan(anchors, 1, lines).endLine, "and so do the ones at the end of the file")
+
+	blank := mdLines("\n\n\n")
+	only := []mdPreviewBlockAnchor{{kind: mdBlockParagraph, startLine: 1, endLine: 2}}
+	assert.Equal(t, 1, mdPreviewClipRawSpan(only, 0, blank).endLine,
+		"an all-blank span keeps its first line rather than collapsing to nothing")
+
+	short := []mdPreviewBlockAnchor{{kind: mdBlockParagraph, startLine: 9, endLine: 9}}
+	assert.Equal(t, mdPreviewBlockAnchor{kind: mdBlockParagraph, startLine: 9, endLine: 9},
+		mdPreviewClipRawSpan(short, 0, lines), "an anchor past the end of a shorter load is left alone")
 }
 
 // TestMdPreviewToggleRaw_NestedBlockIsNotPaintedTwice is the regression the clip
@@ -374,6 +415,98 @@ func TestMdPreviewToggleRaw_NestedBlockIsNotPaintedTwice(t *testing.T) {
 			}
 		})
 	}
+}
+
+// nestedRawDocs are the container shapes the raw span has to be re-cut for: a
+// container holding a nested block AND its own content after it. Expanding the
+// NESTED block is the direction that used to delete the container's trailing
+// content from the frame, because that content is rendered into rows the nested
+// block owns. None of the nested blocks is a code fence, which
+// mdPreviewExpandRefusal turns away before any of this runs.
+var nestedRawDocs = map[string]struct {
+	doc      string
+	nested   int    // the block index of the nested construct
+	trailing string // the container's own content rendered after it
+}{
+	"nested list": {"- para one\n\n  - nested item\n\n  para two\n\n# After\n", 1, "para two"},
+	"two nested lists": {"- para one\n\n  - nested a\n\n  mid para\n\n  - nested b\n\n  tail para\n\n# After\n",
+		1, "mid para"},
+	"blockquote":   {"> quote one\n>\n> - nested item\n>\n> quote para two\n\n# After\n", 1, "quote para two"},
+	"nested table": {"- para one\n\n  | a | b |\n  | - | - |\n  | 1 | 2 |\n\n  para two\n\n# After\n", 1, "para two"},
+}
+
+// TestMdPreviewToggleRaw_NestedBlockKeepsTheContainersTrailingRows is the
+// regression for the deletion half of the re-cut. The rows a nested block owns
+// run to the row before the container's next sibling, so they include the rows
+// the container's OWN trailing paragraph was rendered into. Replacing that whole
+// range with the nested block's few source lines wiped the paragraph off the
+// screen for as long as the block stayed expanded — no warning, no marker, and
+// the reader had no way to tell part of the document was missing.
+func TestMdPreviewToggleRaw_NestedBlockKeepsTheContainersTrailingRows(t *testing.T) {
+	for name, tc := range nestedRawDocs {
+		t.Run(name, func(t *testing.T) {
+			m := mdPreviewStyledModel(t, tc.doc)
+			before, sm := m.mdPreviewBody()
+			require.True(t, sm.aligned, "fixture sanity: the document must align")
+			require.Greater(t, len(sm.blocks()), tc.nested+1, "fixture sanity: a block must follow the nested one")
+			require.Contains(t, ansi.Strip(before), tc.trailing, "fixture sanity: the trailing content renders")
+
+			m.setMdPreviewCursorToBlock(tc.nested)
+			m.mdPreviewToggleRaw()
+			require.Equal(t, tc.nested, m.mdPreviewExpandedBlock(), "the nested block must expand, not be refused")
+
+			after, _ := m.mdPreviewBody()
+			assert.Contains(t, ansi.Strip(after), tc.trailing,
+				"the container's own trailing content must survive the expansion of a block nested above it")
+		})
+	}
+}
+
+// TestMdPreviewToggleRaw_NestedBlockOwnsTheContainersTrailingLines is the other
+// half: those trailing source lines are painted BY the nested block, so they are
+// reachable — j steps onto one and `a` comments on that exact line. Before the
+// re-cut they belonged to no block's span at all, so no key could reach them.
+func TestMdPreviewToggleRaw_NestedBlockOwnsTheContainersTrailingLines(t *testing.T) {
+	m := mdPreviewStyledModel(t, nestedRawDocs["nested list"].doc)
+	m.setMdPreviewCursorToBlock(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the nested item must expand")
+
+	_, sm := m.mdPreviewBody()
+	got := make([]int, 0, len(sm.lines))
+	for _, la := range sm.lines {
+		got = append(got, la.lineIdx)
+	}
+	assert.Equal(t, []int{2, 4}, got,
+		"the nested item's own line and the container's trailing paragraph; line 3 is blank so it paints without an anchor")
+
+	m.moveMdPreviewCursor(1)
+	require.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 4}, mustMdPreviewRef(t, m),
+		"j must step onto the container's trailing source line")
+
+	m.mdPreviewStartAnnotation()
+	require.True(t, m.annot.annotating, "`a` must open an input on it")
+	assert.Equal(t, 4, m.nav.diffCursor, "aimed at that exact source line")
+}
+
+// TestMdPreviewToggleRaw_SpanDoesNotGrowPastItsOwnContent bounds the growth: a
+// block with no enclosing container keeps its own span, so expanding a paragraph
+// that happens to be followed by a fence does not show the fence's opening
+// marker as if it were the paragraph's last source line. Only a container's
+// continuation is rendered into a block's rows; a line that renders to nothing
+// is not.
+func TestMdPreviewToggleRaw_SpanDoesNotGrowPastItsOwnContent(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewCursorToBlock(1)
+	m.mdPreviewToggleRaw()
+
+	body, sm := m.mdPreviewBody()
+	got := make([]int, 0, len(sm.lines))
+	for _, la := range sm.lines {
+		got = append(got, la.lineIdx)
+	}
+	assert.Equal(t, []int{2, 3}, got, "the paragraph's own two source lines and nothing after them")
+	assert.NotContains(t, ansi.Strip(body), "```go", "the following fence's opening marker is not this block's source")
 }
 
 // TestMdPreviewToggleRaw_ClippedSpanStopsAtTheNestedBlock states the positive

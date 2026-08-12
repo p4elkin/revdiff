@@ -6,6 +6,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
+	"github.com/stretchr/testify/assert"
 )
 
 // This file is the alignment corpus harness for the markdown-preview source
@@ -115,4 +118,93 @@ func TestMdPreviewSrcMapCorpusAlignment(t *testing.T) {
 	for _, k := range kinds {
 		t.Logf("  %-12s %d", k, kindCounts[mdPreviewBlockKind(k)])
 	}
+}
+
+// TestMdPreviewRawExpansionCorpusKeepsEveryLetter is the mechanical net under
+// mdPreviewClipRawSpan, and it exists because the shape it catches is invisible
+// to a fixture test: expanding one block silently DELETED a neighboring part of
+// the document from the frame, and every unit test written for the feature at the
+// time expanded the container rather than the block nested inside it.
+//
+// The property is the acceptance criterion stated as something a machine can
+// check: expanding a block replaces rows it owns, so every letter on screen
+// before the expansion is still on screen after it — the raw source of a block
+// carries the same words its render did, plus markup. Letters are counted rather
+// than compared in order because glamour wraps table cells, which interleaves the
+// columns and reorders the rendered text against its source.
+//
+// Same env gate and same corpus list as TestMdPreviewSrcMapCorpusAlignment above;
+// see that test's comment for how to run it. Measured on the repo's own document
+// tree it does 10298 expansions across 59 aligned documents in about 100 seconds,
+// which is why it stays out of `make test`.
+func TestMdPreviewRawExpansionCorpusKeepsEveryLetter(t *testing.T) {
+	listPath := os.Getenv(srcMapCorpusListEnv)
+	if listPath == "" {
+		t.Skipf("%s not set; skipping raw-expansion corpus check", srcMapCorpusListEnv)
+	}
+	raw, err := os.ReadFile(listPath) //nolint:gosec // path comes from the operator's own env var
+	if err != nil {
+		t.Skipf("corpus list %s unreadable: %v", listPath, err)
+	}
+
+	docs, expansions := 0, 0
+	for path := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		body, readErr := os.ReadFile(path) //nolint:gosec // same
+		if readErr != nil {
+			continue // a corpus list is a snapshot of a user's disk, not a fixture under test
+		}
+		m := mdPreviewStyledModel(t, string(body))
+		before, srcMap := m.mdPreviewBody()
+		if !srcMap.aligned {
+			continue
+		}
+		docs++
+		want := mdPreviewCorpusLetters(before)
+		for bi := range srcMap.blocks() {
+			expanded := m
+			expanded.setMdPreviewCursorToBlock(bi)
+			expanded.mdPreviewToggleRaw()
+			if expanded.mdPreviewExpandedBlock() != bi {
+				continue // refused, and the refusal hint says why
+			}
+			expansions++
+			after, _ := expanded.mdPreviewBody()
+			assert.True(t, mdPreviewCorpusCovers(mdPreviewCorpusLetters(after), want),
+				"%s: expanding block %d (kind %s, source lines %d..%d) removed content from the frame",
+				filepath.Base(path), bi, srcMap.blocks()[bi].kind,
+				srcMap.blocks()[bi].startLine, srcMap.blocks()[bi].endLine)
+		}
+	}
+	if docs == 0 {
+		t.Fatalf("corpus list %s yielded no aligned documents", listPath)
+	}
+	t.Logf("expanded %d blocks across %d aligned documents with no content lost", expansions, docs)
+}
+
+// mdPreviewCorpusLetters is a frame reduced to its lowercase ASCII letters:
+// styling, box drawing, bullets, indentation and wrapping all drop out, so what
+// is left is the text the reader can read.
+func mdPreviewCorpusLetters(frame string) []int {
+	var counts [26]int
+	for _, r := range strings.ToLower(ansi.Strip(frame)) {
+		if r >= 'a' && r <= 'z' {
+			counts[r-'a']++
+		}
+	}
+	return counts[:]
+}
+
+// mdPreviewCorpusCovers reports whether got holds at least as many of every
+// letter as want.
+func mdPreviewCorpusCovers(got, want []int) bool {
+	for i := range want {
+		if got[i] < want[i] {
+			return false
+		}
+	}
+	return true
 }

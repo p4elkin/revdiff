@@ -75,35 +75,82 @@ func mdPreviewRawText(content, tabSpaces string) string {
 	}, expanded)
 }
 
-// mdPreviewClipRawSpan is the anchor of block, with its source span cut short at
-// the line where the next block's source begins.
+// mdPreviewClipRawSpan is the anchor of block with its source span re-cut to the
+// lines that were rendered into the rows the block owns — which is what the pass
+// paints them into, and which is neither the anchor's own span nor a plain prefix
+// of it.
 //
-// A container — a list item or a blockquote — claims a span that runs to the end
-// of its own content, but swallowedSpan (mdpreview_blocks.go) EXCLUDES any
-// boundary child from the aggregation while leaving it inside the resulting
-// min/max range. So an item holding a fenced code block between two of its own
-// paragraphs spans all of those source lines, while the rendered rows it owns
-// stop at the row before the fence's own rows begin. Painting the whole span into
-// those few rows would draw the fence body and the trailing paragraph as source
-// AND leave them rendered directly underneath — the reader sees them twice.
+// The re-cut exists because the two coordinate systems are partitioned
+// differently:
 //
-// Clipping keeps the pass's one real invariant: the rows a block owns and the
-// source lines painted into them describe the same part of the document. The
-// lines beyond the cut are not lost to the reader — they belong to the nested
-// block, which is a stop of its own and can be expanded (or, for a code fence,
-// already shows its source).
+//   - rows TILE. mdPreviewBuildSourceMap closes each block off at the row before
+//     the next block starts, so block i owns exactly rows[row_i .. row_{i+1}-1]:
+//     no row belongs to two blocks, and none to none.
+//   - source spans OVERLAP. A container — a list item or a blockquote — claims a
+//     span running to the end of its own content, and swallowedSpan
+//     (mdpreview_blocks.go) EXCLUDES any boundary child from the aggregation while
+//     leaving it inside the resulting min/max range. So an item holding a nested
+//     list between two of its own paragraphs spans all of those lines, while the
+//     rows it owns stop where the nested list's rows begin.
 //
-// Anchors are strictly increasing in startLine (enforced by
-// mdPreviewBuildSourceMap), so only the immediately following anchor can fall
-// inside this one's span, and the clipped span can never end before it starts.
+// So the cut runs in BOTH directions, and both are load-bearing:
+//
+//   - it SHRINKS a container, at the next block's first source line. The item
+//     above owns only the rows above its nested list, so painting its whole span
+//     there drew the nested list and the trailing paragraph as source AND left
+//     them rendered underneath — the reader saw the same text twice.
+//   - it GROWS a nested block, over the enclosing container's continuation. The
+//     rows the nested list owns run to the row before the container's next sibling
+//     starts, which includes the rows the CONTAINER's own trailing paragraph was
+//     rendered into. Painting only the nested list's own lines there DELETED that
+//     paragraph from the frame for as long as the block stayed expanded, and left
+//     its source line reachable from no block at all. A container's
+//     post-nested-block lines therefore belong, for this pass, to the nested block
+//     whose row range they are rendered inside.
+//
+// The growth is bounded by how far any EARLIER block's source reaches, not simply
+// run out to the next block's first line: only an enclosing container's span
+// covers a line rendered inside this block's rows, and stretching every block to
+// the next one would also swallow lines that render to nothing at all — a
+// following fence's opening marker, say — and show them as this block's source.
+// Anchors are strictly increasing in startLine (mdPreviewBuildSourceMap enforces
+// it), so "any earlier block" and "an enclosing container" are the same test, and
+// the re-cut span can never end before it starts.
+//
+// Trailing blank source lines are dropped for the same symmetry from the other
+// end: mdPreviewExpandBlock keeps the block's trailing blank RENDERED rows rather
+// than replacing them (they are glamour's padding between blocks), so painting the
+// blank source lines too would show that padding twice.
 //
 // Caller guarantees 0 <= block < len(anchors).
-func mdPreviewClipRawSpan(anchors []mdPreviewBlockAnchor, block int) mdPreviewBlockAnchor {
+func mdPreviewClipRawSpan(anchors []mdPreviewBlockAnchor, block int, lines []diff.DiffLine) mdPreviewBlockAnchor {
 	a := anchors[block]
-	if next := block + 1; next < len(anchors) && anchors[next].startLine <= a.endLine {
-		a.endLine = anchors[next].startLine - 1
+	end := a.endLine
+	for _, prev := range anchors[:block] {
+		end = max(end, prev.endLine) // an enclosing container continuing past this block
 	}
+	if next := block + 1; next < len(anchors) {
+		end = min(end, anchors[next].startLine-1)
+	}
+	end = min(end, len(lines)-1)
+	for end > a.startLine && mdPreviewBlankSourceLine(lines[end]) {
+		end--
+	}
+	a.endLine = max(a.startLine, end)
 	return a
+}
+
+// mdPreviewBlankSourceLine reports whether a source line paints nothing the
+// reader could see. A divider row counts as blank because mdPreviewRawLines skips
+// it outright — it paints no row at all — and every other line is asked of
+// mdPreviewRawText, so this and the painted rows share one definition of blank.
+// The tabSpaces it is asked with does not matter here: tab expansion substitutes
+// whitespace for whitespace, which cannot turn a blank line into a non-blank one.
+func mdPreviewBlankSourceLine(line diff.DiffLine) bool {
+	if line.ChangeType == diff.ChangeDivider {
+		return true
+	}
+	return strings.TrimSpace(mdPreviewRawText(line.Content, " ")) == ""
 }
 
 // Refusal messages for mdPreviewExpandRefusal. Each says what the reader can do
@@ -115,8 +162,8 @@ const (
 	mdPreviewExpandNothingHint = "Nothing to show"
 )
 
-// mdPreviewExpandRefusal reports why raw expansion is refused for block a, as
-// the status-bar hint to show, or "" when expansion may proceed.
+// mdPreviewExpandRefusal reports why raw expansion is refused for anchors[block],
+// as the status-bar hint to show, or "" when expansion may proceed.
 //
 // Three refusals, and each is a case where the raw source is already on screen
 // or does not exist:
@@ -130,17 +177,32 @@ const (
 //     "paragraph", the same as prose.
 //   - a block whose every source line is blank has no source to show.
 //
-// The blankness question is asked of mdPreviewRawLines rather than of the source
-// text directly, so this function and the pass that paints the rows share ONE
-// definition of blank. They differ: a line holding nothing but a control byte is
-// non-blank as source text and blank once mdPreviewRawLines has dropped it, and
-// two answers to "is this block worth expanding" is exactly the drift the
-// refusal exists to prevent.
+// It takes the whole anchor list and an index rather than one anchor because the
+// two block-level refusals ask about DIFFERENT spans, and handing it a single
+// pre-clipped anchor is what would let them drift apart:
+//
+//   - the mermaid test asks the block's OWN span, the one the source map
+//     recorded, because the single-line shape it looks for is the one thing
+//     mdPreviewClipRawSpan is free to grow away — it stretches a span over an
+//     enclosing container's continuation. A diagram asked of a stretched span
+//     would read as ordinary multi-line prose and be expanded, painting source
+//     over its own art rows. Asking the recorded span keeps the test independent
+//     of the cut instead of resting on the shapes goldmark happens to produce.
+//   - the blankness test asks the CLIPPED span, because that is what the pass
+//     will paint. Blankness is asked of mdPreviewRawLines rather than of the
+//     source text directly, so this function and the pass share ONE definition of
+//     blank. They differ: a line holding nothing but a control byte is non-blank
+//     as source text and blank once mdPreviewRawLines has dropped it, and two
+//     answers to "is this block worth expanding" is exactly the drift the refusal
+//     exists to prevent.
 //
 // The two other refusals in the feature — an unaligned map and a cursor sitting
 // on the file-level annotation — are not block properties and are decided by
 // the caller (see mdPreviewToggleRaw).
-func mdPreviewExpandRefusal(a mdPreviewBlockAnchor, lines []diff.DiffLine, tabSpaces string) string {
+//
+// Caller guarantees 0 <= block < len(anchors).
+func mdPreviewExpandRefusal(anchors []mdPreviewBlockAnchor, block int, lines []diff.DiffLine, tabSpaces string) string {
+	a := anchors[block]
 	if a.kind == mdBlockCodeBlock {
 		return mdPreviewExpandCodeHint
 	}
@@ -148,7 +210,8 @@ func mdPreviewExpandRefusal(a mdPreviewBlockAnchor, lines []diff.DiffLine, tabSp
 		mdPreviewMermaidFenceLine(lines[a.startLine].Content) {
 		return mdPreviewExpandMermaidHint
 	}
-	if _, ok := mdPreviewRawStopLine(mdPreviewRawLines(lines, a, tabSpaces), -1); !ok {
+	raw := mdPreviewRawLines(lines, mdPreviewClipRawSpan(anchors, block, lines), tabSpaces)
+	if _, ok := mdPreviewRawStopLine(raw, mdPreviewNoWantedLine); !ok {
 		return mdPreviewExpandNothingHint
 	}
 	return ""
@@ -199,16 +262,19 @@ type mdPreviewLineAnchor struct {
 // O(1) on a shared backing pointer and a full memcmp on a copy, so a rebuilt
 // no-op string would cost the whole document on every repaint.
 //
-// The source span is CLIPPED at the next block's first source line
-// (mdPreviewClipRawSpan), so a container holding a nested block never paints that
-// block's lines into rows it does not own — see that function for the shape and
-// what going without it looked like on screen.
+// The rows replaced are the block's OWN tile — anchors[block].row through
+// anchors[block].endRow — and the source painted into them is the matching tile
+// of source lines (mdPreviewClipRawSpan), never the anchor's raw startLine..
+// endLine. The two must be cut to the same part of the document or the pass
+// either paints a nested block's lines into rows it does not own (the same text
+// twice on screen) or drops a container's trailing rows on the floor (part of the
+// document silently missing while a nested block is expanded). See that function
+// for both directions.
 //
-// The trailing blank rows of the block's span are kept rather than replaced. A
-// non-last block's span runs to the row before the next block starts, so it
-// includes the padding glamour puts between blocks, and the last block's span
-// runs to the end of the document. Replacing the whole span would swallow that
-// padding and make the document jump on every toggle.
+// The trailing blank rows of the block's row tile are kept rather than replaced:
+// they are the padding glamour puts between blocks, and replacing them would make
+// the document jump on every toggle. mdPreviewClipRawSpan drops the matching
+// trailing blank SOURCE lines, so the padding is neither painted twice nor lost.
 //
 // srcMap.annots is carried through untouched. It is always empty here in
 // production — the painter that fills it runs after this pass — and a caller
@@ -220,8 +286,8 @@ func mdPreviewExpandBlock(rendered string, srcMap mdPreviewSourceMap, block int,
 	if !srcMap.aligned || block < 0 || block >= len(anchors) {
 		return rendered, srcMap
 	}
-	raw := mdPreviewRawLines(lines, mdPreviewClipRawSpan(anchors, block), tabSpaces)
-	if _, ok := mdPreviewRawStopLine(raw, -1); !ok {
+	raw := mdPreviewRawLines(lines, mdPreviewClipRawSpan(anchors, block, lines), tabSpaces)
+	if _, ok := mdPreviewRawStopLine(raw, mdPreviewNoWantedLine); !ok {
 		// no source lines at all, or none the highlight could show: expanding
 		// would blank the block's rows and record no line anchor, leaving the
 		// stop list claiming nothing is expanded over a block painted empty.
@@ -399,8 +465,7 @@ func (m *Model) mdPreviewExpandTarget(srcMap mdPreviewSourceMap) (block, lineIdx
 		m.preview.hint = mdPreviewUnanchorableHint
 		return 0, 0, false
 	}
-	span := mdPreviewClipRawSpan(anchors, bi)
-	if hint := mdPreviewExpandRefusal(span, m.file.lines, m.cfg.tabSpaces); hint != "" {
+	if hint := mdPreviewExpandRefusal(anchors, bi, m.file.lines, m.cfg.tabSpaces); hint != "" {
 		m.preview.hint = hint
 		return 0, 0, false
 	}
@@ -411,6 +476,7 @@ func (m *Model) mdPreviewExpandTarget(srcMap mdPreviewSourceMap) (block, lineIdx
 	}
 	// the same clipped span the pass will paint, so the line `r` lands on is
 	// always a line the frame actually has a row for.
+	span := mdPreviewClipRawSpan(anchors, bi, m.file.lines)
 	raw := mdPreviewRawLines(m.file.lines, span, m.cfg.tabSpaces)
 	lineIdx, ok = mdPreviewRawStopLine(raw, want)
 	if !ok {

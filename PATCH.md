@@ -705,13 +705,34 @@ The rest of the feature is fork-owned: the pass and the `r` handler in the new
   the raw lines and the comments interleave, so the two lists are merged by ascending row
   (`mdPreviewMergeStopsByRow`) and the block's own stop is dropped while it is expanded — a stop
   covering every raw line at once would make `a` ambiguous about which line it meant.
-- **A container's raw span is clipped at the next block's first source line.** `swallowedSpan`
-  (`mdpreview_blocks.go`) excludes a nested boundary child from a list item's or blockquote's
-  aggregation while leaving it inside the resulting min/max range, so such a container spans source
-  lines whose rendered rows belong to the nested block. Painting the whole span into the few rows
-  the container owns drew the nested block's content as source AND left it rendered underneath —
-  the same text twice on screen. `mdPreviewClipRawSpan` cuts the span at the next anchor's
-  `startLine`; the lines past the cut belong to the nested block, which is a stop of its own.
+- **A block's raw span is re-cut to the lines its own rendered rows came from, in both
+  directions.** Rows TILE — `mdPreviewBuildSourceMap` closes each block off at the row before the
+  next one starts, so every row belongs to exactly one block — while source spans OVERLAP:
+  `swallowedSpan` (`mdpreview_blocks.go`) excludes a nested boundary child from a list item's or
+  blockquote's aggregation while leaving it inside the resulting min/max range, so a container spans
+  source lines whose rendered rows belong to the nested block. `mdPreviewClipRawSpan` reconciles the
+  two, and each direction fixes a bug that reached a build:
+  - it SHRINKS a container at the next block's first source line. Painting the container's whole
+    span into the few rows it owns drew the nested block's content as source AND left it rendered
+    underneath — the same text twice on screen.
+  - it GROWS a nested block over the enclosing container's continuation, bounded by how far any
+    EARLIER block's source reaches. The rows a nested list owns run to the row before the
+    container's next sibling, which includes the rows the container's own trailing paragraph was
+    rendered into; painting only the nested list's own lines there DELETED that paragraph from the
+    frame for as long as the block stayed expanded, with nothing on screen to say so. So a
+    container's post-nested-block lines belong, for this pass, to the nested block whose row range
+    they are rendered inside — which is also what makes them reachable by `j`/`k` and `a`.
+
+  The growth stops at the enclosing container's reach rather than running to the next block, so a
+  paragraph that merely precedes a fence does not show the fence's opening marker as its own last
+  source line. Trailing blank source lines are dropped for the same symmetry from the other end,
+  because `mdPreviewExpandBlock` keeps the block's trailing blank RENDERED rows (they are glamour's
+  padding between blocks) rather than replacing them.
+  `TestMdPreviewRawExpansionCorpusKeepsEveryLetter` (`mdpreview_srcmap_corpus_test.go`, env-gated
+  on the same corpus list as the alignment harness) is the mechanical net under all of it: it
+  expands every block of every corpus document and fails if a letter disappears from the frame. The
+  deletion above survived a review and a round of fixture tests because every fixture expanded the
+  CONTAINER, never the block nested inside it.
 - **What the painted map says is expanded beats what the cursor says.** The two can disagree — the
   cursor still carries `expanded` while `mdPreviewExpandBlock` refused, e.g. against a map built at
   another width. Every reader holding a painted map (`moveMdPreviewCursor`'s j/k clamp,
@@ -1318,12 +1339,20 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   under the click. Accepted rather than fixed: keeping the fallback unchanged is what makes a click
   behave the same everywhere else in preview, and the reader can re-expand with `r`.
 - **Expanding a container shows only its own source, up to the first nested block.** A list item or
-  blockquote holding a fenced code block, a nested list, a table or a heading has its raw span
-  clipped at that block's first source line (`mdPreviewClipRawSpan`, see "Raw source expansion"
-  above), so pressing `r` on the item shows the lines before the nested block and stops. The lines
-  after it are reachable by expanding the nested block itself, which is a cursor stop of its own.
-  The alternative — painting the container's whole span — put the nested block's content on screen
-  twice, as source and as render, which is why this is the clip rather than the bug.
+  blockquote holding a fenced code block, a nested list, a table or a heading has its raw span cut
+  at that block's first source line (`mdPreviewClipRawSpan`, see "Raw source expansion" above), so
+  pressing `r` on the item shows the lines before the nested block and stops. The lines after it
+  belong to the nested block — expanding THAT shows them, because they are rendered into rows it
+  owns. The alternative — painting the container's whole span — put the nested block's content on
+  screen twice, as source and as render, which is why this is the cut rather than the bug.
+- **A container's trailing lines are unreachable when its nested block is a code fence or a mermaid
+  diagram.** Those two blocks refuse expansion (`mdPreviewExpandRefusal`: a fence already shows its
+  source, a diagram's whole art hangs off one source line), and they are the only block whose rows
+  the container's trailing paragraph is rendered into. So in `- para a` / fence / `  para b`, the
+  `  para b` line has no raw-line stop in preview and cannot be annotated per line — `a` on the
+  fence block anchors to the fence instead. Accepted: lifting it means expanding a fence into its
+  own source, which is the one thing the fence refusal exists to prevent. The line is annotatable in
+  the ordinary source view with preview off.
 - **A list item whose children are all boundary kinds contributes no target, and degrades the whole
   document.** `swallowedSpan` aggregates only over a container's own direct content, and a nested
   list, table, code block, heading or thematic break is excluded because it gets its own target —
