@@ -46,7 +46,7 @@ func TestMdPreviewStops_JFromABlockLandsOnItsOwnAnnotation(t *testing.T) {
 	m := stopsModel(t)
 	annotateLine(m, 3, "on alpha") // block 1's own first line
 
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.moveMdPreviewCursor(1)
 
 	ref, ok := m.mdPreviewCursorRef()
@@ -78,7 +78,7 @@ func TestMdPreviewStops_SeveralAnnotationsInOneBlockAreEachAStop(t *testing.T) {
 	stops := srcMap.stops()
 	require.Len(t, stops, 6, "four blocks plus two annotations")
 
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	walked := make([]mdPreviewStopRef, 0, 3)
 	for range 3 {
 		m.moveMdPreviewCursor(1)
@@ -116,7 +116,7 @@ func TestMdPreviewStops_FileLevelAnnotationIsReachable(t *testing.T) {
 		"the file-level annotation must be the first stop of the document")
 	assert.Equal(t, 0, stops[0].row, "it is painted at the very top")
 
-	m.setMdPreviewBlockCursor(0)
+	m.setMdPreviewCursorToBlock(0)
 	m.moveMdPreviewCursor(-1)
 
 	ref, ok := m.mdPreviewCursorRef()
@@ -191,7 +191,7 @@ func TestMdPreviewDeleteAnnotation_OnABlockRefuses(t *testing.T) {
 		m := stopsModel(t)
 		annotateLine(m, 3, "first on alpha")
 		annotateLine(m, 4, "second on alpha")
-		m.setMdPreviewBlockCursor(1)
+		m.setMdPreviewCursorToBlock(1)
 
 		cmd := m.mdPreviewDeleteAnnotation()
 
@@ -303,106 +303,6 @@ func TestMdPreviewDeleteAnnotation_RepaintDoesNotServeAStaleFrame(t *testing.T) 
 		"the frame served from the warm memos must not still carry the deleted annotation")
 	assert.Less(t, strings.Count(after, "\n"), strings.Count(before, "\n"),
 		"and it must be shorter by the rows the annotation used to occupy")
-}
-
-// TestMdPreviewStartAnnotation_OnAnAnnotationStopEditsIt is the `a` rule: the
-// selected annotation is the target, so its current text is pre-filled and
-// saving REPLACES it rather than leaving a second comment beside it. This is the
-// diff pane's own edit path reused — Store.Add replaces on a (File, Line, Type)
-// collision — reached by aiming at the annotation's own line instead of the
-// block's.
-//
-// The fixture puts the annotation on block 1's SECOND source line, so aiming at
-// the block would visibly land somewhere else.
-func TestMdPreviewStartAnnotation_OnAnAnnotationStopEditsIt(t *testing.T) {
-	m := stopsModel(t)
-	annotateLine(m, 4, "the existing note") // block 1's second line, not its start
-	_, srcMap := m.mdPreviewBody()
-	require.NotEqual(t, 3, srcMap.blocks()[1].startLine, "fixture sanity: the annotation is not on the block's start")
-
-	m.setMdPreviewCursorRef(mdPreviewStopRef{block: 1, onAnnot: true, annot: 0})
-	m.mdPreviewStartAnnotation()
-
-	require.True(t, m.annot.annotating, "`a` on an annotation must open an input")
-	assert.Equal(t, 3, m.nav.diffCursor, "aimed at the annotation's own source line (Line 4 -> index 3)")
-	assert.Equal(t, "the existing note", m.annot.input.Value(), "the input must be pre-filled with the current text")
-
-	m.annot.input.SetValue("the edited note")
-	m.saveAnnotation()
-
-	got := m.store.Get("plan.md")
-	require.Len(t, got, 1, "editing must replace the annotation, never add a second one beside it")
-	assert.Equal(t, 4, got[0].Line, "on the same line")
-	assert.Equal(t, "the edited note", got[0].Comment, "with the new text")
-}
-
-// TestMdPreviewStartAnnotation_EditKeepsAMultiLineAnnotation pins the one part
-// of the edit path that is not "type over it": a comment containing newlines
-// cannot go through the textinput at all (its sanitizer flattens them), so
-// startAnnotation stashes it and Enter on an empty input preserves it. Editing
-// from preview must inherit that, or opening `a` on a multi-line comment and
-// pressing Enter would silently blank it.
-func TestMdPreviewStartAnnotation_EditKeepsAMultiLineAnnotation(t *testing.T) {
-	const multi = "first line of the note\nsecond line of the note"
-	m := stopsModel(t)
-	annotateLine(m, 4, multi)
-
-	m.setMdPreviewCursorRef(mdPreviewStopRef{block: 1, onAnnot: true, annot: 0})
-	m.mdPreviewStartAnnotation()
-
-	require.True(t, m.annot.annotating)
-	assert.Empty(t, m.annot.input.Value(), "a multi-line comment must not be flattened into the input")
-	assert.Equal(t, multi, m.annot.existingMultiline, "it must be stashed for the editor key and for Enter")
-
-	m.saveAnnotation() // Enter on an empty input
-
-	got := m.store.Get("plan.md")
-	require.Len(t, got, 1)
-	assert.Equal(t, multi, got[0].Comment, "confirming an empty input must leave the multi-line text unchanged")
-}
-
-// TestMdPreviewStartAnnotation_OnTheFileLevelStopEditsTheFileAnnotation is the
-// same rule for the one annotation with no diff line behind it: Line 0 cannot be
-// aimed at with the diff cursor, so it takes the file-level input — the same call
-// `A` makes, carrying the same pre-fill.
-func TestMdPreviewStartAnnotation_OnTheFileLevelStopEditsTheFileAnnotation(t *testing.T) {
-	m := stopsModel(t)
-	m.store.Add(annotation.Annotation{File: "plan.md", Line: 0, Type: "", Comment: "about the whole file"})
-	m.setMdPreviewCursorRef(mdPreviewStopRef{block: mdPreviewFileStopBlock, onAnnot: true})
-
-	m.mdPreviewStartAnnotation()
-
-	require.True(t, m.annot.annotating)
-	assert.True(t, m.annot.fileAnnotating, "it must open the file-level input, not a line-level one")
-	assert.Equal(t, "about the whole file", m.annot.input.Value(), "pre-filled with the existing file annotation")
-
-	m.annot.input.SetValue("about the whole file, revised")
-	m.saveAnnotation()
-
-	got := m.store.Get("plan.md")
-	require.Len(t, got, 1, "the file-level annotation must be replaced, not duplicated")
-	assert.Equal(t, "about the whole file, revised", got[0].Comment)
-}
-
-// TestMdPreviewStartAnnotation_OnABlockStopStillTargetsTheBlock is the
-// unchanged half: a block stop aims at the block's own start line, whether or
-// not the block carries annotations elsewhere in its span.
-func TestMdPreviewStartAnnotation_OnABlockStopStillTargetsTheBlock(t *testing.T) {
-	m := stopsModel(t)
-	annotateLine(m, 4, "a note on the block's second line")
-	_, srcMap := m.mdPreviewBody()
-	m.setMdPreviewBlockCursor(1)
-
-	m.mdPreviewStartAnnotation()
-
-	require.True(t, m.annot.annotating)
-	assert.Equal(t, srcMap.blocks()[1].startLine, m.nav.diffCursor, "a block stop aims at the block's own line")
-	assert.Empty(t, m.annot.input.Value(), "and finds nothing to pre-fill, since no comment sits on that line")
-
-	m.annot.input.SetValue("a new note on the block")
-	m.saveAnnotation()
-
-	assert.Equal(t, 2, m.store.Count(), "so it adds a comment rather than replacing the one further down")
 }
 
 // expandedStopsFixture is a hand-built map standing in for a frame whose block 1
@@ -529,55 +429,6 @@ func TestMdPreviewMergeStopsByRow_TieGivesTheLineTheEarlierPlace(t *testing.T) {
 
 	assert.Equal(t, []mdPreviewStop{line}, mdPreviewMergeStopsByRow([]mdPreviewStop{line}, nil))
 	assert.Equal(t, []mdPreviewStop{annot}, mdPreviewMergeStopsByRow(nil, []mdPreviewStop{annot}))
-}
-
-// TestMdPreviewCursorState_ExpandedBlockOf covers the state that carries
-// expansion. It answers -1 for every load the cursor does not belong to, which
-// is what makes a file switch and an `R` reload collapse the block with no code
-// on either path.
-func TestMdPreviewCursorState_ExpandedBlockOf(t *testing.T) {
-	c := mdPreviewCursorState{
-		set: true, ref: mdPreviewStopRef{block: 2, onLine: true, line: 9},
-		file: "plan.md", seq: 3, expanded: true,
-	}
-
-	assert.Equal(t, 2, c.expandedBlockOf("plan.md", 3))
-	assert.Equal(t, -1, c.expandedBlockOf("other.md", 3), "another file's cursor expands nothing here")
-	assert.Equal(t, -1, c.expandedBlockOf("plan.md", 4), "and neither does an earlier load's")
-
-	collapsed := c
-	collapsed.expanded = false
-	assert.Equal(t, -1, collapsed.expandedBlockOf("plan.md", 3), "a cursor on a block expands nothing")
-	assert.Equal(t, -1, mdPreviewCursorState{}.expandedBlockOf("plan.md", 3), "nor does no cursor at all")
-
-	fileLevel := c
-	fileLevel.ref = mdPreviewStopRef{block: mdPreviewFileStopBlock, onAnnot: true}
-	assert.Equal(t, -1, fileLevel.expandedBlockOf("plan.md", 3), "the file-level stop owns no block to expand")
-}
-
-// TestMdPreviewCursorState_PlacingTheCursorCollapses is the reason expansion
-// lives on the cursor at all: every existing path that places the cursor assigns
-// a fresh struct literal, so it collapses the block for free and no call site had
-// to learn about expansion.
-func TestMdPreviewCursorState_PlacingTheCursorCollapses(t *testing.T) {
-	m := stopsModel(t)
-	m.preview.cursor = mdPreviewCursorState{
-		set: true, ref: mdPreviewStopRef{block: 1, onLine: true, line: 2},
-		file: m.file.name, seq: m.file.loadSeq, expanded: true,
-	}
-	require.Equal(t, 1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq), "fixture sanity")
-
-	m.setMdPreviewBlockCursor(2)
-	assert.Equal(t, -1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq),
-		"moving the cursor onto a block must collapse whatever was expanded")
-
-	m.preview.cursor.expanded = true
-	m.setMdPreviewCursorRef(mdPreviewStopRef{block: 0})
-	assert.Equal(t, -1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq))
-
-	m.preview.cursor.expanded = true
-	m.clearMdPreviewBlockCursor()
-	assert.Equal(t, -1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq))
 }
 
 // stopRefs is the identity of each stop, which is what the ordering tests are

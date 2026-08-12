@@ -359,7 +359,7 @@ caution, not a safety condition, and it is gone.
   comment above the map, and the "must leave preview before changing file" limitation below.
 
 **Edge-label rendering wiring (no-break spaces and the LR collision retry, added later — see
-`docs/plans/20260805-mermaid-edge-label-rendering.md`):**
+`docs/plans/completed/20260805-mermaid-edge-label-rendering.md`):**
 
 - `app/ui/mdpreview_transpile.go`
   - `mermaidEdgeLabel` — the `strings.ReplaceAll(s, " ", "·")` substitution and the
@@ -935,7 +935,7 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   goes blank once you pan past its end.
 - ~~**Spaces inside an edge label render as `─` (dash) on the arrow line.**~~ **FIXED — every
   edge-label space is now a no-break space, not a plain one** (see
-  `docs/plans/20260805-mermaid-edge-label-rendering.md` and `mdpreview_nbsp.go`'s doc comment).
+  `docs/plans/completed/20260805-mermaid-edge-label-rendering.md` and `mdpreview_nbsp.go`'s doc comment).
   U+00A0 is not the byte `" "`, so `mergeDrawings` in the vendored renderer treats the cell as
   opaque and keeps it instead of letting the arrow line or a crossing edge bleed through, while
   terminals still draw it as a blank. Four costs are accepted in exchange: art copied out of the

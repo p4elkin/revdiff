@@ -154,12 +154,12 @@ func (m *Model) setMdPreviewCursorRefKeepingExpansion(ref mdPreviewStopRef, expa
 	m.setMdPreviewCursorRef(ref)
 }
 
-// setMdPreviewBlockCursor places the cursor on block bi's own stop. A negative
+// setMdPreviewCursorToBlock places the cursor on block bi's own stop. A negative
 // bi clears it, so callers that computed "no block" can pass the result through
 // unguarded.
-func (m *Model) setMdPreviewBlockCursor(bi int) {
+func (m *Model) setMdPreviewCursorToBlock(bi int) {
 	if bi < 0 {
-		m.clearMdPreviewBlockCursor()
+		m.clearMdPreviewCursor()
 		return
 	}
 	m.setMdPreviewCursorRef(mdPreviewStopRef{block: bi})
@@ -185,9 +185,9 @@ func (m *Model) setMdPreviewLineCursor(bi, lineIdx int) {
 	}
 }
 
-// clearMdPreviewBlockCursor takes the cursor off every stop, so nothing is
+// clearMdPreviewCursor takes the cursor off every stop, so nothing is
 // highlighted until the reader moves it again.
-func (m *Model) clearMdPreviewBlockCursor() {
+func (m *Model) clearMdPreviewCursor() {
 	m.preview.cursor = mdPreviewCursorState{}
 }
 
@@ -355,7 +355,7 @@ func (m *Model) dropMdPreviewCursorIfHidden() {
 	if !ok {
 		// the map changed shape under the cursor (a width change that costs the
 		// document its alignment, most plausibly); there is no stop to point at.
-		m.clearMdPreviewBlockCursor()
+		m.clearMdPreviewCursor()
 		return
 	}
 	top := m.layout.viewport.YOffset
@@ -366,7 +366,7 @@ func (m *Model) dropMdPreviewCursorIfHidden() {
 	if m.reseatMdPreviewCursorInExpandedBlock(srcMap, top, bottom) {
 		return
 	}
-	m.clearMdPreviewBlockCursor()
+	m.clearMdPreviewCursor()
 }
 
 // reseatMdPreviewCursorInExpandedBlock moves the cursor to the expanded block's

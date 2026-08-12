@@ -6,8 +6,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/umputun/revdiff/app/keymap"
 )
 
 // TestMdPreviewBlockCursor_NothingSelectedUntilTheReaderMoves is behavior 1 and
@@ -18,7 +16,7 @@ func TestMdPreviewBlockCursor_NothingSelectedUntilTheReaderMoves(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	assert.Equal(t, -1, m.mdPreviewBlockCursor(), "a fresh model must select no block")
 
-	m.setMdPreviewBlockCursor(2)
+	m.setMdPreviewCursorToBlock(2)
 	require.Equal(t, 2, m.mdPreviewBlockCursor(), "sanity: the setter must place the cursor")
 
 	m.modes.mdPreview = false // toggleMarkdownPreview flips this itself; start from off
@@ -26,7 +24,7 @@ func TestMdPreviewBlockCursor_NothingSelectedUntilTheReaderMoves(t *testing.T) {
 	require.True(t, m.modes.mdPreview, "sanity: preview must be on")
 	assert.Equal(t, -1, m.mdPreviewBlockCursor(), "entering preview must select nothing")
 
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.toggleMarkdownPreview()
 	assert.Equal(t, -1, m.mdPreviewBlockCursor(), "leaving preview must clear the cursor too")
 }
@@ -38,7 +36,7 @@ func TestMdPreviewBlockCursor_NothingSelectedUntilTheReaderMoves(t *testing.T) {
 func TestMdPreviewBlockCursor_DroppedByAFileLoadAndAReload(t *testing.T) {
 	t.Run("reload of the same file", func(t *testing.T) {
 		m := mdPreviewHighlightModel(t)
-		m.setMdPreviewBlockCursor(2)
+		m.setMdPreviewCursorToBlock(2)
 		require.Equal(t, 2, m.mdPreviewBlockCursor())
 
 		m.triggerReload() // bumps m.file.loadSeq; the file name is unchanged
@@ -48,7 +46,7 @@ func TestMdPreviewBlockCursor_DroppedByAFileLoadAndAReload(t *testing.T) {
 
 	t.Run("a different file", func(t *testing.T) {
 		m := mdPreviewHighlightModel(t)
-		m.setMdPreviewBlockCursor(2)
+		m.setMdPreviewCursorToBlock(2)
 		require.Equal(t, 2, m.mdPreviewBlockCursor())
 
 		m.file.name = "other.md"
@@ -116,17 +114,17 @@ func TestMoveMdPreviewCursor_StepsOneBlockAndClampsAtBothEnds(t *testing.T) {
 	last := len(srcMap.blocks()) - 1
 	require.GreaterOrEqual(t, last, 3, "fixture sanity: need several blocks")
 
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.moveMdPreviewCursor(1)
 	assert.Equal(t, 2, m.mdPreviewBlockCursor(), "one press must move exactly one block")
 	m.moveMdPreviewCursor(-1)
 	assert.Equal(t, 1, m.mdPreviewBlockCursor(), "the reverse press must come straight back")
 
-	m.setMdPreviewBlockCursor(0)
+	m.setMdPreviewCursorToBlock(0)
 	m.moveMdPreviewCursor(-1)
 	assert.Equal(t, 0, m.mdPreviewBlockCursor(), "the first block must clamp, not wrap to the last")
 
-	m.setMdPreviewBlockCursor(last)
+	m.setMdPreviewCursorToBlock(last)
 	m.moveMdPreviewCursor(1)
 	assert.Equal(t, last, m.mdPreviewBlockCursor(), "the last block must clamp, not wrap to the first")
 }
@@ -144,7 +142,7 @@ func TestMoveMdPreviewCursor_ViewportFollowsMinimally(t *testing.T) {
 
 	t.Run("no scroll while the block is already visible", func(t *testing.T) {
 		mm := m
-		mm.setMdPreviewBlockCursor(0)
+		mm.setMdPreviewCursorToBlock(0)
 		mm.layout.viewport.SetContent(mm.renderMarkdownPreview())
 		require.LessOrEqual(t, anchors[1].endRow, mm.layout.viewport.Height-1,
 			"fixture sanity: block 1 must already be on screen at the top")
@@ -166,7 +164,7 @@ func TestMoveMdPreviewCursor_ViewportFollowsMinimally(t *testing.T) {
 			}
 		}
 		require.Positive(t, target, "fixture sanity: some block must fall below the first screen")
-		mm.setMdPreviewBlockCursor(target - 1)
+		mm.setMdPreviewCursorToBlock(target - 1)
 
 		mm.moveMdPreviewCursor(1)
 
@@ -179,7 +177,7 @@ func TestMoveMdPreviewCursor_ViewportFollowsMinimally(t *testing.T) {
 
 	t.Run("scrolls up to the block's own first row", func(t *testing.T) {
 		mm := m
-		mm.setMdPreviewBlockCursor(2)
+		mm.setMdPreviewCursorToBlock(2)
 		mm.layout.viewport.SetContent(mm.renderMarkdownPreview())
 		mm.layout.viewport.SetYOffset(anchors[3].row)
 		require.Greater(t, mm.layout.viewport.YOffset, anchors[1].row, "fixture sanity: block 1 must be above the fold")
@@ -226,7 +224,7 @@ func TestMdPreviewViewportOnlyScroll_ClearsACursorItHides(t *testing.T) {
 			m := mdPreviewHighlightModel(t)
 			_, srcMap := m.mdPreviewBody()
 			require.True(t, srcMap.aligned, "fixture sanity")
-			m.setMdPreviewBlockCursor(0)
+			m.setMdPreviewCursorToBlock(0)
 			m.layout.viewport.SetContent(m.renderMarkdownPreview())
 
 			got := pressKey(t, m, tc.key)
@@ -246,7 +244,7 @@ func TestMdPreviewViewportOnlyScroll_KeepsAPartlyVisibleCursor(t *testing.T) {
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned, "fixture sanity")
 	target := blockVisibleAcrossScroll(t, m, srcMap, 1)
-	m.setMdPreviewBlockCursor(target)
+	m.setMdPreviewCursorToBlock(target)
 	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 
 	m.scrollMarkdownPreview(1)
@@ -261,7 +259,7 @@ func TestMdPreviewHomeReturnsToTopAndClearsAHiddenCursor(t *testing.T) {
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned, "fixture sanity")
 	last := len(srcMap.blocks()) - 1
-	m.setMdPreviewBlockCursor(last)
+	m.setMdPreviewCursorToBlock(last)
 	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 	m.layout.viewport.SetYOffset(srcMap.blocks()[last].row)
 
@@ -318,10 +316,10 @@ func TestMdPreviewFinalRender_CacheDoesNotServeAStaleFrameAcrossACursorMove(t *t
 	bg := mdPreviewHighlightBg(m)
 	require.NotEmpty(t, bg, "fixture sanity: the resolver must carry a search background")
 
-	m.setMdPreviewBlockCursor(0)
+	m.setMdPreviewCursorToBlock(0)
 	first := strings.Split(m.mdPreviewFinalRender(), "\n") // warms the base, width and cut memos
 
-	m.setMdPreviewBlockCursor(2)
+	m.setMdPreviewCursorToBlock(2)
 	second := strings.Split(m.mdPreviewFinalRender(), "\n") // every memo is warm from the state above
 
 	require.Contains(t, first[anchors[0].row], bg, "sanity: block 0 must be marked in the first frame")
@@ -359,7 +357,7 @@ func TestMdPreviewStartAnnotation_KeepsAnExistingCursor(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned, "fixture sanity")
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 
 	m.mdPreviewStartAnnotation()
 
@@ -417,59 +415,15 @@ func TestMdPreviewCursorState_ZeroValueSelectsNothing(t *testing.T) {
 	assert.True(t, ok, "but it is still a placed cursor")
 }
 
-// TestMdPreviewEsc_CollapsesTheExpandedBlock: esc is the second way out of raw
-// source, beside pressing r again, and the one every reader tries first. It
-// leaves the cursor on the block it collapsed, so the reader is where they
-// started rather than nowhere.
-func TestMdPreviewEsc_CollapsesTheExpandedBlock(t *testing.T) {
-	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
-	m.mdPreviewToggleRaw()
-	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the block must be expanded first")
-	m.layout.scrollX = 9
-
-	model, cmd, handled := m.handleMdPreviewAction(keymap.ActionDismiss)
-
-	require.True(t, handled, "esc with a block expanded must be handled inside preview")
-	assert.Nil(t, cmd, "collapsing is a pure state change plus a viewport swap")
-	got := model.(Model)
-	assert.Equal(t, -1, got.mdPreviewExpandedBlock(), "esc must collapse the block")
-	ref, ok := got.mdPreviewCursorRef()
-	require.True(t, ok, "collapsing must leave the cursor on the block, not clear it")
-	assert.Equal(t, mdPreviewStopRef{block: 1}, ref)
-	assert.Equal(t, 0, got.layout.scrollX, "collapsing must reset the pan, exactly as the second r does")
-}
-
-// TestMdPreviewEsc_FallsThroughWhenNothingIsExpanded: with no expansion to
-// collapse, esc must report itself UNHANDLED so it keeps reaching handleEscKey
-// and clearing a leftover search-match highlight. Handling it unconditionally
-// would make esc a dead key for the search a reader ran before pressing P.
-func TestMdPreviewEsc_FallsThroughWhenNothingIsExpanded(t *testing.T) {
-	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
-	require.Equal(t, -1, m.mdPreviewExpandedBlock(), "fixture sanity: nothing is expanded")
-	before := m.preview
-
-	model, _, handled := m.handleMdPreviewAction(keymap.ActionDismiss)
-
-	assert.False(t, handled, "esc must fall through when there is no expansion to collapse")
-	// "nothing is mutated on that false path" is load-bearing, not incidental:
-	// dispatchAction DISCARDS the returned model when handled is false, so a
-	// mutation made here would be silently thrown away rather than applied.
-	got := model.(Model)
-	assert.Equal(t, before, got.preview, "the false path must leave the preview state untouched")
-	assert.Equal(t, m.layout.scrollX, got.layout.scrollX)
-}
-
-// TestSetMdPreviewBlockCursor_NegativeClears: callers that computed "no block"
+// TestSetMdPreviewCursorToBlock_NegativeClears: callers that computed "no block"
 // pass the result through unguarded, so a negative index has to clear rather
 // than place a cursor on a block that does not exist.
-func TestSetMdPreviewBlockCursor_NegativeClears(t *testing.T) {
+func TestSetMdPreviewCursorToBlock_NegativeClears(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	require.NotNil(t, mustMdPreviewRef(t, m))
 
-	m.setMdPreviewBlockCursor(-1)
+	m.setMdPreviewCursorToBlock(-1)
 
 	_, ok := m.mdPreviewCursorRef()
 	assert.False(t, ok, "a negative block index must take the cursor off every stop")
@@ -481,7 +435,7 @@ func TestSetMdPreviewBlockCursor_NegativeClears(t *testing.T) {
 // never throw away the reader's expansion and reflow the document under them.
 func TestMoveMdPreviewCursor_ClampsAtTheLastRawLineOfAnExpandedBlock(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	_, sm := m.mdPreviewBody()
 	require.Len(t, sm.lines, 2, "fixture sanity: the paragraph paints two raw rows")
@@ -503,7 +457,7 @@ func TestMoveMdPreviewCursor_ClampsAtTheLastRawLineOfAnExpandedBlock(t *testing.
 // of escaping to the preceding one, which would collapse it just as silently.
 func TestMoveMdPreviewCursor_ClampsAtTheFirstRawLineOfAnExpandedBlock(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	require.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 2}, mustMdPreviewRef(t, m),
 		"fixture sanity: expansion lands on the block's first raw line")
@@ -523,7 +477,7 @@ func TestMoveMdPreviewCursor_ClampsAtTheFirstRawLineOfAnExpandedBlock(t *testing
 func TestMoveMdPreviewCursor_ReachesAnnotationsInsideAnExpandedBlock(t *testing.T) {
 	m := toggleRawModel(t)
 	annotateLine(m, 4, "on alpha line two") // store Line is 1-based: source index 3
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity")
 
@@ -570,7 +524,7 @@ func rawScrollModel(t *testing.T) Model {
 // who was only scrolling.
 func TestMdPreviewViewportOnlyScroll_ReSeatsInsideAScrollingExpandedBlock(t *testing.T) {
 	m := rawScrollModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the paragraph must be expanded")
 	_, sm := m.mdPreviewBody()
@@ -600,7 +554,7 @@ func TestMdPreviewViewportOnlyScroll_ReSeatsInsideAScrollingExpandedBlock(t *tes
 // with a row map the reader cannot see.
 func TestMdPreviewViewportOnlyScroll_CollapsesAnExpandedBlockItScrollsPast(t *testing.T) {
 	m := rawScrollModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the paragraph must be expanded")
 	_, sm := m.mdPreviewBody()
@@ -623,4 +577,53 @@ func mustMdPreviewRef(t *testing.T, m Model) mdPreviewStopRef {
 	ref, ok := m.mdPreviewCursorRef()
 	require.True(t, ok, "the cursor must be placed")
 	return ref
+}
+
+// TestMdPreviewCursorState_ExpandedBlockOf covers the state that carries
+// expansion. It answers -1 for every load the cursor does not belong to, which
+// is what makes a file switch and an `R` reload collapse the block with no code
+// on either path.
+func TestMdPreviewCursorState_ExpandedBlockOf(t *testing.T) {
+	c := mdPreviewCursorState{
+		set: true, ref: mdPreviewStopRef{block: 2, onLine: true, line: 9},
+		file: "plan.md", seq: 3, expanded: true,
+	}
+
+	assert.Equal(t, 2, c.expandedBlockOf("plan.md", 3))
+	assert.Equal(t, -1, c.expandedBlockOf("other.md", 3), "another file's cursor expands nothing here")
+	assert.Equal(t, -1, c.expandedBlockOf("plan.md", 4), "and neither does an earlier load's")
+
+	collapsed := c
+	collapsed.expanded = false
+	assert.Equal(t, -1, collapsed.expandedBlockOf("plan.md", 3), "a cursor on a block expands nothing")
+	assert.Equal(t, -1, mdPreviewCursorState{}.expandedBlockOf("plan.md", 3), "nor does no cursor at all")
+
+	fileLevel := c
+	fileLevel.ref = mdPreviewStopRef{block: mdPreviewFileStopBlock, onAnnot: true}
+	assert.Equal(t, -1, fileLevel.expandedBlockOf("plan.md", 3), "the file-level stop owns no block to expand")
+}
+
+// TestMdPreviewCursorState_PlacingTheCursorCollapses is the reason expansion
+// lives on the cursor at all: every existing path that places the cursor assigns
+// a fresh struct literal, so it collapses the block for free and no call site had
+// to learn about expansion.
+func TestMdPreviewCursorState_PlacingTheCursorCollapses(t *testing.T) {
+	m := stopsModel(t)
+	m.preview.cursor = mdPreviewCursorState{
+		set: true, ref: mdPreviewStopRef{block: 1, onLine: true, line: 2},
+		file: m.file.name, seq: m.file.loadSeq, expanded: true,
+	}
+	require.Equal(t, 1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq), "fixture sanity")
+
+	m.setMdPreviewCursorToBlock(2)
+	assert.Equal(t, -1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq),
+		"moving the cursor onto a block must collapse whatever was expanded")
+
+	m.preview.cursor.expanded = true
+	m.setMdPreviewCursorRef(mdPreviewStopRef{block: 0})
+	assert.Equal(t, -1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq))
+
+	m.preview.cursor.expanded = true
+	m.clearMdPreviewCursor()
+	assert.Equal(t, -1, m.preview.cursor.expandedBlockOf(m.file.name, m.file.loadSeq))
 }

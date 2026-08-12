@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"iter"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
@@ -67,7 +68,7 @@ func mdPreviewRawLines(lines []diff.DiffLine, a mdPreviewBlockAnchor, tabSpaces 
 func mdPreviewRawText(content, tabSpaces string) string {
 	expanded := strings.ReplaceAll(content, "\t", tabSpaces)
 	return strings.Map(func(r rune) rune {
-		if mermaidControlRune(r) {
+		if controlRune(r) {
 			return -1
 		}
 		return r
@@ -95,6 +96,8 @@ func mdPreviewRawText(content, tabSpaces string) string {
 // Anchors are strictly increasing in startLine (enforced by
 // mdPreviewBuildSourceMap), so only the immediately following anchor can fall
 // inside this one's span, and the clipped span can never end before it starts.
+//
+// Caller guarantees 0 <= block < len(anchors).
 func mdPreviewClipRawSpan(anchors []mdPreviewBlockAnchor, block int) mdPreviewBlockAnchor {
 	a := anchors[block]
 	if next := block + 1; next < len(anchors) && anchors[next].startLine <= a.endLine {
@@ -288,7 +291,7 @@ const mdPreviewExpandFileHint = "Select a block with j/k to show its source"
 // is on as its raw markdown source, or collapse it back when it already is.
 //
 // Collapsing is a plain re-place of the cursor on the block's own stop:
-// setMdPreviewBlockCursor writes a fresh mdPreviewCursorState, whose expanded is
+// setMdPreviewCursorToBlock writes a fresh mdPreviewCursorState, whose expanded is
 // false, and the next mdPreviewBody therefore paints the rendered rows again.
 // Nothing has to be un-done, which is the whole reason expansion lives on the
 // cursor.
@@ -343,7 +346,7 @@ func (m *Model) mdPreviewToggleRaw() {
 // reset and the recompose through repaintMdPreviewAfterStopChange, which the
 // height change makes mandatory.
 //
-// Collapsing is a plain cursor placement: setMdPreviewBlockCursor assigns a
+// Collapsing is a plain cursor placement: setMdPreviewCursorToBlock assigns a
 // fresh mdPreviewCursorState, so expanded goes back to false and the next
 // mdPreviewBody paints the rendered rows again. Nothing has to be un-done.
 //
@@ -360,7 +363,7 @@ func (m *Model) mdPreviewCollapseRaw() bool {
 	if bi < 0 {
 		return false
 	}
-	m.setMdPreviewBlockCursor(bi)
+	m.setMdPreviewCursorToBlock(bi)
 	m.layout.scrollX = 0
 	m.repaintMdPreviewAfterStopChange()
 	return true
@@ -381,8 +384,13 @@ func (m *Model) mdPreviewExpandTarget(srcMap mdPreviewSourceMap) (block, lineIdx
 		m.preview.hint = mdPreviewExpandFileHint
 		return 0, 0, false
 	}
-	bi := stop.ref.block
-	if !hasStop {
+	// never read a field off stop before hasStop is known: the zero
+	// mdPreviewStopRef is block 0's own stop, so a no-cursor value would read as a
+	// real block rather than as an absence (see mdPreviewStopRef).
+	var bi int
+	if hasStop {
+		bi = stop.ref.block
+	} else {
 		// only pay for the center seed when there is no cursor to read the block
 		// off: mdPreviewCenterBlock builds the whole stop list.
 		bi = m.mdPreviewCenterBlock(srcMap)
@@ -435,25 +443,44 @@ func (m Model) mdPreviewWantedLine(stop mdPreviewStop) int {
 	return mdPreviewNoWantedLine
 }
 
-// mdPreviewRawStopLine picks the source line a fresh expansion stops on: want
-// when the block paints it as a non-blank raw row, and the block's first
-// non-blank raw line otherwise (see mdPreviewNoWantedLine). ok is false when the
-// block has no stoppable raw line at all — every one of its lines is blank, so
-// every painted row would be invisible to the highlight.
-func mdPreviewRawStopLine(raw []mdPreviewRawLine, want int) (lineIdx int, ok bool) {
+// mdPreviewPickStopLine is the one definition of "which raw source line does the
+// cursor land on": want when it turns up as a non-blank line, and the first
+// non-blank line otherwise (see mdPreviewNoWantedLine). ok is false when there is
+// no non-blank line at all — every painted row would be invisible to the
+// highlight, so there is nothing to stop on.
+//
+// It takes the candidates as (lineIdx, blank) pairs so the two callers can feed
+// it from the two different things they hold: mdPreviewRawStopLine from freshly
+// prepared raw lines, and mdPreviewSourceMap.lineStopFor from the line anchors of
+// the frame already on screen. Writing the walk once is what keeps the two from
+// answering the same question differently.
+func mdPreviewPickStopLine(candidates iter.Seq2[int, bool], want int) (lineIdx int, ok bool) {
 	first, found := 0, false
-	for _, rl := range raw {
-		if rl.blank {
+	for idx, blank := range candidates {
+		if blank {
 			continue // paints a row, gets no anchor: a stop there would be invisible
 		}
-		if rl.lineIdx == want {
+		if idx == want {
 			return want, true
 		}
 		if !found {
-			first, found = rl.lineIdx, true
+			first, found = idx, true
 		}
 	}
 	return first, found
+}
+
+// mdPreviewRawStopLine picks the source line a fresh expansion stops on, out of
+// the raw lines the expansion pass is about to paint. See mdPreviewPickStopLine
+// for the rule.
+func mdPreviewRawStopLine(raw []mdPreviewRawLine, want int) (lineIdx int, ok bool) {
+	return mdPreviewPickStopLine(func(yield func(int, bool) bool) {
+		for _, rl := range raw {
+			if !yield(rl.lineIdx, rl.blank) {
+				return
+			}
+		}
+	}, want)
 }
 
 // mdPreviewMermaidFenceLine reports whether content is a fence opening whose

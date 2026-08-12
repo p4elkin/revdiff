@@ -251,7 +251,7 @@ func TestMdPreviewStartAnnotation_AimMidDocument(t *testing.T) {
 	require.True(t, srcMap.aligned)
 	require.GreaterOrEqual(t, len(srcMap.blocks()), 3, "fixture sanity: need at least three distinct blocks")
 	target := srcMap.blocks()[1]
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 
 	m.mdPreviewStartAnnotation()
 
@@ -272,7 +272,7 @@ func TestMdPreviewStartAnnotation_AimPastLastBlock(t *testing.T) {
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned)
 	last := srcMap.blocks()[len(srcMap.blocks())-1]
-	m.setMdPreviewBlockCursor(len(srcMap.blocks()) - 1)
+	m.setMdPreviewCursorToBlock(len(srcMap.blocks()) - 1)
 
 	m.mdPreviewStartAnnotation()
 
@@ -800,6 +800,17 @@ func TestMdPreviewClickAnnotate_RefusedGuards(t *testing.T) {
 		assert.Equal(t, srcMap.blocks()[0].startLine, got.nav.diffCursor, "the open input must keep its target")
 		assert.Equal(t, "half-typed note", got.annot.input.Value(), "a stray click must not discard typed text")
 	})
+
+	t.Run("keyboard aim is refused too", func(t *testing.T) {
+		m := base(t)
+		m.file.markdownPreviewable = false
+		before := m.preview
+
+		assert.Nil(t, m.mdPreviewStartAnnotation())
+		assert.False(t, m.annot.annotating,
+			"`a` must not run the markdown pipeline over a file the render path will not preview")
+		assert.Equal(t, before, m.preview, "and must not seed a cursor against a map of a document not on screen")
+	})
 }
 
 // TestMdPreviewHighlight_PannedRowReachesPaneEdge covers the ragged-bar case:
@@ -822,7 +833,7 @@ func TestMdPreviewHighlight_PannedRowReachesPaneEdge(t *testing.T) {
 	require.True(t, srcMap.aligned, "fixture sanity")
 	require.Greater(t, m.mdPreviewWidestRow(body), m.mdPreviewCutWidth(),
 		"fixture sanity: the document must be wider than the pane, or applyMdPreviewScroll returns the render untouched")
-	m.setMdPreviewBlockCursor(0) // nothing is marked until the reader steers the cursor
+	m.setMdPreviewCursorToBlock(0) // nothing is marked until the reader steers the cursor
 	bi := m.mdPreviewHighlightAnchor(srcMap)
 	require.GreaterOrEqual(t, bi, 0, "fixture sanity: a block must be marked")
 
@@ -1033,7 +1044,7 @@ func TestMdPreviewPaintAnnotations_LiveInputPaintsUnderTheExpandedRawLine(t *tes
 // somewhere else.
 func TestMdPreviewStartAnnotation_OnARawLineTargetsThatExactLine(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	m.moveMdPreviewCursor(1)
 	require.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: 3}, mustMdPreviewRef(t, m),
@@ -1061,7 +1072,7 @@ func TestMdPreviewStartAnnotation_OnARawLineTargetsThatExactLine(t *testing.T) {
 // There is no way to end up with two.
 func TestMdPreviewStartAnnotation_BlockAndFirstRawLineAreOneAnnotation(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 
 	m.mdPreviewStartAnnotation()
 	require.True(t, m.annot.annotating)
@@ -1096,7 +1107,7 @@ func TestMdPreviewStartAnnotation_RawLineAnnotationMatchesSourceView(t *testing.
 	const comment = "a note on alpha line two"
 
 	preview := toggleRawModel(t)
-	preview.setMdPreviewBlockCursor(1)
+	preview.setMdPreviewCursorToBlock(1)
 	preview.mdPreviewToggleRaw()
 	preview.moveMdPreviewCursor(1)
 	ref := mustMdPreviewRef(t, preview)
@@ -1129,7 +1140,7 @@ func TestMdPreviewStartAnnotation_RawLineAnnotationMatchesSourceView(t *testing.
 func TestMdPreviewDeleteAnnotation_StaysOnTheRawLineInsideAnExpandedBlock(t *testing.T) {
 	m := toggleRawModel(t)
 	annotateLine(m, 4, "on alpha line two") // store Line is 1-based: source index 3
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	m.moveMdPreviewCursor(1) // the second raw line
 	m.moveMdPreviewCursor(1) // the comment spliced under it
@@ -1157,7 +1168,7 @@ func TestMdPreviewDeleteAnnotation_FallsBackToTheBlocksFirstRawLine(t *testing.T
 	m := mdPreviewStyledModel(t, "# Title\n\nAlpha one.\nAlpha two.\n\ntail\n")
 	m.file.lines[3].Content = "   "
 	annotateLine(m, 4, "on the blank source line") // store Line is 1-based: index 3
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the paragraph must expand")
 
@@ -1199,7 +1210,7 @@ func TestMdPreviewDeleteAnnotation_StoreNoLongerHoldsIt(t *testing.T) {
 func TestMdPreviewClickDiff_OnANonAnchoredRowOfAnExpandedBlockCollapsesIt(t *testing.T) {
 	m := mdPreviewStyledModel(t, "# Title\n\nAlpha one.\nAlpha two.\n\ntail\n")
 	m.file.lines[3].Content = "   " // paints a row, gets no anchor
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	_, sm := m.mdPreviewBody()
 	require.Len(t, sm.lines, 1, "fixture sanity: only the non-blank source line gets an anchor")
@@ -1217,7 +1228,7 @@ func TestMdPreviewClickDiff_OnANonAnchoredRowOfAnExpandedBlockCollapsesIt(t *tes
 // the fallback that resolves a row to the block around it.
 func TestMdPreviewClickDiff_OnARawLineAnnotatesThatLine(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	_, sm := m.mdPreviewBody()
 	require.Len(t, sm.lines, 2, "fixture sanity: the paragraph paints two raw rows")
@@ -1231,4 +1242,104 @@ func TestMdPreviewClickDiff_OnARawLineAnnotatesThatLine(t *testing.T) {
 	assert.Equal(t, 1, got.mdPreviewExpandedBlock(), "clicking inside the block must not collapse it")
 	assert.Equal(t, mdPreviewStopRef{block: 1, onLine: true, line: target.lineIdx}, mustMdPreviewRef(t, got),
 		"the click leaves the cursor on the line it hit, so a following j/k continues from there")
+}
+
+// TestMdPreviewStartAnnotation_OnAnAnnotationStopEditsIt is the `a` rule: the
+// selected annotation is the target, so its current text is pre-filled and
+// saving REPLACES it rather than leaving a second comment beside it. This is the
+// diff pane's own edit path reused — Store.Add replaces on a (File, Line, Type)
+// collision — reached by aiming at the annotation's own line instead of the
+// block's.
+//
+// The fixture puts the annotation on block 1's SECOND source line, so aiming at
+// the block would visibly land somewhere else.
+func TestMdPreviewStartAnnotation_OnAnAnnotationStopEditsIt(t *testing.T) {
+	m := stopsModel(t)
+	annotateLine(m, 4, "the existing note") // block 1's second line, not its start
+	_, srcMap := m.mdPreviewBody()
+	require.NotEqual(t, 3, srcMap.blocks()[1].startLine, "fixture sanity: the annotation is not on the block's start")
+
+	m.setMdPreviewCursorRef(mdPreviewStopRef{block: 1, onAnnot: true, annot: 0})
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating, "`a` on an annotation must open an input")
+	assert.Equal(t, 3, m.nav.diffCursor, "aimed at the annotation's own source line (Line 4 -> index 3)")
+	assert.Equal(t, "the existing note", m.annot.input.Value(), "the input must be pre-filled with the current text")
+
+	m.annot.input.SetValue("the edited note")
+	m.saveAnnotation()
+
+	got := m.store.Get("plan.md")
+	require.Len(t, got, 1, "editing must replace the annotation, never add a second one beside it")
+	assert.Equal(t, 4, got[0].Line, "on the same line")
+	assert.Equal(t, "the edited note", got[0].Comment, "with the new text")
+}
+
+// TestMdPreviewStartAnnotation_EditKeepsAMultiLineAnnotation pins the one part
+// of the edit path that is not "type over it": a comment containing newlines
+// cannot go through the textinput at all (its sanitizer flattens them), so
+// startAnnotation stashes it and Enter on an empty input preserves it. Editing
+// from preview must inherit that, or opening `a` on a multi-line comment and
+// pressing Enter would silently blank it.
+func TestMdPreviewStartAnnotation_EditKeepsAMultiLineAnnotation(t *testing.T) {
+	const multi = "first line of the note\nsecond line of the note"
+	m := stopsModel(t)
+	annotateLine(m, 4, multi)
+
+	m.setMdPreviewCursorRef(mdPreviewStopRef{block: 1, onAnnot: true, annot: 0})
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating)
+	assert.Empty(t, m.annot.input.Value(), "a multi-line comment must not be flattened into the input")
+	assert.Equal(t, multi, m.annot.existingMultiline, "it must be stashed for the editor key and for Enter")
+
+	m.saveAnnotation() // Enter on an empty input
+
+	got := m.store.Get("plan.md")
+	require.Len(t, got, 1)
+	assert.Equal(t, multi, got[0].Comment, "confirming an empty input must leave the multi-line text unchanged")
+}
+
+// TestMdPreviewStartAnnotation_OnTheFileLevelStopEditsTheFileAnnotation is the
+// same rule for the one annotation with no diff line behind it: Line 0 cannot be
+// aimed at with the diff cursor, so it takes the file-level input — the same call
+// `A` makes, carrying the same pre-fill.
+func TestMdPreviewStartAnnotation_OnTheFileLevelStopEditsTheFileAnnotation(t *testing.T) {
+	m := stopsModel(t)
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 0, Type: "", Comment: "about the whole file"})
+	m.setMdPreviewCursorRef(mdPreviewStopRef{block: mdPreviewFileStopBlock, onAnnot: true})
+
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating)
+	assert.True(t, m.annot.fileAnnotating, "it must open the file-level input, not a line-level one")
+	assert.Equal(t, "about the whole file", m.annot.input.Value(), "pre-filled with the existing file annotation")
+
+	m.annot.input.SetValue("about the whole file, revised")
+	m.saveAnnotation()
+
+	got := m.store.Get("plan.md")
+	require.Len(t, got, 1, "the file-level annotation must be replaced, not duplicated")
+	assert.Equal(t, "about the whole file, revised", got[0].Comment)
+}
+
+// TestMdPreviewStartAnnotation_OnABlockStopStillTargetsTheBlock is the
+// unchanged half: a block stop aims at the block's own start line, whether or
+// not the block carries annotations elsewhere in its span.
+func TestMdPreviewStartAnnotation_OnABlockStopStillTargetsTheBlock(t *testing.T) {
+	m := stopsModel(t)
+	annotateLine(m, 4, "a note on the block's second line")
+	_, srcMap := m.mdPreviewBody()
+	m.setMdPreviewCursorToBlock(1)
+
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating)
+	assert.Equal(t, srcMap.blocks()[1].startLine, m.nav.diffCursor, "a block stop aims at the block's own line")
+	assert.Empty(t, m.annot.input.Value(), "and finds nothing to pre-fill, since no comment sits on that line")
+
+	m.annot.input.SetValue("a new note on the block")
+	m.saveAnnotation()
+
+	assert.Equal(t, 2, m.store.Count(), "so it adds a comment rather than replacing the one further down")
 }

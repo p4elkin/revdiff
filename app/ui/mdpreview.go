@@ -429,19 +429,24 @@ func mermaidArtWithoutControls(art string) string {
 		if r == '\n' || r == '\t' {
 			return r
 		}
-		if mermaidControlRune(r) {
+		if controlRune(r) {
 			return -1
 		}
 		return r
 	}, art)
 }
 
-// mermaidControlRune reports whether r is a C0 control byte or DEL — the bytes
-// that must never reach the terminal from text this patch writes outside
-// glamour. One definition, two callers: mermaidArtWithoutControls keeps newline
-// and tab before consulting it, flowchartSubgraphHeading drops those two as
-// well because a stacked block's heading is a single line.
-func mermaidControlRune(r rune) bool {
+// controlRune reports whether r is a C0 control byte or DEL — the bytes that
+// must never reach the terminal from text this patch writes outside glamour.
+// One definition, three callers, each deciding for itself which of those bytes
+// it keeps first: mermaidArtWithoutControls keeps newline and tab before
+// consulting it, flowchartSubgraphHeading drops those two as well because a
+// stacked block's heading is a single line, and mdPreviewRawText
+// (mdpreview_expand.go) drops them too because one raw source line is one
+// rendered row. The name carries no "mermaid" any more for that last caller's
+// sake: raw markdown source bypasses glamour exactly the way diagram art does,
+// and the byte set that is unsafe to emit is the same one either way.
+func controlRune(r rune) bool {
 	return r < ' ' || r == 0x7f
 }
 
@@ -546,7 +551,7 @@ func (m *Model) toggleMarkdownPreview() {
 	// mdPreviewCursorState). Leaving clears it too, so a later re-entry on the
 	// same file at the same loadSeq — which the cursor's own tag cannot tell
 	// apart from staying in preview — also starts with nothing marked.
-	m.clearMdPreviewBlockCursor()
+	m.clearMdPreviewCursor()
 	if m.modes.mdPreview {
 		m.layout.viewport.SetContent(m.renderDiff())
 		m.layout.viewport.GotoTop()
@@ -561,9 +566,10 @@ func (m *Model) toggleMarkdownPreview() {
 // goes through mdPreviewBaseRender (mdpreview_cache.go), keyed on
 // file/loadSeq/width/noColors, so a repaint at an unchanged state (the block
 // cursor moving to another block, an annotation edit) reuses the last
-// glamour+mermaid pass instead of paying for a fresh one. loadSeq is what makes the key safe across an R reload of the same file
-// at the same width: reload bumps it even though the file name and width do
-// not change, so a stale render can never satisfy a post-reload lookup.
+// glamour+mermaid pass instead of paying for a fresh one. loadSeq is what makes
+// the key safe across an R reload of the same file at the same width: reload
+// bumps it even though the file name and width do not change, so a stale render
+// can never satisfy a post-reload lookup.
 //
 // The frame it returns is the composed one — base render, this file's
 // annotations painted under the blocks they belong to, and the block cursor's

@@ -357,7 +357,7 @@ func TestMdPreviewToggleRaw_NestedBlockIsNotPaintedTwice(t *testing.T) {
 			require.Less(t, sm.blocks()[1].startLine, sm.blocks()[0].endLine,
 				"fixture sanity: the nested block's source sits inside the container's span")
 
-			m.setMdPreviewBlockCursor(0)
+			m.setMdPreviewCursorToBlock(0)
 			m.mdPreviewToggleRaw()
 			require.Equal(t, 0, m.mdPreviewExpandedBlock(), "the container must still expand")
 
@@ -381,7 +381,7 @@ func TestMdPreviewToggleRaw_NestedBlockIsNotPaintedTwice(t *testing.T) {
 // the lines the nested block owns are left to it.
 func TestMdPreviewToggleRaw_ClippedSpanStopsAtTheNestedBlock(t *testing.T) {
 	m := mdPreviewStyledModel(t, "- para a\n\n  ```go\n  x := 1\n  ```\n\n  para b\n\nafter\n")
-	m.setMdPreviewBlockCursor(0)
+	m.setMdPreviewCursorToBlock(0)
 	m.mdPreviewToggleRaw()
 
 	_, sm := m.mdPreviewBody()
@@ -416,7 +416,7 @@ func toggleRawModel(t *testing.T) Model {
 // first of those lines so j/k and `a` work at line level straight away.
 func TestMdPreviewToggleRaw_ExpandsTheCursorBlock(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 
 	m.mdPreviewToggleRaw()
 
@@ -441,7 +441,7 @@ func TestMdPreviewToggleRaw_ExpandsTheCursorBlock(t *testing.T) {
 // reader is where they started rather than nowhere.
 func TestMdPreviewToggleRaw_SecondPressCollapses(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	require.Equal(t, 1, m.mdPreviewExpandedBlock())
 
@@ -512,7 +512,7 @@ func TestMdPreviewToggleRaw_RefusesTheFileLevelStop(t *testing.T) {
 // it was rather than being moved by a press that changed nothing.
 func TestMdPreviewToggleRaw_RefusesACodeFence(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(2)
+	m.setMdPreviewCursorToBlock(2)
 
 	m.mdPreviewToggleRaw()
 
@@ -543,7 +543,7 @@ func TestMdPreviewToggleRaw_RefusesAnUnanchorableDocument(t *testing.T) {
 // toggleMarkdownPreview's own rule.
 func TestMdPreviewToggleRaw_ResetsTheHorizontalPan(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.layout.scrollX = 12
 
 	m.mdPreviewToggleRaw()
@@ -559,7 +559,7 @@ func TestMdPreviewToggleRaw_ResetsTheHorizontalPan(t *testing.T) {
 // handleMdPreviewAction, or `r` is a dead key in the only mode it means anything.
 func TestMdPreviewToggleRaw_ThroughTheKeyPath(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 
 	model, cmd, handled := m.handleMdPreviewAction(keymap.ActionToggleRaw)
 
@@ -573,7 +573,7 @@ func TestMdPreviewToggleRaw_ThroughTheKeyPath(t *testing.T) {
 // would expand a block of a document that is not on screen.
 func TestMdPreviewToggleRaw_NotPreviewableIsANoOp(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.file.markdownPreviewable = false
 
 	m.mdPreviewToggleRaw()
@@ -587,7 +587,7 @@ func TestMdPreviewToggleRaw_NotPreviewableIsANoOp(t *testing.T) {
 // must report false, so ActionDismiss still falls through to handleEscKey.
 func TestMdPreviewCollapseRaw_NotPreviewableReportsNothingToCollapse(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	require.Equal(t, 1, m.mdPreviewExpandedBlock())
 	m.file.markdownPreviewable = false
@@ -602,7 +602,7 @@ func TestMdPreviewCollapseRaw_NotPreviewableReportsNothingToCollapse(t *testing.
 // without one the chain is proved only in two disconnected halves.
 func TestMdPreviewToggleRaw_KeyPressExpandsAndCollapses(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 
 	m = pressKey(t, m, "r")
 	assert.Equal(t, 1, m.mdPreviewExpandedBlock(), "`r` must reach mdPreviewToggleRaw through the real dispatch chain")
@@ -623,7 +623,7 @@ func TestMdPreviewToggleRaw_KeyPressExpandsAndCollapses(t *testing.T) {
 // on the preview state and the store rather than on "nothing at all happened".
 func TestMdPreviewToggleRaw_KeyPressOutsidePreviewChangesNothing(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.modes.mdPreview = false
 
 	got := pressKey(t, m, "r")
@@ -644,7 +644,7 @@ func TestMdPreviewToggleRaw_RefusesAMermaidDiagram(t *testing.T) {
 	require.Len(t, sm.blocks(), 2, "fixture sanity: the heading plus the collapsed diagram paragraph")
 	require.Equal(t, sm.blocks()[1].startLine, sm.blocks()[1].endLine,
 		"fixture sanity: the diagram's span is the single fence-opening line")
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 
 	m = pressKey(t, m, "r")
 
@@ -663,7 +663,7 @@ func TestMdPreviewToggleRaw_RefusesABlockWithNothingToShow(t *testing.T) {
 			m.file.lines[i].Content = "   " // blank out the paragraph the cursor is on
 		}
 	}
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 
 	m = pressKey(t, m, "r")
 
@@ -694,7 +694,7 @@ func TestMdPreviewToggleRaw_StaleCursorFallsBackToTheCenterSeed(t *testing.T) {
 // here does — would pass just as happily on a dim-styled row.
 func TestMdPreviewToggleRaw_RawRowsCarryNoStyling(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 
 	body, sm := m.mdPreviewBody()
@@ -712,7 +712,7 @@ func TestMdPreviewToggleRaw_RawRowsCarryNoStyling(t *testing.T) {
 // case in mdPreviewHighlight the mark stops at the end of the text.
 func TestMdPreviewToggleRaw_HighlightsTheSelectedRawLine(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 
 	body, sm := m.mdPreviewBody()
@@ -734,7 +734,7 @@ func TestMdPreviewToggleRaw_HighlightsTheSelectedRawLine(t *testing.T) {
 func TestMdPreviewToggleRaw_PanReachesTheEndOfTheWidestRawLine(t *testing.T) {
 	wide := strings.Repeat("wide ", 60) // one source line far wider than the pane
 	m := mdPreviewStyledModel(t, "# Title\n\n"+wide+"\n")
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 
 	collapsedBody, _ := m.mdPreviewBody()
 	collapsedMax := m.mdPreviewMaxOffset(collapsedBody, m.mdPreviewCutWidth())
@@ -760,7 +760,7 @@ func TestMdPreviewToggleRaw_PanReachesTheEndOfTheWidestRawLine(t *testing.T) {
 // re-runs expansion against fresh anchors.
 func TestMdPreviewToggleRaw_SurvivesAWidthChange(t *testing.T) {
 	m := toggleRawModel(t)
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	m.mdPreviewToggleRaw()
 	require.Equal(t, 1, m.mdPreviewExpandedBlock())
 
@@ -829,4 +829,48 @@ func TestMdPreviewMermaidFenceLine(t *testing.T) {
 			assert.Equal(t, tt.want, mdPreviewMermaidFenceLine(tt.content))
 		})
 	}
+}
+
+// TestMdPreviewEsc_CollapsesTheExpandedBlock: esc is the second way out of raw
+// source, beside pressing r again, and the one every reader tries first. It
+// leaves the cursor on the block it collapsed, so the reader is where they
+// started rather than nowhere.
+func TestMdPreviewEsc_CollapsesTheExpandedBlock(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewCursorToBlock(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the block must be expanded first")
+	m.layout.scrollX = 9
+
+	model, cmd, handled := m.handleMdPreviewAction(keymap.ActionDismiss)
+
+	require.True(t, handled, "esc with a block expanded must be handled inside preview")
+	assert.Nil(t, cmd, "collapsing is a pure state change plus a viewport swap")
+	got := model.(Model)
+	assert.Equal(t, -1, got.mdPreviewExpandedBlock(), "esc must collapse the block")
+	ref, ok := got.mdPreviewCursorRef()
+	require.True(t, ok, "collapsing must leave the cursor on the block, not clear it")
+	assert.Equal(t, mdPreviewStopRef{block: 1}, ref)
+	assert.Equal(t, 0, got.layout.scrollX, "collapsing must reset the pan, exactly as the second r does")
+}
+
+// TestMdPreviewEsc_FallsThroughWhenNothingIsExpanded: with no expansion to
+// collapse, esc must report itself UNHANDLED so it keeps reaching handleEscKey
+// and clearing a leftover search-match highlight. Handling it unconditionally
+// would make esc a dead key for the search a reader ran before pressing P.
+func TestMdPreviewEsc_FallsThroughWhenNothingIsExpanded(t *testing.T) {
+	m := toggleRawModel(t)
+	m.setMdPreviewCursorToBlock(1)
+	require.Equal(t, -1, m.mdPreviewExpandedBlock(), "fixture sanity: nothing is expanded")
+	before := m.preview
+
+	model, _, handled := m.handleMdPreviewAction(keymap.ActionDismiss)
+
+	assert.False(t, handled, "esc must fall through when there is no expansion to collapse")
+	// "nothing is mutated on that false path" is load-bearing, not incidental:
+	// dispatchAction DISCARDS the returned model when handled is false, so a
+	// mutation made here would be silently thrown away rather than applied.
+	got := model.(Model)
+	assert.Equal(t, before, got.preview, "the false path must leave the preview state untouched")
+	assert.Equal(t, m.layout.scrollX, got.layout.scrollX)
 }

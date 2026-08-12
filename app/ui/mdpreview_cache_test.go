@@ -373,12 +373,12 @@ func TestMdPreviewHighlightAnchor_FollowsTheBlockCursorNotTheOffset(t *testing.T
 	require.GreaterOrEqual(t, len(anchors), 4, "fixture sanity: need several blocks to steer between")
 
 	for i := range anchors {
-		m.setMdPreviewBlockCursor(i)
+		m.setMdPreviewCursorToBlock(i)
 		assert.Equal(t, i, m.mdPreviewHighlightAnchor(srcMap),
 			"with the cursor on block %d, block %d must be the highlighted one", i, i)
 	}
 
-	m.setMdPreviewBlockCursor(1)
+	m.setMdPreviewCursorToBlock(1)
 	for _, offset := range []int{0, anchors[2].row, anchors[len(anchors)-1].row} {
 		m.layout.viewport.YOffset = offset
 		assert.Equal(t, 1, m.mdPreviewHighlightAnchor(srcMap),
@@ -420,7 +420,7 @@ func TestMdPreviewHighlightAnchor_CursorPastTheEndOfTheMapMarksNothing(t *testin
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned)
 
-	m.setMdPreviewBlockCursor(len(srcMap.blocks()))
+	m.setMdPreviewCursorToBlock(len(srcMap.blocks()))
 
 	assert.Equal(t, -1, m.mdPreviewHighlightAnchor(srcMap),
 		"a cursor past the last block must mark nothing")
@@ -433,7 +433,7 @@ func TestMdPreviewHighlightAnchor_UnalignedMapMarksNothing(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned)
-	m.setMdPreviewBlockCursor(0)
+	m.setMdPreviewCursorToBlock(0)
 
 	assert.Equal(t, -1, m.mdPreviewHighlightAnchor(mdPreviewSourceMap{}), "an unaligned map marks nothing")
 	assert.Equal(t, -1, m.mdPreviewHighlightAnchor(mdPreviewSourceMap{aligned: true}), "a map with no blocks marks nothing")
@@ -448,7 +448,7 @@ func TestMdPreviewFinalRender_PaintsHighlightOnTheAnchoredBlockOnly(t *testing.T
 	anchors := srcMap.blocks()
 	require.GreaterOrEqual(t, len(anchors), 4)
 
-	m.setMdPreviewBlockCursor(2)
+	m.setMdPreviewCursorToBlock(2)
 	require.Equal(t, 2, m.mdPreviewHighlightAnchor(srcMap), "fixture sanity: block 2 must be the marked one")
 
 	rows := strings.Split(m.mdPreviewFinalRender(), "\n")
@@ -467,7 +467,7 @@ func TestMdPreviewFinalRender_PaintsHighlightOnTheAnchoredBlockOnly(t *testing.T
 func TestMdPreviewFinalRender_HighlightPreservesVisualShape(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	body, srcMap := m.mdPreviewBody()
-	m.setMdPreviewBlockCursor(2)
+	m.setMdPreviewCursorToBlock(2)
 	require.Equal(t, 2, m.mdPreviewHighlightAnchor(srcMap), "fixture sanity: block 2 must be the marked one")
 
 	plain := strings.Split(m.applyMdPreviewScroll(body), "\n")
@@ -553,7 +553,7 @@ func TestMdPreviewWheelBurst_DropsTheCursorOnceForTheWholeBurst(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned, "fixture sanity")
-	m.setMdPreviewBlockCursor(0) // the first block, which the burst scrolls away from
+	m.setMdPreviewCursorToBlock(0) // the first block, which the burst scrolls away from
 	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 	require.Greater(t, m.layout.viewport.TotalLineCount(), m.layout.viewport.Height,
 		"fixture sanity: the document must be scrollable")
@@ -591,7 +591,7 @@ func TestMdPreviewWheelBurst_KeepsACursorStillInView(t *testing.T) {
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned, "fixture sanity")
 	target := blockVisibleAcrossScroll(t, m, srcMap, wheelStep)
-	m.setMdPreviewBlockCursor(target)
+	m.setMdPreviewCursorToBlock(target)
 	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 
 	model, _ := m.handleWheel(hitDiff, 2)
@@ -625,7 +625,7 @@ func TestScrollMarkdownPreview_RepaintsAndKeepsAVisibleMark(t *testing.T) {
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned)
 	target := blockVisibleAcrossScroll(t, m, srcMap, 1)
-	m.setMdPreviewBlockCursor(target)
+	m.setMdPreviewCursorToBlock(target)
 	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 
 	before := m.layout.viewport.View()

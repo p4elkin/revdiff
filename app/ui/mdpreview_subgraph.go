@@ -288,13 +288,13 @@ func stackFlowchartSubgraphs(header string, blocks []flowchartSubgraph) (art str
 // title is sized from this string, so an ESC counted as characters would draw a
 // rule that does not match what the reader sees. The escaping risk itself is
 // already closed downstream — spliceMermaidArt runs mermaidArtWithoutControls
-// over the whole stacked art, heading included. Both use mermaidControlRune, so
+// over the whole stacked art, heading included. Both use controlRune, so
 // "control byte" is defined in one place; the difference is only that this one
 // drops newline and tab too, since a heading is one line.
 func flowchartSubgraphHeading(label string) string {
 	label = mermaidBRPattern.ReplaceAllString(label, " ")
 	label = strings.Map(func(r rune) rune {
-		if mermaidControlRune(r) {
+		if controlRune(r) {
 			return -1
 		}
 		return r

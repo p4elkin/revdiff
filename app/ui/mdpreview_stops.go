@@ -157,24 +157,26 @@ func (sm mdPreviewSourceMap) lineAt(row int) (mdPreviewLineAnchor, bool) {
 // is false when the block paints no stoppable raw row at all — it is not the
 // expanded block, or every one of its lines is blank.
 //
-// It is mdPreviewRawStopLine (mdpreview_expand.go) asked of the PAINTED map
-// rather than of freshly prepared raw lines. A caller that already holds the map
-// the frame was built from should ask this one: re-deriving the raw lines would
-// be a second walk, free to disagree with what is on screen.
+// It is mdPreviewPickStopLine (mdpreview_expand.go) — the same walk
+// mdPreviewRawStopLine runs — asked of the PAINTED map rather than of freshly
+// prepared raw lines. A caller that already holds the map the frame was built
+// from should ask this one: re-deriving the raw lines would be a second walk,
+// free to disagree with what is on screen.
+//
+// Every line anchor is non-blank by construction (mdPreviewExpandBlock records
+// none for a blank source line), so the blank half of each pair is always false
+// here; it is the raw-line caller that has blanks to skip.
 func (sm mdPreviewSourceMap) lineStopFor(block, want int) (lineIdx int, ok bool) {
-	first, found := 0, false
-	for _, la := range sm.lines {
-		if la.block != block {
-			continue
+	return mdPreviewPickStopLine(func(yield func(int, bool) bool) {
+		for _, la := range sm.lines {
+			if la.block != block {
+				continue
+			}
+			if !yield(la.lineIdx, false) {
+				return
+			}
 		}
-		if la.lineIdx == want {
-			return want, true
-		}
-		if !found {
-			first, found = la.lineIdx, true
-		}
-	}
-	return first, found
+	}, want)
 }
 
 // stops lists everything the preview cursor can stop on, in the order they are
@@ -422,7 +424,7 @@ func (m *Model) mdPreviewDeleteAnnotation() tea.Cmd {
 // on the first block instead.
 //
 // An EXPANDED block is the exception, because landing on its own stop would
-// collapse it (setMdPreviewBlockCursor writes a fresh cursor state, whose
+// collapse it (setMdPreviewCursorToBlock writes a fresh cursor state, whose
 // expanded is false). Deleting a comment is not a request to stop looking at the
 // source, so the cursor stays expanded and lands on the raw line the comment was
 // attached to — the line the reader was commenting on. The block's first raw
@@ -433,12 +435,12 @@ func (m *Model) mdPreviewCursorAfterDelete(stop mdPreviewStop, srcMap mdPreviewS
 	// deleted from, and its raw-line rows are the ones the cursor can land on
 	bi := srcMap.expandedBlock()
 	if bi < 0 || bi != stop.ref.block {
-		m.setMdPreviewBlockCursor(max(stop.ref.block, 0))
+		m.setMdPreviewCursorToBlock(max(stop.ref.block, 0))
 		return
 	}
 	lineIdx, ok := srcMap.lineStopFor(bi, m.mdPreviewWantedLine(stop))
 	if !ok {
-		m.setMdPreviewBlockCursor(bi) // an expanded block with no stoppable raw row; collapse rather than aim at nothing
+		m.setMdPreviewCursorToBlock(bi) // an expanded block with no stoppable raw row; collapse rather than aim at nothing
 		return
 	}
 	m.setMdPreviewLineCursor(bi, lineIdx)
@@ -462,7 +464,7 @@ func (m *Model) repaintMdPreviewAfterStopChange() {
 	body, srcMap := m.mdPreviewBody()
 	stop, ok := m.mdPreviewCursorStop(srcMap)
 	if !ok {
-		m.clearMdPreviewBlockCursor()
+		m.clearMdPreviewCursor()
 		body, srcMap = m.mdPreviewBody()
 	}
 	// content first, offset second, for the reason moveMdPreviewCursor gives:

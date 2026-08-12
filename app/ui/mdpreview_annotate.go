@@ -438,7 +438,20 @@ func (m Model) mdPreviewLiveInputTarget() (int, bool) {
 // frame back, with no way to tell "this document cannot be anchored" from "the
 // key is not bound". The hint is the same mechanism outputState and
 // compactState use for their own refusals, and clears on the next key press.
+//
+// A file renderDiff will not preview is refused outright, the same double gate
+// every other preview entry point carries (mdPreviewClickDiff below,
+// moveMdPreviewCursor, mdPreviewToggleRaw, mdPreviewDeleteAnnotation,
+// panMarkdownPreview). The gate cannot be hoisted into handleMdPreviewAction:
+// several actions it dispatches must still work with preview stuck on for a
+// non-previewable file — esc has to keep falling through to handleEscKey, the
+// scroll keys still move the viewport, and everything reaching the default
+// branch (P itself included) still has to fall through, or the reader would be
+// stuck in preview with no key that leaves it.
 func (m *Model) mdPreviewStartAnnotation() tea.Cmd {
+	if !m.file.markdownPreviewable {
+		return nil // preview stuck on for a file renderDiff will not preview; see panMarkdownPreview
+	}
 	_, srcMap := m.mdPreviewBody()
 	if stop, ok := m.mdPreviewCursorStop(srcMap); ok {
 		if stop.ref.onLine {
@@ -455,7 +468,7 @@ func (m *Model) mdPreviewStartAnnotation() tea.Cmd {
 			m.preview.hint = mdPreviewUnanchorableHint
 			return nil
 		}
-		m.setMdPreviewBlockCursor(bi)
+		m.setMdPreviewCursorToBlock(bi)
 	}
 	return m.mdPreviewStartAnnotationAt(srcMap.blocks()[bi].startLine)
 }
@@ -587,7 +600,7 @@ func (m Model) mdPreviewClickDiff(y int) (tea.Model, tea.Cmd) {
 	// a click is aim, exactly like j/k: it leaves the block cursor on the block
 	// it annotated, so the highlight marks what the click hit and a following
 	// j/k continues from there instead of re-seeding at the viewport center.
-	m.setMdPreviewBlockCursor(bi)
+	m.setMdPreviewCursorToBlock(bi)
 	cmd := m.mdPreviewStartAnnotationAt(srcMap.blocks()[bi].startLine)
 	return m, cmd
 }
