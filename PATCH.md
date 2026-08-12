@@ -561,8 +561,9 @@ Behavior, in one place:
   body), then each block followed by the annotations painted under it. So `j`
   from a block reaches that block's own first annotation before the next block.
   For an ORDINARY block that order is not imposed by the stop list — it follows
-  from the paint geometry, since block *i*'s annotation rows occupy exactly the
-  gap between block *i*'s `endRow` and block *i+1*'s `row`. The EXPANDED block is
+  from the paint geometry, since block *i*'s annotation rows sit at the top of
+  the gap between block *i*'s `endRow` and block *i+1*'s `row` (the rest of that
+  gap is the padding glamour leaves between blocks). The EXPANDED block is
   the one place it IS imposed: its raw source lines and its comments interleave,
   so `stops()` merges the two lists by ascending row
   (`mdPreviewMergeStopsByRow`) and drops the block's own stop while it is
@@ -787,6 +788,20 @@ The rest of the feature is fork-owned: the pass and the `r` handler in the new
   the painter's anchor shifting became a prefix sum over the splice points. The deciding case is
   the live input: without it, pressing `a` on raw line 4 of a thirty-line table puts the box you
   are typing into below raw line 30.
+- **A block's `endRow` stops at its last row with text on it.** `mdPreviewBuildSourceMap` closes a
+  block off by walking back from the row before the next block starts (from the end of the render
+  for the last block) over glamour's padding rows. Before that trim the padding was inside the
+  span, so an annotation spliced at `endRow` — the saved one and the live input alike — floated a
+  blank row below the paragraph it commented on, unlike the diff pane where a comment sits directly
+  under its line. It showed up only for blocks glamour actually padded: consecutive list items are
+  adjacent and never had the gap, which is why it read as intermittent. The trim is in the map
+  rather than in the painter on purpose — the painter still splices at `endRow` and still shifts by
+  a **strict** prefix sum, so annotation rows still land BELOW the block's own span and the block
+  highlight still marks the block alone. Trimming at splice time instead would have put the splice
+  inside the span and dragged the highlight over the annotation. Every other reader of `endRow` is
+  unaffected: `mdPreviewHighlight` already skips blank rows, and `mdPreviewExpandBlock` already
+  trimmed the same rows itself (`mdPreviewTrailingBlankRows`, now a no-op for a map built from a
+  render and kept only for hand-built ones).
 
 **Test-only, mechanical, not part of the feature itself:**
 

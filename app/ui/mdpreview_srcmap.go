@@ -19,7 +19,14 @@ import (
 // occupies on screen, and the source lines it came from.
 //
 // row/endRow are 0-based row indices into the FINAL render (mermaid art
-// already spliced in), inclusive on both ends. startLine/endLine are indices
+// already spliced in), inclusive on both ends. endRow is the block's LAST ROW
+// WITH VISIBLE TEXT ON IT, not the row before the next block starts: glamour
+// pads between blocks, and the padding rows belong to no block. That is what
+// makes endRow usable as a splice point — an annotation spliced after the
+// padding would float a blank row below the block it comments on (see
+// spliceRow).
+//
+// startLine/endLine are indices
 // into the []diff.DiffLine the render was produced from — i.e. the same
 // coordinate m.nav.diffCursor uses, not a 1-based file line number and not a
 // line number of the intermediate placeholder document. That choice is what
@@ -114,7 +121,11 @@ func (sm mdPreviewSourceMap) resolveBlock(idx int, idxOK bool) int {
 // splice point is a ROW here, not a block.
 //
 // row is the raw line's own anchor row when idx is a line of the expanded block,
-// and the owning block's endRow otherwise. block follows the same split: the
+// and the owning block's endRow otherwise — the block's last row with text on
+// it, so the annotation hugs the block the way the diff pane's annotation hugs
+// its line (see mdPreviewBlockAnchor).
+//
+// block follows the same split: the
 // LINE ANCHOR's own block for a raw line, rather than resolveBlock's answer,
 // which for nested constructs (a code fence inside an expanded blockquote) can
 // name an inner block whose rows sit elsewhere and would break the ascending-row
@@ -469,9 +480,22 @@ func mdPreviewShiftRow(shifts []mdPreviewArtShift, row int) int {
 // mdPreviewBuildSourceMap turns an agreed target/row pairing into the finished
 // map: rows are moved into final-render coordinates, source line spans are
 // translated out of the intermediate placeholder document and into indices of
-// the original []diff.DiffLine via origins, and each block's EndRow is closed
-// off at the row before the next block starts (the last block runs to the end
-// of the render).
+// the original []diff.DiffLine via origins, and each block's endRow is closed
+// off at its last row with text on it — the search runs back from the row
+// before the next block starts (from the end of the render for the last block),
+// skipping the blank rows glamour pads between blocks with.
+//
+// Trimming that padding off here, rather than at the one place that was hurt by
+// it, is what keeps "where does an annotation attach" a single answer: the
+// painter still splices at endRow and shifts by a strict prefix sum over the
+// splice rows, so an annotation's rows still land BELOW the block's own span and
+// the block highlight still marks the block alone. The alternative — endRow kept
+// as the padded span, trimmed only when a splice row is computed — would put the
+// splice inside the span and drag the highlight over the annotation with it.
+// Every other reader of endRow is unaffected or improved by the trim: the
+// highlight already skips blank rows, and the expansion pass trims the same
+// rows itself before replacing a block (mdPreviewTrailingBlankRows), so it now
+// finds nothing left to trim and replaces exactly the rows it did before.
 //
 // It refuses the whole map — the same all-or-nothing degrade
 // mdPreviewAlignRows applies to rows — when startLine is not strictly
@@ -510,15 +534,39 @@ func mdPreviewBuildSourceMap(targets []mdPreviewBlockTarget, rows []int, shifts 
 		})
 	}
 
-	lastRow := strings.Count(rendered, "\n")
+	renderRows := strings.Split(rendered, "\n")
+	lastRow := len(renderRows) - 1
 	for i := range anchors {
+		span := lastRow
 		if i+1 < len(anchors) {
-			anchors[i].endRow = max(anchors[i].row, anchors[i+1].row-1)
-			continue
+			span = anchors[i+1].row - 1
 		}
-		anchors[i].endRow = max(anchors[i].row, lastRow)
+		anchors[i].endRow = mdPreviewLastContentRow(renderRows, anchors[i].row, max(anchors[i].row, span))
 	}
 	return mdPreviewSourceMap{aligned: true, anchors: anchors}
+}
+
+// mdPreviewLastContentRow is the last row of the span start..end that has
+// visible text on it, or start when every row after it is blank. It is how a
+// block's endRow stops at the block instead of running through the padding
+// glamour leaves behind it; mdPreviewTrailingBlankRows (mdpreview_expand.go)
+// does the counting, so the expansion pass and this one agree on what "blank"
+// means by construction rather than by two matching definitions.
+//
+// Out-of-range input is clamped rather than trusted: this runs over the rows of
+// the very render the anchors were built from, so a span past the end cannot
+// happen, but an index panic in the render path would take the whole TUI down.
+func mdPreviewLastContentRow(rows []string, start, end int) int {
+	if start < 0 || start >= len(rows) {
+		return max(start, 0)
+	}
+	if end >= len(rows) {
+		end = len(rows) - 1
+	}
+	if end <= start {
+		return start
+	}
+	return end - mdPreviewTrailingBlankRows(rows, start, end)
 }
 
 // mdPreviewOriginOf maps a 1-based line number of the placeholder document to

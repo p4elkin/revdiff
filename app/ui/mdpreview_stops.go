@@ -186,9 +186,11 @@ func (sm mdPreviewSourceMap) lineStopFor(block, want int) (lineIdx int, ok bool)
 // That order is what makes `j` from a block land on that block's own first
 // annotation rather than skipping to the next block. For an ordinary block it
 // falls out of the paint geometry rather than being imposed here: block i's
-// annotation rows occupy exactly the gap between block i's endRow and block
-// i+1's row (see mdPreviewPaintAnnotationsTracked's shift accounting), so
-// listing them in this order is also listing them in ascending row order.
+// annotation rows sit at the top of the gap between block i's endRow and block
+// i+1's row — the rest of that gap being glamour's padding, which endRow stops
+// short of (see mdPreviewBlockAnchor and mdPreviewPaintAnnotationsTracked's
+// shift accounting) — so listing them in this order is also listing them in
+// ascending row order.
 //
 // The EXPANDED block is the one place where it no longer falls out, and so the
 // one place the order is imposed. Its raw source lines and its annotations

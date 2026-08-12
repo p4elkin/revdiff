@@ -1343,3 +1343,103 @@ func TestMdPreviewStartAnnotation_OnABlockStopStillTargetsTheBlock(t *testing.T)
 
 	assert.Equal(t, 2, m.store.Count(), "so it adds a comment rather than replacing the one further down")
 }
+
+// mdPreviewHugDoc is a plain document with a block in the middle and a block at
+// the end, so one fixture covers both halves of the no-gap rule. Every block
+// here is followed by glamour's own padding row, which is exactly the row an
+// annotation used to be spliced after.
+const mdPreviewHugDoc = "# Title\n\nAlpha paragraph.\n\n## Section\n\nOmega paragraph.\n"
+
+// mdPreviewCommentRow returns the painted frame's rows with ANSI stripped, plus
+// the row comment landed on. It fails when the comment was painted more than
+// once, or not at all — either would make an adjacency assertion meaningless.
+func mdPreviewCommentRow(t *testing.T, painted, comment string) (rows []string, at int) {
+	t.Helper()
+	rows = strings.Split(ansi.Strip(painted), "\n")
+	at = -1
+	for i, r := range rows {
+		if !strings.Contains(r, comment) {
+			continue
+		}
+		require.Equal(t, -1, at, "comment %q must be painted exactly once", comment)
+		at = i
+	}
+	require.Positive(t, at, "comment %q must be painted, and never as the frame's first row", comment)
+	return rows, at
+}
+
+// TestMdPreviewPaintAnnotations_MidDocumentBlockCommentHugsItsLastContentRow is
+// the reported bug: glamour pads a blank row after every block, that padding was
+// inside the block's span, and an annotation spliced at the end of the span
+// therefore floated one row below the paragraph it commented on. The diff pane
+// paints an annotation directly under its line, and preview must match.
+func TestMdPreviewPaintAnnotations_MidDocumentBlockCommentHugsItsLastContentRow(t *testing.T) {
+	m := mdPreviewStyledModel(t, mdPreviewHugDoc)
+	const comment = "a note on the middle paragraph"
+	annotateLine(m, 3, comment) // "Alpha paragraph.", a block with two blocks below it
+
+	painted, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.aligned, "fixture sanity: this document must align")
+
+	rows, at := mdPreviewCommentRow(t, painted, comment)
+	assert.Contains(t, rows[at-1], "Alpha paragraph.",
+		"the comment must sit directly under the block's last row with text on it")
+}
+
+// TestMdPreviewPaintAnnotations_LastBlockCommentHugsItsLastContentRow is the
+// same rule at the end of the document, where the block's span used to run to
+// the last row of the whole render — two blank rows of it here, so the gap was
+// twice as wide as the mid-document one.
+func TestMdPreviewPaintAnnotations_LastBlockCommentHugsItsLastContentRow(t *testing.T) {
+	m := mdPreviewStyledModel(t, mdPreviewHugDoc)
+	const comment = "a note on the last paragraph"
+	annotateLine(m, 7, comment) // "Omega paragraph.", the document's last block
+
+	painted, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.aligned, "fixture sanity: this document must align")
+
+	rows, at := mdPreviewCommentRow(t, painted, comment)
+	assert.Contains(t, rows[at-1], "Omega paragraph.",
+		"the last block's span runs to the end of the render, and its comment must still hug the text")
+}
+
+// TestMdPreviewPaintAnnotations_TwoCommentsOnOneBlockStackUnderIt: closing the
+// gap must not reorder anything. Both comments belong to the same block, so they
+// are painted back to back under its last content row, in ascending line order.
+func TestMdPreviewPaintAnnotations_TwoCommentsOnOneBlockStackUnderIt(t *testing.T) {
+	m := mdPreviewStyledModel(t, "# Title\n\nAlpha one.\nAlpha two.\n\ntail paragraph\n")
+	const (
+		first  = "a note on the first line"
+		second = "a note on the second line"
+	)
+	annotateLine(m, 4, second) // added out of order on purpose: paint order is line order
+	annotateLine(m, 3, first)
+
+	painted, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.aligned, "fixture sanity: this document must align")
+
+	rows, at := mdPreviewCommentRow(t, painted, first)
+	assert.Contains(t, rows[at-1], "Alpha one.", "the first comment hugs the block's own text")
+	_, second2 := mdPreviewCommentRow(t, painted, second)
+	assert.Equal(t, at+1, second2, "and the second is painted directly below the first, in line order")
+}
+
+// TestMdPreviewPaintAnnotations_ExpandedRawLineCommentUnchanged is the case that
+// must NOT move: inside an expanded block a comment is spliced at the raw line's
+// own anchor row, which never carried padding, so it hugged its line before this
+// change and has to keep hugging it after.
+func TestMdPreviewPaintAnnotations_ExpandedRawLineCommentUnchanged(t *testing.T) {
+	m := mdPreviewStyledModel(t, "# Title\n\nAlpha one.\nAlpha two.\n\ntail paragraph\n")
+	const comment = "a note on the first raw line"
+	annotateLine(m, 3, comment) // "Alpha one.", the expanded block's first source line
+	m.setMdPreviewCursorToBlock(1)
+	m.mdPreviewToggleRaw()
+	require.Equal(t, 1, m.mdPreviewExpandedBlock(), "fixture sanity: the paragraph must expand")
+
+	painted, srcMap := m.mdPreviewBody()
+	require.Len(t, srcMap.lines, 2, "fixture sanity: both source lines must paint a raw row")
+
+	rows, at := mdPreviewCommentRow(t, painted, comment)
+	assert.Equal(t, "Alpha one.", rows[at-1], "the comment stays under its own raw source line")
+	assert.Equal(t, "Alpha two.", rows[at+1], "and the block's remaining source continues below it")
+}

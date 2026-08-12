@@ -332,11 +332,11 @@ func (m Model) mdPreviewHighlightAnchor(srcMap mdPreviewSourceMap) int {
 // --no-colors promises a preview with none in it (see mdPreviewStyleNoColor);
 // that mode does not align a map in practice either, so this costs nothing real.
 //
-// Blank rows inside the block's span are left alone. A block's span runs to the
-// row before the next block starts, which includes the padding glamour puts
-// between blocks — and for the LAST block it runs to the end of the document.
-// Painting those would drag a solid bar across every empty row below the block
-// instead of marking the block.
+// Blank rows inside the block's span are left alone. Padding rows BETWEEN
+// blocks are no longer part of a span at all (mdPreviewBlockAnchor's endRow
+// stops at the block's last row with text on it), but a block can still hold a
+// blank row of its own — an empty line inside a code fence, say — and painting
+// those would drag a solid bar through the block instead of marking its text.
 func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) string {
 	if m.cfg.noColors {
 		return rendered

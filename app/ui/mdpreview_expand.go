@@ -377,6 +377,11 @@ func mdPreviewExpandBlock(rendered string, srcMap mdPreviewSourceMap, block int,
 		return rendered, srcMap
 	}
 
+	// mdPreviewBuildSourceMap already ends a block at its last row with text on
+	// it, so for a map straight out of the render this trim finds nothing. It
+	// stays because it is the only guard for a map that did NOT come from there —
+	// a hand-built one in a test, or a future producer — and expanding over a
+	// padding row would paint the raw source where the next block's gap belongs.
 	replaced := end - mdPreviewTrailingBlankRows(rows, start, end) - start + 1
 	out := make([]string, 0, len(rows)-replaced+len(raw))
 	out = append(out, rows[:start]...)
