@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"sort"
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
@@ -27,13 +26,13 @@ type mdPreviewCacheKey struct {
 
 // mdPreviewRenderCache memoizes the base preview render — the whole-document
 // glamour+mermaid render plus its source map (mdPreviewRenderWithMap) — for
-// exactly one cache key at a time. It exists because the scroll-following
-// block highlight (a later task in this plan) has to repaint on every offset
-// change, the way the diff-pane wheel-burst coalescing already repaints
-// without re-rendering the diff itself (see wheelState in
-// .claude/rules/gotchas.md). Without this cache, that repaint would pay for a
-// full glamour+mermaid pass per scroll step instead of per file/width/color
-// change.
+// exactly one cache key at a time. It exists because the frame has to be
+// recomposed far more often than the document changes — every block-cursor
+// move, every scroll that drops the cursor, every annotation edit — the way
+// the diff-pane wheel-burst coalescing already repaints without re-rendering
+// the diff itself (see wheelState in .claude/rules/gotchas.md). Without this
+// cache, each of those would pay for a full glamour+mermaid pass instead of
+// one per file/width/color change.
 //
 // Held behind a pointer, the same reason renderCache (diffRenderCache,
 // app/ui/diffview.go) is: renderMarkdownPreview has a value receiver, so a
@@ -64,7 +63,21 @@ type mdPreviewCacheKey struct {
 //     additionally keys on the resolved «/» indicators, which is where the
 //     theme enters that pass.
 //   - the block highlight is not memoized at all — it is recomputed per frame
-//     from the live resolver.
+//     from the live resolver and the block cursor (mdpreview_cursor.go). That
+//     is what keeps the cursor OUT of every key here: a cursor move misses
+//     nothing, because the pass it changes runs after the last memo. Moving
+//     the highlight inside the cut memo would need the cursor in that key.
+//
+// Raw source expansion (mdPreviewExpandBlock, mdpreview_expand.go) is out of
+// this key too, and for a different reason than the cursor. It really does
+// change the document's CONTENT — one block's rendered rows become its source
+// lines — but it changes it DOWNSTREAM of this memo: it rewrites the finished
+// render rather than being an input to it, so pressing `r` must not, and does
+// not, cost a fresh glamour pass. Putting expansion in this key would throw a
+// perfectly correct entry away on every toggle. What expansion does change is
+// the body string, and the scroll memos below key on exactly that, so they
+// miss and redo the width scan and the cut — which is precisely what a
+// document that just grew wider raw rows needs.
 type mdPreviewRenderCache struct {
 	key      mdPreviewCacheKey
 	valid    bool
@@ -81,8 +94,9 @@ type mdPreviewRenderCache struct {
 // It is keyed on the body string rather than on mdPreviewCacheKey, because the
 // body is the base render PLUS this file's annotation rows — it changes on
 // every annotation edit, which the base render's own key cannot see. Neither
-// pass depends on the vertical offset, so the repaint every j/k keypress now
-// triggers (the block highlight has to move with the viewport) reuses both.
+// pass depends on the vertical offset or on the block cursor, so the repaint
+// every j/k keypress triggers (the highlight moves to another block) reuses
+// both.
 //
 // The measurement that made this necessary, taken on
 // docs/plans/completed/20260722-markdown-preview-mode.md (983 rendered rows,
@@ -190,17 +204,28 @@ func (m Model) mdPreviewBaseRender() (string, mdPreviewSourceMap) {
 	return rendered, srcMap
 }
 
-// mdPreviewBody is the full-width, uncut preview body: the cached base render
-// with this file's annotations painted into it, plus the source map re-expressed
-// in the painted render's own row numbers (see
-// mdPreviewPaintAnnotationsTracked).
+// mdPreviewBody is the full-width, uncut preview body: the cached base render,
+// with the expanded block redrawn as its raw source and this file's annotations
+// painted in, plus the source map re-expressed in the resulting render's own row
+// numbers.
+//
+// Three stages, and their order is load-bearing. Expansion
+// (mdPreviewExpandBlock) runs first, so the painter receives a map already in
+// expanded row coordinates and needs no knowledge of expansion for its own
+// shifting to stay exact; the reverse order would leave every annotation anchor
+// stale the moment a block changed height. Both stages return the string they
+// were handed when they have nothing to do, so a collapsed document with no
+// annotations still shares one backing pointer with the cached base render and
+// the scroll memo's body compare stays O(1).
 //
 // This is the render the pan clamp must measure — mdPreviewMaxOffset needs the
-// widest row of the string that will actually be cut — and the one
-// applyMdPreviewScroll cuts. The block highlight is deliberately NOT part of it;
-// see mdPreviewFinalRender for why it lands after the cut.
+// widest row of the string that will actually be cut, and after expansion those
+// are the raw source rows — and the one applyMdPreviewScroll cuts. The block
+// highlight is deliberately NOT part of it; see mdPreviewFinalRender for why it
+// lands after the cut.
 func (m Model) mdPreviewBody() (string, mdPreviewSourceMap) {
 	rendered, srcMap := m.mdPreviewBaseRender()
+	rendered, srcMap = mdPreviewExpandBlock(rendered, srcMap, m.mdPreviewExpandedBlock(), m.file.lines, m.cfg.tabSpaces)
 	return m.mdPreviewPaintAnnotationsTracked(rendered, srcMap)
 }
 
@@ -234,10 +259,14 @@ func (m Model) mdPreviewFinalRender() string {
 
 // flushPreviewWheelPending is the markdown-preview half of flushWheelPending
 // (app/ui/mouse.go), which calls it first and returns when it reports true.
-// pinDiffCursorTo is an unconditional no-op while previewing (there is no
+// pinDiffCursorTo is an unconditional no-op while previewing (there is no diff
 // cursor to pin), so without this the deferred SetContent the wheel-burst
-// debounce owes never runs and the scroll-following block highlight stays
-// frozen on the block that was topmost when the burst started.
+// debounce owes never runs.
+//
+// The wheel is a viewport-only scroll, so it drops the block cursor when the
+// burst has carried its block off screen — once per burst, here, rather than
+// once per wheel event, which is the whole reason this sits on the debounce
+// side rather than in handleWheel.
 //
 // It rides the SAME wheelState debounce (gen / renderPending / tickInFlight,
 // see .claude/rules/gotchas.md) rather than bringing a second one: one repaint
@@ -248,44 +277,48 @@ func (m *Model) flushPreviewWheelPending() bool {
 	if !m.modes.mdPreview {
 		return false
 	}
+	m.dropMdPreviewCursorIfHidden()
 	m.layout.viewport.SetContent(m.renderDiff())
 	m.wheel.renderPending = false
 	m.wheel.tickInFlight = false
 	return true
 }
 
-// mdPreviewHighlightAnchor picks the block the highlight marks: the topmost
-// FULLY visible one — the first block whose rows all fall inside the viewport at
-// the current YOffset. That is what makes the mark follow reading position
-// rather than the viewport edge: a block half-scrolled off the top is not the
-// one being read, the next whole one is.
+// mdPreviewHighlightAnchor is the BLOCK the cursor sits on or under — the block
+// itself when the cursor is on a block stop, the OWNING block when it is on one
+// of that block's annotations. It is what `a` aims at on a block stop (on an
+// annotation stop `a` edits that annotation instead — see
+// mdPreviewStartAnnotation). The highlight itself paints the cursor's own stop,
+// which for an annotation stop is the annotation's rows and not the block's, so
+// mdPreviewHighlight goes through mdPreviewCursorStop instead of this.
 //
-// Blocks are contiguous and ascending (endRow of one is the row before the next
-// one's row, enforced when the map is built), so the first block starting at or
-// after the top is the only candidate — if it is too tall to fit, every later
-// block starts further down and cannot fit either. When it does not fit, the
-// fallback is the block owning the top row, which is the one filling the screen.
+// It used to DERIVE the mark from viewport.YOffset — the topmost fully visible
+// block — which meant something was always marked, always near the top of the
+// pane, and never anything the reader chose. The mark is now a real cursor
+// (mdPreviewCursorState, mdpreview_cursor.go): seeded at the viewport center by
+// the first down/up press or by `a`, moved a stop at a time, and dropped when a
+// viewport-only scroll carries its stop off screen.
 //
-// Returns -1 when there is nothing to mark: an unaligned or empty map, or a
-// viewport scrolled above the first block.
+// Returns -1 when there is no block to name: no cursor placed, an unaligned or
+// empty map, a cursor on the file-level annotation (which owns no block), or a
+// cursor pointing past the end of the current map (defensive — the map can lose
+// blocks at a width where alignment fails).
 func (m Model) mdPreviewHighlightAnchor(srcMap mdPreviewSourceMap) int {
 	anchors := srcMap.blocks()
 	if !srcMap.aligned || len(anchors) == 0 {
 		return -1
 	}
-	top := m.layout.viewport.YOffset
-	bottom := top + m.layout.viewport.Height - 1
-
-	i := sort.Search(len(anchors), func(i int) bool { return anchors[i].row >= top })
-	if i < len(anchors) && anchors[i].endRow <= bottom {
-		return i
+	bi := m.mdPreviewBlockCursor()
+	if bi >= len(anchors) {
+		return -1
 	}
-	return srcMap.anchorAtRow(top)
+	return bi
 }
 
-// mdPreviewHighlight paints the highlighted block's rows with a background.
-// rendered is the already-cut preview frame and srcMap must be in that frame's
-// coordinates.
+// mdPreviewHighlight paints the cursor's own rows with a background — a block's
+// rows on a block stop, the annotation's own rows on an annotation stop, so what
+// is marked is always exactly what `a` and `d` will act on. rendered is the
+// already-cut preview frame and srcMap must be in that frame's coordinates.
 //
 // The background is ColorKeySearchBg, borrowed deliberately: there is no
 // cursor-background color key to use instead, and adding one is the three-site
@@ -299,11 +332,11 @@ func (m Model) mdPreviewHighlightAnchor(srcMap mdPreviewSourceMap) int {
 // --no-colors promises a preview with none in it (see mdPreviewStyleNoColor);
 // that mode does not align a map in practice either, so this costs nothing real.
 //
-// Blank rows inside the block's span are left alone. A block's span runs to the
-// row before the next block starts, which includes the padding glamour puts
-// between blocks — and for the LAST block it runs to the end of the document.
-// Painting those would drag a solid bar across every empty row below the block
-// instead of marking the block.
+// Blank rows inside the block's span are left alone. Padding rows BETWEEN
+// blocks are no longer part of a span at all (mdPreviewBlockAnchor's endRow
+// stops at the block's last row with text on it), but a block can still hold a
+// blank row of its own — an empty line inside a code fence, say — and painting
+// those would drag a solid bar through the block instead of marking its text.
 func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) string {
 	if m.cfg.noColors {
 		return rendered
@@ -312,26 +345,29 @@ func (m Model) mdPreviewHighlight(rendered string, srcMap mdPreviewSourceMap) st
 	if bg == "" {
 		return rendered
 	}
-	bi := m.mdPreviewHighlightAnchor(srcMap)
-	if bi < 0 {
+	stop, ok := m.mdPreviewCursorStop(srcMap)
+	if !ok {
 		return rendered
 	}
 
-	// pad the bar out to the pane only on a panned frame. There, cutMdPreviewLine
-	// has cut each row at wherever its own content ended, so a row that does not
-	// continue to the right is shorter than the pane and the bar would stop short
-	// of the edge — ragged, in exactly the mode (a wide diagram or table) panning
-	// exists for. Unpanned, glamour has already padded prose rows to its own wrap
-	// width and padding further would widen every highlighted row past the shape
-	// the rest of the document has.
+	// pad the bar out to the pane on a panned frame, and on a raw source line in
+	// any frame. Panned, cutMdPreviewLine has cut each row at wherever its own
+	// content ended, so a row that does not continue to the right is shorter than
+	// the pane and the bar would stop short of the edge — ragged, in exactly the
+	// mode (a wide diagram or table) panning exists for. A raw row is short for a
+	// different reason and needs the same fix: mdPreviewExpandBlock paints the
+	// source line and nothing else, so unlike a glamour row it was never padded to
+	// the wrap width, and an 18-column line would otherwise get an 18-column bar
+	// where every rendered block gets a full-width one. Unpanned rendered rows are
+	// left alone: glamour has already padded them, and padding further would widen
+	// every highlighted row past the shape the rest of the document has.
 	padTo := 0
-	if m.layout.scrollX > 0 {
+	if m.layout.scrollX > 0 || stop.ref.onLine {
 		padTo = m.mdPreviewCutWidth()
 	}
-	anchor := srcMap.blocks()[bi]
 	rows := strings.Split(rendered, "\n")
 	painted := false
-	for r := max(0, anchor.row); r <= anchor.endRow && r < len(rows); r++ {
+	for r := max(0, stop.row); r <= stop.endRow && r < len(rows); r++ {
 		if strings.TrimSpace(ansi.Strip(rows[r])) == "" {
 			continue
 		}

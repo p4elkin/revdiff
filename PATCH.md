@@ -26,12 +26,13 @@ note or transcript using the old names is describing that layout, not this one.)
 Because the patch never goes to upstream, it deliberately leaves every doc that describes the
 released, brew-installed binary alone: `README.md`, `site/index.html`, `site/docs.html`, and
 the plugin reference docs under `.claude-plugin/` and `plugins/`. So the `P` key
-(`toggle_preview`), the `▤` status-bar icon, and the `--preview` flag appear in neither the
-README keybindings/options tables, nor `site/docs.html`, nor any plugin `config.md`/`usage.md`.
+(`toggle_preview`), the `r` key (`toggle_raw`), the `▤` status-bar icon, and the `--preview`
+flag appear in neither the README keybindings/options tables, nor `site/docs.html`, nor any
+plugin `config.md`/`usage.md`.
 That is on purpose, not an oversight: editing them would describe a feature to people running
 the real upstream binary, which does not have it — true whether those docs live on `md-preview`
 or get merged all the way to the fork's `master`, since the fork's `master` is still not what
-those docs are about. The `P` binding and `--preview` flag are discoverable at runtime instead, through the
+those docs are about. The `P` and `r` bindings and the `--preview` flag are discoverable at runtime instead, through the
 in-app help overlay (`?`), `--dump-keys`, and `--help`/`--dump-config`, all of which read the
 real keymap/options and so list them automatically in this build.
 
@@ -120,15 +121,37 @@ feature, preview included, published to the user's own fork, never to upstream.
 - `app/ui/mdpreview_cache.go` — the single-entry render cache (`mdPreviewRenderCache`) that keys
   the base render and its source map on `(file.name, file.loadSeq, viewport.Width, noColors)`, plus
   the composed-frame assembly (`mdPreviewBody`, `mdPreviewFrame`, `mdPreviewHighlight`) that
-  layers the scroll-following block highlight and painted annotations on top of the cached base.
+  layers the block cursor's highlight and painted annotations on top of the cached base.
 - `app/ui/mdpreview_cache_test.go` — its tests, plus `BenchmarkMdPreviewRepaint`.
 - `app/ui/mdpreview_annotate.go` — painting existing annotations into the preview
   (`mdPreviewPaintAnnotationsTracked`, reusing `renderAnnotationOrInput`/`renderFileAnnotationHeader`
   rather than a parallel painter) and creating one (`mdPreviewStartAnnotation`,
   `mdPreviewStartAnnotationAt`, `mdPreviewClickDiff`, the live-input visibility helper).
 - `app/ui/mdpreview_annotate_test.go` — its tests.
+- `app/ui/mdpreview_cursor.go` — the driveable preview cursor: its tagged state
+  (`mdPreviewCursorState`), the read/place/clear helpers, the center-of-viewport seed
+  (`mdPreviewViewportCenter`, `mdPreviewCenterBlock`), the one-stop-per-press move with its minimal
+  viewport follow (`moveMdPreviewCursor`, `syncMdPreviewViewportToStop`), and the
+  drop-when-scrolled-out-of-view rule every viewport-only scroll goes through
+  (`dropMdPreviewCursorIfHidden`, `afterMdPreviewViewportScroll`). See "Preview cursor" below.
+- `app/ui/mdpreview_cursor_test.go` — its tests.
+- `app/ui/mdpreview_stops.go` — what the cursor can stop on: the identity a stop is addressed by
+  (`mdPreviewStopRef`), the stop and painted-annotation anchor types (`mdPreviewStop`,
+  `mdPreviewAnnotAnchor`), the ordered stop list and the two lookups over it
+  (`mdPreviewSourceMap.stops`/`stopAt`, `mdPreviewStopIndex`, `mdPreviewNearestStop`), and `d`
+  inside preview (`mdPreviewDeleteAnnotation`, `repaintMdPreviewAfterStopChange`).
+- `app/ui/mdpreview_stops_test.go` — its tests.
+- `app/ui/mdpreview_expand.go` — raw source expansion for the selected block: the pass that swaps
+  one block's rendered rows for its markdown source one row per source line
+  (`mdPreviewRawLines`, `mdPreviewExpandBlock`, `mdPreviewLineAnchor`), the refusal rules that
+  say when `r` will not expand (`mdPreviewExpandRefusal` — a code fence by block kind, a block
+  whose every source line is blank), the recovery of a mermaid diagram's fence extent
+  (`mdPreviewOwnSpanEnd`, `mdPreviewMermaidFenceSpan`), and the `r` handler
+  itself (`mdPreviewToggleRaw`, `mdPreviewExpandTarget`, `mdPreviewRawStopLine`,
+  `mdPreviewCollapseRaw`). See "Raw source expansion" below.
+- `app/ui/mdpreview_expand_test.go` — its tests.
 
-A clean rebase never conflicts on these twenty-six files — they don't exist upstream. All conflict
+A clean rebase never conflicts on these thirty-two files — they don't exist upstream. All conflict
 risk is in the hunks below.
 
 ## Existing files edited, and where
@@ -140,10 +163,10 @@ current HEAD of `md-preview`; they will drift after every rebase — treat them 
 **Task 4 wiring (the mode toggle itself):**
 
 - `app/keymap/keymap.go`
-  - line 54: `ActionTogglePreview` added to the `Action` const enum
-  - line 92: `ActionTogglePreview: true` added to the `validActions` map
-  - line 233: help-section entry in `defaultDescriptions()`
-  - line 294: `"P": ActionTogglePreview` in `defaultBindings()`
+  - line 55: `ActionTogglePreview` added to the `Action` const enum
+  - line 95: `ActionTogglePreview: true` added to the `validActions` map
+  - line 238: help-section entry in `defaultDescriptions()`
+  - line 301: `"P": ActionTogglePreview` in `defaultBindings()`
 - `app/ui/model.go`
   - `mdPreview bool` field on `modeState`
   - `markdownPreviewable bool` field on `loadedFileState` — the real gate for preview mode (a
@@ -337,7 +360,7 @@ caution, not a safety condition, and it is gone.
   comment above the map, and the "must leave preview before changing file" limitation below.
 
 **Edge-label rendering wiring (no-break spaces and the LR collision retry, added later — see
-`docs/plans/20260805-mermaid-edge-label-rendering.md`):**
+`docs/plans/completed/20260805-mermaid-edge-label-rendering.md`):**
 
 - `app/ui/mdpreview_transpile.go`
   - `mermaidEdgeLabel` — the `strings.ReplaceAll(s, " ", "·")` substitution and the
@@ -363,7 +386,7 @@ of this carries rebase conflict risk against upstream — recorded here for the 
 same reasoning as the "Diagram transpile wiring" and "Horizontal panning wiring" entries above.
 
 **Preview annotations (reading and creating annotations inside preview, this
-plan's own feature — see `docs/plans/20260811-preview-annotations.md`):**
+plan's own feature — see `docs/plans/completed/20260811-preview-annotations.md`):**
 
 The mechanism: every block glamour renders writes a zero-width marker into its
 style's prefix (`mdpreview_marker.go`); a goldmark walk over the same document
@@ -397,8 +420,9 @@ on that one map and that one refusal contract.
   - `flushWheelPending` gained a two-line `if m.flushPreviewWheelPending()
     { return }` at its top (`mdpreview_cache.go`): `pinDiffCursorTo` is an
     unconditional no-op in preview (nothing to pin), so without it the deferred
-    repaint the wheel-burst debounce owes never landed, and the
-    scroll-following highlight would freeze on the pre-burst block. That helper
+    repaint the wheel-burst debounce owes never landed. That helper now also
+    drops the block cursor once per burst when the burst carried its block off
+    screen (see "Preview block cursor" below),
     repaints once and clears both `renderPending` and `tickInFlight` — it rides
     the SAME `wheelState` debounce documented in gotchas.md rather than adding a
     second one, per that task's explicit warning.
@@ -435,10 +459,13 @@ unmodified diff-pane-only gate and becomes reachable once `a` has moved focus.
 A refused preview annotation is not silent either: `mdPreviewStartAnnotation` sets
 `m.preview.hint` (an `mdPreviewState`, the same shape as `outputState` /
 `compactState`, rendered by `transientHint` and cleared on the next key or mouse
-event) when `mdPreviewHighlightAnchor` returns -1. That is the unaligned-document
-case — `README.md` is one — where the frame is otherwise byte-identical and the
+event) when neither the block cursor nor the center-of-viewport seed resolves a
+block. Since the block cursor landed that is exactly the unaligned-document case
+— `README.md` is one — where the frame is otherwise byte-identical and the
 reader cannot tell "this document cannot be anchored" from "the key is not
-bound".
+bound". The message is the constant `mdPreviewUnanchorableHint`; the old second
+message ("No block in view to annotate") is gone with the scroll-derived
+highlight, because an aligned map always has a nearest block to seed on.
 
 The render cache (`mdpreview_cache.go`) is a single entry, not a map — the
 preview shows one file at a time, so there is never more than one base render
@@ -476,10 +503,305 @@ came from timed `mdPreviewBaseRender` — a key comparison and a string return �
 while a repaint is `mdPreviewFinalRender`: cached base render, annotations
 painted in, the horizontal cut, the highlight. Mislabelling it is how a
 full-document width scan came to sit unnoticed in every keypress. The honest
-figure for the repaint the scroll-following highlight actually pays is the
+figure for the repaint a block-cursor move actually pays is the
 third row: ~0.12ms, down from ~6.2ms, and ~835x below a fresh render. The
 remaining cost is the highlight's own per-row pass, which cannot be cached
 because it moves with the offset.
+
+**Preview cursor (the highlight became something the reader steers):**
+
+The preview annotations above shipped with a highlight *derived from scroll
+position*: `mdPreviewHighlightAnchor` computed the topmost fully visible block
+from `viewport.YOffset` and held no state. In use that marked a block nobody had
+chosen, always near the top of the pane, and it could not be aimed. It is now a
+real cursor over **stops**.
+
+A stop is a rendered block, or a single annotation painted under one. It started
+out as blocks only, which meant `j`/`k` stepped straight over every painted
+comment: nothing could select one, so nothing could delete one either, and `d`
+was excluded from the allowlist for exactly that reason. Annotations are now
+stops of their own.
+
+The whole feature lives in the patch's own files. **No upstream-owned file gained
+a hunk for it** — not `model.go`, not `loaders.go`, not `mouse.go`, not
+`keymap.go`. Three design choices are what bought that, and all three are worth
+keeping through a rebase:
+
+- **The cursor is tagged, not reset.** `mdPreviewCursorState` stores the stop
+  together with the `file.name` + `file.loadSeq` it was placed under, and reports
+  "nothing selected" whenever the tag does not match the current load. A file
+  switch and an `R` reload both bump `loadSeq`, so both leave nothing selected
+  with no reset in `handleFileLoaded` (`loaders.go`) to remember. It is the same
+  seq-tagging `compactState.pendingAnchor` uses. The zero value means "nothing
+  selected", so `NewModel` needs no initializer either.
+- **A stop is addressed by identity, never by its index in the stop list**
+  (`mdPreviewStopRef`: a block index, plus which annotation under it if any). The
+  list changes length under a cursor that never moved — `A` prepends a file-level
+  stop, `d` removes one from the middle — and an index would silently come to
+  mean a different stop. An identity survives both, and it is what makes the
+  after-delete placement exact rather than approximate.
+- **The reading keys and `d` are routed inside `handleMdPreviewAction`**, which
+  already existed. `ActionDown`/`ActionUp` (j/k AND the arrows — one action each,
+  they cannot be told apart and are not meant to be) move the cursor;
+  `ActionScrollDiffDown`/`ActionScrollDiffUp` (J/K) joined the routed set so the
+  scroll can drop the cursor and repaint, which the fall-through
+  `scrollDiffViewportLine` never did in preview (`pinDiffCursorTo` is a no-op
+  there, so it repainted nothing); `ActionDeleteAnnotation` (`d`) joined it too —
+  see the delete rules below for why adding it to the allowlist alone would be
+  wrong.
+
+Behavior, in one place:
+
+- nothing is highlighted until the reader moves. Entering preview, a file load
+  and an `R` reload all leave the cursor unset.
+- `j`/`k` (and the arrows) with no cursor SEED it at the stop nearest the
+  vertical center of the viewport and stop there; with a cursor they move one
+  stop and clamp at the first and the last, no wrap.
+- stop order is paint order: the file-level annotation (painted above the whole
+  body), then each block followed by the annotations painted under it. So `j`
+  from a block reaches that block's own first annotation before the next block.
+  For an ORDINARY block that order is not imposed by the stop list — it follows
+  from the paint geometry, since block *i*'s annotation rows sit at the top of
+  the gap between block *i*'s `endRow` and block *i+1*'s `row` (the rest of that
+  gap is the padding glamour leaves between blocks). The EXPANDED block is
+  the one place it IS imposed: its raw source lines and its comments interleave,
+  so `stops()` merges the two lists by ascending row
+  (`mdPreviewMergeStopsByRow`) and drops the block's own stop while it is
+  expanded. See "Raw source expansion" below.
+- the highlight marks the cursor's own rows: a block's rows on a block stop, the
+  annotation's own rows on an annotation stop. What is marked is always what `a`
+  and `d` will act on.
+- the viewport then follows minimally — `syncMdPreviewViewportToStop` is
+  `syncViewportToCursor` in preview-row coordinates, including its
+  "taller than the pane shows its start" clamp. It never centers: centering
+  is what made the old top-edge behavior jumpy.
+- `J`/`K`, page/half-page, home/end and the wheel stay pure viewport scroll, and
+  each drops the cursor when its stop has gone entirely off screen. That keeps
+  the feature's invariant: you always see what you are about to annotate or
+  delete. The wheel does it in `flushPreviewWheelPending`, once per burst, not
+  per event.
+- `a` with no cursor seeds at the center block and annotates that, so it is never
+  a dead key. On a **block** stop it annotates that block's start line; on an
+  **annotation** stop it EDITS that annotation, aimed at its own `(Line, Type)`.
+  A click sets the cursor to what it hit, in addition to annotating it: a raw
+  source line of an expanded block when the clicked row carries a line anchor
+  (`srcMap.lineAt`, tried first), and otherwise the block the row belongs to.
+- `d` deletes the annotation the cursor is stopped on, then leaves the cursor on
+  the block that owned it — except inside an expanded block, where it stays
+  expanded and lands on the raw line the comment was attached to (see "The cursor
+  became two-level" below). On a block stop, or with nothing selected, it refuses
+  with a transient hint (`mdPreviewDeleteNeedsAnnotationHint`) rather than
+  removing the block's annotations wholesale.
+- a document whose source map did not align has no stops to steer between, so
+  `j`/`k` fall back to a one-row scroll there rather than becoming dead keys.
+
+**Editing is the pre-existing diff-pane path, not a new mechanism.**
+`startAnnotation` already pre-fills its input from the store for the same
+`(Line, Type)` and `Store.Add` already replaces on that key, so aiming `a` at the
+selected annotation's own line IS the edit. The multi-line case comes with it
+unchanged: a comment containing newlines is stashed in `annot.existingMultiline`
+instead of being loaded into the textinput (whose sanitizer would flatten it), so
+the editor key seeds `$EDITOR` from it and Enter on an empty input preserves it
+rather than blanking it. No edit action and no new binding were added.
+
+⚠️ **`d` must stay routed inside `handleMdPreviewAction`, not merely allowlisted.**
+Its fall-through target `deleteAnnotation` (`app/ui/annotate.go`) reads
+`m.nav.diffCursor` + `m.annot.cursorOnAnnotation`, which preview drives neither
+of, and its tail can call `requestFileDiff` — a file load, mid-delete, out of
+preview. `mdPreviewDeleteAnnotation` deletes off the preview cursor instead. It
+does still refresh the tree filter and follow a selection the refresh moved off
+this file, exactly as source view does: the alternative is a file tree claiming
+this file carries annotations after its last one was deleted.
+
+⚠️ **The preview cursor is deliberately NOT a key of any preview memo, and adding
+it to one would be wrong twice over.** `mdPreviewHighlight` runs AFTER
+`applyMdPreviewScroll`'s memoized cut (`mdPreviewFrame` owns that order, for the
+reasons in its doc comment), so a cursor move misses nothing — the pass it
+changes is the only pass that is not memoized. Moving the highlight inside the
+cut memo would make every cursor move serve the previous frame until some other
+input changed. `TestMdPreviewFinalRender_CacheDoesNotServeAStaleFrameAcrossACursorMove`
+reaches the second cursor state on a model whose memos were warmed by the first,
+which is the only shape that catches it; it was verified by actually making that
+mutation. A DELETE is a different question and needed checking separately, since
+it changes the painted body rather than only the highlight: the scroll memos key
+on that body string and so miss by themselves, which
+`TestMdPreviewDeleteAnnotation_RepaintDoesNotServeAStaleFrame` pins on a model
+whose memos were warmed with the annotation still present.
+
+**Raw source expansion (`r` shows the selected block's markdown source, added later — see
+`docs/plans/completed/20260811-preview-raw-block-expansion.md`):**
+
+Press `r` on the block the preview cursor marks and that block is redrawn as its raw markdown
+source, one rendered row per source line. `j`/`k` then step between those source lines and `a`
+annotates the exact line. Press `r` again, or `esc`, and the block goes back to its rendered form.
+A mermaid diagram expands too (added after the first version of the feature — see "A mermaid
+diagram expands to its fence source" below); a code fence still does not.
+
+Only one upstream-owned file gained hunks for this, and they are all four in `app/keymap/keymap.go`:
+
+- `app/keymap/keymap.go`
+  - line 56: `ActionToggleRaw Action = "toggle_raw"` added to the `Action` const enum
+  - line 96: `ActionToggleRaw: true` added to the `validActions` map
+  - line 239: help-section entry in `defaultDescriptions()` — `{ActionToggleRaw, "toggle raw
+    source for the selected preview block", "View"}`
+  - line 302: `"r": ActionToggleRaw` in `defaultBindings()`
+
+`app/ui/model.go` is deliberately untouched. `dispatchAction` already routes every action through
+`handleMdPreviewAction` while preview is on (that hunk landed with Task 5 above), so both the
+allowlist entry (`keymap.ActionToggleRaw: true` in `mdPreviewAllowedActions`) and the handler case
+live in fork-owned `app/ui/mdpreview.go`. Outside preview mode `toggle_raw` reaches
+`dispatchResolvedAction`, matches no case there, and falls through to the pane handlers — the same
+path any unbound key already takes, which is why it needs no new guard. It is not literally inert,
+though, and the earlier wording claiming that was wrong: with the file tree focused the pane
+handler clears `pendingAnnotJump` and `nav.pendingHunkJump`, and with the markdown TOC pane focused
+(single markdown file, preview off) `handleTOCNav`'s default arm runs `EnsureVisible` +
+`syncDiffToTOCCursor`, which reassigns `m.nav.diffCursor` and top-aligns the viewport. Neither is a
+regression introduced by this key — both are what pressing any unbound key does today — but a
+future change that makes an unbound key in those panes do something visible inherits `r` with it.
+
+The rest of the feature is fork-owned: the pass and the `r` handler in the new
+`app/ui/mdpreview_expand.go`; the second cursor level in `mdpreview_cursor.go` and
+`mdpreview_stops.go`; the per-line annotation splice in `mdpreview_annotate.go`; the wiring line in
+`mdpreview_cache.go`; and the `lines` field plus `spliceRow` in `mdpreview_srcmap.go`.
+
+**The cursor became two-level, and the cursor is what carries the expansion:**
+
+- **A raw source line is a stop of its own.** `mdPreviewStopRef` gained an `onLine bool` + `line
+  int` pair beside the existing `onAnnot bool` + `annot int`, and for the same reason that type's
+  doc comment already gives — a stop is addressed by identity, never by its index in the list.
+  `line` holds the diff-line index (`mdPreviewLineAnchor.lineIdx`), which is also the coordinate
+  `a` needs, so "annotate this raw line" reads straight off the ref with no translation. A blank
+  source line paints a row but gets no stop: `mdPreviewHighlight` skips blank rows inside a span,
+  and a stop nobody can see would break the invariant that you always see what `a` will act on.
+- **One block is expanded at a time, and it is always the block the cursor is in.** The state is a
+  single `expanded bool` on `mdPreviewCursorState`, meaning "`ref.block` is drawn as raw source".
+  Putting it there is what makes a file switch and an `R` reload collapse the block for free — that
+  struct already carries the `file.name` + `file.loadSeq` tag, and every existing placement helper
+  assigns a fresh struct literal, so `expanded` defaults back to false on every path that was not
+  written for this feature. The failure direction is "collapsed when I did not expect it", never
+  "a stale expanded block with a row map that does not match the screen". Two setters deliberately
+  opt out of that default: `setMdPreviewLineCursor` (the only production writer of `expanded =
+  true`) and `setMdPreviewCursorRefKeepingExpansion`, which preserves it only when the target ref
+  names the block that is already expanded.
+- **Expansion ends when** `r` or `esc` is pressed, the cursor moves to another block, the whole
+  expanded block scrolls off screen, the file changes, or `R` reloads. A scroll *within* a long
+  expanded block does not end it: `dropMdPreviewCursorIfHidden` re-seats the cursor onto the
+  nearest still-visible stop of that block instead of clearing it.
+- **`j` and `k` clamp inside the expanded block** rather than stepping out of it, via
+  `mdPreviewBlockStopRange`. A flat clamp over the whole stop list would only hold for the
+  document's first and last block; anywhere else a held-down `j` would silently throw away the
+  reader's expansion.
+- **The pass runs on the cached base render, so no memo key changed.**
+  `mdPreviewBody` is now three stages — cached base render, then `mdPreviewExpandBlock`, then the
+  annotation painter. Expansion is not an input to the glamour render, so pressing `r` costs no
+  glamour pass; the downstream `mdPreviewScrollCache` keys on the body string, which already
+  carries the expansion, so it misses exactly when it should. ⚠️ The no-expansion path must return
+  the *same* string value it was handed, not a rebuilt copy, or `mdPreviewScrollCache.forBody`'s
+  `body == c.body` compare degrades from a shared-pointer check to a full memcmp on every frame.
+- **`d` and a click behave differently inside an expanded block.** `d` normally leaves the cursor
+  on the block that owned the deleted comment, which would collapse an expanded one — deleting a
+  comment is not a request to stop looking at the source. So `mdPreviewCursorAfterDelete` keeps it
+  expanded and lands on the raw line the comment was attached to, falling back to the block's first
+  raw line. A click resolves the clicked row to a raw-line stop first (`srcMap.lineAt`), before the
+  `anchorAtRow` fallback that resolves a row to the block around it.
+- **The stop order for the expanded block is imposed, not geometric.** Everywhere else `stops()`
+  lists a block then its comments and that is already ascending-row order. Inside an expanded block
+  the raw lines and the comments interleave, so the two lists are merged by ascending row
+  (`mdPreviewMergeStopsByRow`) and the block's own stop is dropped while it is expanded — a stop
+  covering every raw line at once would make `a` ambiguous about which line it meant.
+- **A block's raw span is re-cut to the lines its own rendered rows came from, in both
+  directions.** Rows TILE — `mdPreviewBuildSourceMap` closes each block off at the row before the
+  next one starts, so every row belongs to exactly one block — while source spans OVERLAP:
+  `swallowedSpan` (`mdpreview_blocks.go`) excludes a nested boundary child from a list item's or
+  blockquote's aggregation while leaving it inside the resulting min/max range, so a container spans
+  source lines whose rendered rows belong to the nested block. `mdPreviewClipRawSpan` reconciles the
+  two, and each direction fixes a bug that reached a build:
+  - it SHRINKS a container at the next block's first source line. Painting the container's whole
+    span into the few rows it owns drew the nested block's content as source AND left it rendered
+    underneath — the same text twice on screen.
+  - it GROWS a nested block over the enclosing container's continuation, bounded by how far any
+    EARLIER block's source reaches. The rows a nested list owns run to the row before the
+    container's next sibling, which includes the rows the container's own trailing paragraph was
+    rendered into; painting only the nested list's own lines there DELETED that paragraph from the
+    frame for as long as the block stayed expanded, with nothing on screen to say so. So a
+    container's post-nested-block lines belong, for this pass, to the nested block whose row range
+    they are rendered inside — which is also what makes them reachable by `j`/`k` and `a`.
+
+  The growth stops at the enclosing container's reach rather than running to the next block, so a
+  paragraph that merely precedes a fence does not show the fence's opening marker as its own last
+  source line. Trailing blank source lines are dropped for the same symmetry from the other end,
+  because `mdPreviewExpandBlock` keeps the block's trailing blank RENDERED rows (they are glamour's
+  padding between blocks) rather than replacing them.
+  `TestMdPreviewRawExpansionCorpusKeepsEveryLetter` (`mdpreview_srcmap_corpus_test.go`, env-gated
+  on the same corpus list as the alignment harness) is the mechanical net under all of it: it
+  expands every block of every corpus document and fails if a letter disappears from the frame. The
+  deletion above survived a review and a round of fixture tests because every fixture expanded the
+  CONTAINER, never the block nested inside it.
+- **A mermaid diagram expands to its fence source, a code fence does not, and the asymmetry is the
+  point.** A code fence renders as its own lines, roughly one for one, so expanding it would add the
+  fence markers and nothing else — it stays refused by kind. A diagram renders as box art that
+  carries none of its source's text, so expanding is the only way to read or comment on the
+  definition ("this edge label is wrong", "this node should be a decision"), which is what the
+  feature is for. The first version refused it with `Diagram source is one line`; that was a fact
+  about the ANCHOR, not about the document, and the refusal and its hint constant are both gone now.
+  - The anchor really does carry one line: `joinWithMermaidFences` replaces the whole fence with a
+    single placeholder paragraph and attributes every line of the replacement to the fence's opening
+    line, so the block arrives as an `mdBlockParagraph` spanning only the ` ```mermaid ` line while
+    the ROWS it owns are the art rows the splice put there. `mdPreviewOwnSpanEnd` recovers the
+    fence's real extent — opening line to closing fence, inclusive — by scanning forward with
+    `joinWithMermaidFences`' own closing rule (`mdPreviewMermaidFenceSpan`: same fence character, a
+    marker at least as long, nothing but whitespace after it, `ChangeDivider` rows skipped).
+  - ⚠️ The widening happens at EXPANSION time, inside `mdPreviewClipRawSpan`, not where
+    `mdPreviewBuildSourceMap` builds the anchor. The deciding fact is that `endLine` has exactly one
+    consumer — the expansion pass — so widening the recorded anchor would mean threading the source
+    lines into the map builder to change a field nothing else reads, and would leave the map
+    claiming a span its own row range was never derived from. If a second reader of `endLine` ever
+    appears, the widening belongs in the builder instead.
+  - Both fence markers are painted as rows of their own. The pass's whole arithmetic is "one source
+    line, one rendered row", and the opening line is where a comment on the diagram anchors anyway.
+  - The nesting case needs no special handling, and not by luck: the placeholder is written at
+    column 0, so a diagram indented inside a list item breaks out of the item and becomes its own
+    top-level block. A diagram inside a BLOCKQUOTE does not exist at all — `> ```mermaid ` does not
+    read as a fence opening to `joinWithMermaidFences`, so it is never substituted and renders as an
+    ordinary code fence.
+  - ⚠️ `TestMdPreviewRawExpansionCorpusKeepsEveryLetter`'s property does not hold for a diagram, and
+    the harness now computes that one expectation differently (`mdPreviewCorpusExpected`). The art is
+    a drawing produced FROM the definition, not a typesetting of it: the renderer writes text into it
+    that appears in no source line — `implements` on a `<|--` edge, `+ChangedFiles...` for a
+    truncated member. Measured, not assumed: the classDiagram in
+    `docs/plans/20260730-preview-manual-test-plan.md` "loses" exactly three `m` and three `p` on
+    expansion, the three synthesized `implements` labels. For a diagram the art's own rows drop out
+    of the expectation and the fence's source lines are added to it, which is stronger rather than
+    weaker — every row outside the block still has to survive letter for letter, and the definition
+    now has to be proven on screen.
+- **What the painted map says is expanded beats what the cursor says.** The two can disagree — the
+  cursor still carries `expanded` while `mdPreviewExpandBlock` refused, e.g. against a map built at
+  another width. Every reader holding a painted map (`moveMdPreviewCursor`'s j/k clamp,
+  `reseatMdPreviewCursorInExpandedBlock`, `mdPreviewCursorAfterDelete`) therefore asks
+  `mdPreviewSourceMap.expandedBlock`, not `Model.mdPreviewExpandedBlock`: the clamp is clamping
+  into that map's stop list, and reading the cursor instead could narrow j/k to one block's stops
+  in a frame showing no raw source at all, with no key able to step out. `mdPreviewCollapseRaw` is
+  the deliberate exception — it asks the cursor, because it is the escape hatch that clears the
+  flag.
+- **Annotations splice under the raw line they belong to.** `mdPreviewSourceMap.spliceRow` replaced
+  "splice at the block's `endRow`" with "splice at the row the map names for this source line", and
+  the painter's anchor shifting became a prefix sum over the splice points. The deciding case is
+  the live input: without it, pressing `a` on raw line 4 of a thirty-line table puts the box you
+  are typing into below raw line 30.
+- **A block's `endRow` stops at its last row with text on it.** `mdPreviewBuildSourceMap` closes a
+  block off by walking back from the row before the next block starts (from the end of the render
+  for the last block) over glamour's padding rows. Before that trim the padding was inside the
+  span, so an annotation spliced at `endRow` — the saved one and the live input alike — floated a
+  blank row below the paragraph it commented on, unlike the diff pane where a comment sits directly
+  under its line. It showed up only for blocks glamour actually padded: consecutive list items are
+  adjacent and never had the gap, which is why it read as intermittent. The trim is in the map
+  rather than in the painter on purpose — the painter still splices at `endRow` and still shifts by
+  a **strict** prefix sum, so annotation rows still land BELOW the block's own span and the block
+  highlight still marks the block alone. Trimming at splice time instead would have put the splice
+  inside the span and dragged the highlight over the annotation. Every other reader of `endRow` is
+  unaffected: `mdPreviewHighlight` already skips blank rows, and `mdPreviewExpandBlock` already
+  trimmed the same rows itself (`mdPreviewTrailingBlankRows`, now a no-op for a map built from a
+  render and kept only for hand-built ones).
 
 **Test-only, mechanical, not part of the feature itself:**
 
@@ -493,8 +815,8 @@ because it moves with the offset.
 
 `app/ui/diffview.go` and `app/ui/model.go` are the most actively developed files upstream and
 the most likely to conflict — this was flagged going in (see the plan's "Patch discipline"
-section) and confirmed empirically: `model.go` alone carries 6 of the patch's 21 existing-file
-hunks (keymap 4, model 6, loaders 2, diffview 1, mouse 3, view 4, diffnav 1).
+section) and confirmed empirically: `model.go` alone carries 6 of the patch's 25 existing-file
+hunks (keymap 8, model 6, loaders 2, diffview 1, mouse 3, view 4, diffnav 1).
 
 ## Mermaid diagram type coverage
 
@@ -689,7 +1011,7 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   goes blank once you pan past its end.
 - ~~**Spaces inside an edge label render as `─` (dash) on the arrow line.**~~ **FIXED — every
   edge-label space is now a no-break space, not a plain one** (see
-  `docs/plans/20260805-mermaid-edge-label-rendering.md` and `mdpreview_nbsp.go`'s doc comment).
+  `docs/plans/completed/20260805-mermaid-edge-label-rendering.md` and `mdpreview_nbsp.go`'s doc comment).
   U+00A0 is not the byte `" "`, so `mergeDrawings` in the vendored renderer treats the cell as
   opaque and keeps it instead of letting the arrow line or a crossing edge bleed through, while
   terminals still draw it as a blank. Four costs are accepted in exchange: art copied out of the
@@ -1038,14 +1360,17 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   anchors to the whole paragraph, not the line or word under the cursor at the moment of wrapping
   — matching how the same paragraph would be commented in source view before this feature existed,
   where the paragraph's block boundary is already the finest resolution.
-- **Three annotation actions are still blocked in preview: `d`, `@`, and `}`/`{`.** Creating,
-  reading, and flushing annotations all work inside preview after this plan; deleting one, listing
-  them in the `@` popup, and stepping between them all still require leaving preview first (press
-  `P`, act, press `P` again). None of the three are on `mdPreviewAllowedActions`' allowlist — see
-  that map and its doc comment in `mdpreview.go` for the per-action reason. Practical consequence
-  worth stating on its own: **a comment made in preview cannot be undone from inside preview.**
-  Pressing `a` on the same block again pre-fills the existing comment, but clearing the input and
-  confirming runs `cancelAnnotation`, which leaves the stored comment untouched.
+- **Two annotation actions are still blocked in preview: `@` and `}`/`{`.** Creating, editing,
+  reading, deleting, and flushing annotations all work inside preview; listing them in the `@`
+  popup and stepping between them still require leaving preview first (press `P`, act, press `P`
+  again). Neither is on `mdPreviewAllowedActions`' allowlist — see that map and its doc comment in
+  `mdpreview.go` for the per-action reason. `d` used to be the third entry here, which made a
+  comment created in preview impossible to undo from inside preview; it is now allowed, because an
+  annotation is a cursor stop of its own (see "Preview cursor" above).
+- **Clearing an annotation's input does not delete it — that is what `d` is for.** `a` on an
+  annotation pre-fills the existing comment, but clearing the input and confirming runs
+  `cancelAnnotation`, which leaves the stored comment untouched. This is the diff pane's own
+  behavior, unchanged.
 - **A thematic break (`---`) has no position of its own and is recovered by a gap scan.** goldmark
   appends nothing to a `ThematicBreak`'s `Lines()`, so `mdBreakResolver` (`mdpreview_blocks.go`)
   bounds it between the nearest siblings that DO carry a position and takes the first line in that
@@ -1060,6 +1385,36 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   bubbletea `Update` goroutine). A break whose gap holds no rule-looking line resolves to nothing,
   which fails alignment and degrades the whole document — the correct outcome, since the alternative
   is anchoring to a line that is not the break.
+- **A click inside an expanded block, on a row that carries no line anchor, collapses the
+  expansion.** `mdPreviewClickDiff` resolves a clicked row to a raw source line by exact row
+  equality (`srcMap.lineAt`). Two kinds of row inside an expanded block have no anchor to find: a
+  blank source line, which paints a row but never gets one because the highlight skips blank rows,
+  and a comment row spliced between the raw lines. Both fall through to `anchorAtRow`, which
+  resolves to the block — and a block placement writes a fresh cursor state, so the block collapses
+  under the click. Accepted rather than fixed: keeping the fallback unchanged is what makes a click
+  behave the same everywhere else in preview, and the reader can re-expand with `r`.
+- **Expanding a container shows only its own source, up to the first nested block.** A list item or
+  blockquote holding a fenced code block, a nested list, a table or a heading has its raw span cut
+  at that block's first source line (`mdPreviewClipRawSpan`, see "Raw source expansion" above), so
+  pressing `r` on the item shows the lines before the nested block and stops. The lines after it
+  belong to the nested block — expanding THAT shows them, because they are rendered into rows it
+  owns. The alternative — painting the container's whole span — put the nested block's content on
+  screen twice, as source and as render, which is why this is the cut rather than the bug.
+- **A container's trailing lines are unreachable when its nested block is a code fence.** A fence
+  refuses expansion (`mdPreviewExpandRefusal`: it already shows its source), and it is the block
+  whose rows the container's trailing paragraph is rendered into. So in `- para a` / fence /
+  `  para b`, the `  para b` line has no raw-line stop in preview and cannot be annotated per line —
+  `a` on the fence block anchors to the fence instead. Accepted: lifting it means expanding a fence
+  into its own source, which is the one thing the fence refusal exists to prevent. The line is
+  annotatable in the ordinary source view with preview off.
+
+  This used to be stated for a mermaid diagram as well, and that half is gone — measured on
+  `- para a` / mermaid fence / `  para b`, which produces three blocks (the item, the diagram, and
+  `  para b` as a paragraph of its own). Two separate reasons, either one sufficient: the diagram
+  now expands rather than refusing, and the placeholder that replaces the fence is written at column
+  0, so it breaks the item apart and the trailing paragraph gets its own anchor instead of being
+  rendered into the diagram's rows. The second reason held before this change too — the entry was
+  wrong about mermaid when it was written, not made wrong by it.
 - **A list item whose children are all boundary kinds contributes no target, and degrades the whole
   document.** `swallowedSpan` aggregates only over a container's own direct content, and a nested
   list, table, code block, heading or thematic break is excluded because it gets its own target —
@@ -1240,3 +1595,23 @@ on every rebase that touches `jump_file`'s default: `app/keymap/keymap_test.go`
 `TestModel_JumpFileKeyFiltersInsideOpenPicker` explicitly rebinds `P` to `ActionJumpFile` to
 still exercise the printable-key-filters-not-closes behavior upstream's own default used to
 demonstrate), `app/ui/search_test.go` (`TestModel_SearchPrompt_SwallowsTogglePreviewKey`).
+
+### A future `r` collision with an upstream binding
+
+`r` was unbound upstream at the fork base — `defaultBindings()` had `R` for `ActionReload` and no
+lowercase `r` — which is why this patch could take it for `ActionToggleRaw` (raw source expansion,
+above). If a rebase brings an upstream action bound to `r`, the Go compiler catches it immediately
+as a duplicate map key in `defaultBindings()`, exactly as it did for `P` / `jump_file`, so the
+build fails rather than one binding silently winning.
+
+Resolution: keep `toggle_raw` on `r` and move the upstream action to another key, unless
+upstream's use is the more valuable one — in that case move `toggle_raw` instead. `r` is worth
+defending: it is only reachable inside markdown preview mode, but it is the one key the raw
+expansion feature has, and it pairs with `P` in muscle memory.
+
+Following files carry test/behavior assertions tied to this specific key and need re-checking on
+every rebase that touches an `r` binding: `app/keymap/keymap_test.go`
+(`TestActionToggleRaw_IsValid`, `TestActionToggleRaw_DefaultBinding`,
+`TestActionToggleRaw_HelpEntry`) and `app/ui/mdpreview_expand_test.go`
+(`TestMdPreviewToggleRaw_ThroughTheKeyPath` sends the `r` key rather than dispatching the action
+directly; the other `TestMdPreviewToggleRaw_*` tests call the handler and survive a rebinding).

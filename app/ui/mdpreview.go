@@ -19,12 +19,14 @@ import (
 	"github.com/umputun/revdiff/app/ui/style"
 )
 
-// mdPreviewState holds markdown preview's own transient runtime state. Only a
-// status-bar hint today, following outputState / compactState: preview refuses
-// to annotate a document whose source map did not align, and a refusal with no
-// message on screen is indistinguishable from an unbound key.
+// mdPreviewState holds markdown preview's own runtime state: the transient
+// status-bar hint (following outputState / compactState — preview refuses to
+// annotate a document whose source map did not align, and a refusal with no
+// message on screen is indistinguishable from an unbound key), and the cursor
+// the reader steers the highlight with.
 type mdPreviewState struct {
-	hint string // transient status-bar message; cleared on next key press
+	hint   string               // transient status-bar message; cleared on next key press
+	cursor mdPreviewCursorState // which stop the highlight marks, if any; see mdpreview_cursor.go
 }
 
 // mdFencePrefix returns the fence character ('`' or '~') and the count of leading
@@ -52,6 +54,23 @@ func mdFencePrefix(s string) (rune, int) {
 		n++
 	}
 	return ch, n
+}
+
+// mdFenceLang is a fence opening's info string: the first whitespace-delimited
+// token after the fence marker, lowercased, or "" when the fence carries none.
+// CommonMark allows extra data after the language (e.g. "```mermaid title=foo"),
+// which is why only the first token counts. trimmed is the line with surrounding
+// whitespace already removed and n the marker length mdFencePrefix reported.
+//
+// One definition, shared by the walk that substitutes mermaid fences
+// (joinWithMermaidFences) and the check that recovers one's fence extent for raw
+// expansion (mdPreviewMermaidFenceLine): two readings of the same info string
+// would let the two disagree about which fences are diagrams.
+func mdFenceLang(trimmed string, n int) string {
+	if fields := strings.Fields(trimmed[n:]); len(fields) > 0 {
+		return strings.ToLower(fields[0])
+	}
+	return ""
 }
 
 // renderMermaidFences joins source lines into a single markdown document,
@@ -131,15 +150,10 @@ func joinWithMermaidFences(lines []diff.DiffLine,
 
 		switch {
 		case fenceChar == 0 && n >= 3:
-			// opening fence: the info string is the first whitespace-delimited
-			// token after the fence marker (CommonMark allows extra data after
-			// the language, e.g. "```mermaid title=foo").
+			// opening fence; mdFenceLang owns how the info string is read
 			fenceChar = ch
 			fenceLen = n
-			fenceLang = ""
-			if fields := strings.Fields(trimmed[n:]); len(fields) > 0 {
-				fenceLang = strings.ToLower(fields[0])
-			}
+			fenceLang = mdFenceLang(trimmed, n)
 			fenceStart = i
 			fenceBody, fenceBodyOrigins = nil, nil
 			if fenceLang != "mermaid" {
@@ -415,19 +429,24 @@ func mermaidArtWithoutControls(art string) string {
 		if r == '\n' || r == '\t' {
 			return r
 		}
-		if mermaidControlRune(r) {
+		if controlRune(r) {
 			return -1
 		}
 		return r
 	}, art)
 }
 
-// mermaidControlRune reports whether r is a C0 control byte or DEL — the bytes
-// that must never reach the terminal from text this patch writes outside
-// glamour. One definition, two callers: mermaidArtWithoutControls keeps newline
-// and tab before consulting it, flowchartSubgraphHeading drops those two as
-// well because a stacked block's heading is a single line.
-func mermaidControlRune(r rune) bool {
+// controlRune reports whether r is a C0 control byte or DEL — the bytes that
+// must never reach the terminal from text this patch writes outside glamour.
+// One definition, three callers, each deciding for itself which of those bytes
+// it keeps first: mermaidArtWithoutControls keeps newline and tab before
+// consulting it, flowchartSubgraphHeading drops those two as well because a
+// stacked block's heading is a single line, and mdPreviewRawText
+// (mdpreview_expand.go) drops them too because one raw source line is one
+// rendered row. The name carries no "mermaid" any more for that last caller's
+// sake: raw markdown source bypasses glamour exactly the way diagram art does,
+// and the byte set that is unsafe to emit is the same one either way.
+func controlRune(r rune) bool {
 	return r < ' ' || r == 0x7f
 }
 
@@ -527,6 +546,12 @@ func (m *Model) toggleMarkdownPreview() {
 	}
 	m.modes.mdPreview = !m.modes.mdPreview
 	m.layout.scrollX = 0
+	// entering preview marks nothing: the highlight is a cursor the reader
+	// steers, not a mark derived from where the viewport happens to sit (see
+	// mdPreviewCursorState). Leaving clears it too, so a later re-entry on the
+	// same file at the same loadSeq — which the cursor's own tag cannot tell
+	// apart from staying in preview — also starts with nothing marked.
+	m.clearMdPreviewCursor()
 	if m.modes.mdPreview {
 		m.layout.viewport.SetContent(m.renderDiff())
 		m.layout.viewport.GotoTop()
@@ -539,16 +564,16 @@ func (m *Model) toggleMarkdownPreview() {
 // preview at the current viewport width, cut to the visible column window at
 // the current horizontal offset (see applyMdPreviewScroll). The base render
 // goes through mdPreviewBaseRender (mdpreview_cache.go), keyed on
-// file/loadSeq/width/noColors, so a repaint at an unchanged state (the
-// scroll-following highlight repainting on every offset change, in a later
-// task) reuses the last glamour+mermaid pass instead of paying for a fresh
-// one. loadSeq is what makes the key safe across an R reload of the same file
-// at the same width: reload bumps it even though the file name and width do
-// not change, so a stale render can never satisfy a post-reload lookup.
+// file/loadSeq/width/noColors, so a repaint at an unchanged state (the block
+// cursor moving to another block, an annotation edit) reuses the last
+// glamour+mermaid pass instead of paying for a fresh one. loadSeq is what makes
+// the key safe across an R reload of the same file at the same width: reload
+// bumps it even though the file name and width do not change, so a stale render
+// can never satisfy a post-reload lookup.
 //
 // The frame it returns is the composed one — base render, this file's
-// annotations painted under the blocks they belong to, and the scroll-following
-// block highlight — assembled by mdPreviewFinalRender (mdpreview_cache.go),
+// annotations painted under the blocks they belong to, and the block cursor's
+// highlight if one is placed — assembled by mdPreviewFinalRender (mdpreview_cache.go),
 // which owns the order those three steps run in.
 //
 // A pan keypress does NOT go through here — panMarkdownPreview composes the
@@ -796,14 +821,32 @@ func (m *Model) panMarkdownPreview(direction int) {
 // diff-pane handler's handleHorizontalScroll would cut diff rows that the
 // preview render does not have.
 //
-// The vertical reading keys (down/up, page, half-page, home/end) are routed
-// here for the same reason and must never fall through: their ordinary
-// handlers are the moveDiffCursor* family (handleDiffMovement, diffnav.go),
-// which reposition m.nav.diffCursor in diff-line coordinates the preview
-// render does not have. Preview has no cursor, so here they mean exactly what
-// they look like — move the viewport — and are served by shifting YOffset
-// directly. Without this, the only way to read past the first screen was
-// J/K, and every key a reader reaches for first was silently dead.
+// The vertical reading keys (down/up, page, half-page, home/end, J/K) are
+// routed here for the same reason and must never fall through: their ordinary
+// handlers are the moveDiffCursor* family (handleDiffMovement, diffnav.go) and
+// scrollDiffViewportLine, which reposition m.nav.diffCursor in diff-line
+// coordinates the preview render does not have. Here they split in two:
+//
+//   - down/up (j/k and the arrows) move the preview cursor, one STOP per press —
+//     a rendered block, or one annotation painted under a block — and the
+//     viewport follows it minimally (see moveMdPreviewCursor,
+//     mdpreview_cursor.go).
+//   - J/K, page, half-page and home/end move the viewport only, and drop the
+//     cursor when the stop it marks scrolls entirely out of view.
+//
+// delete_annotation (d) is routed here for a third reason, unrelated to the
+// viewport: its fall-through target, deleteAnnotation (app/ui/annotate.go),
+// resolves its target from m.nav.diffCursor plus m.annot.cursorOnAnnotation,
+// which preview does not drive, and its tail can trigger a file load that would
+// drop the reader out of preview mid-delete. mdPreviewDeleteAnnotation
+// (mdpreview_stops.go) deletes the annotation the cursor is actually stopped on
+// instead.
+//
+// J/K is routed here rather than left to fall through even though
+// scrollDiffViewportLine is harmless in preview (pinDiffCursorTo is an
+// unconditional no-op there): it repaints only when the pin moved something, so
+// in preview it never repainted at all, and the block cursor has to be dropped
+// and the frame redrawn when a scroll hides it.
 func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, bool) {
 	if !mdPreviewActionAllowed(action) {
 		return m, nil, true
@@ -823,6 +866,16 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 		}
 		cmd := m.mdPreviewStartAnnotation()
 		return m, cmd, true
+	case keymap.ActionToggleRaw:
+		m.mdPreviewToggleRaw()
+		return m, nil, true
+	case keymap.ActionDismiss:
+		if !m.mdPreviewCollapseRaw() {
+			// nothing was expanded, and nothing was mutated either — fall
+			// through so esc keeps clearing a leftover search-match highlight.
+			return m, nil, false
+		}
+		return m, nil, true
 	case keymap.ActionScrollLeft:
 		m.panMarkdownPreview(-1)
 		return m, nil, true
@@ -830,10 +883,19 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 		m.panMarkdownPreview(1)
 		return m, nil, true
 	case keymap.ActionDown:
-		m.scrollMarkdownPreview(1)
+		m.moveMdPreviewCursor(1)
 		return m, nil, true
 	case keymap.ActionUp:
-		m.scrollMarkdownPreview(-1)
+		m.moveMdPreviewCursor(-1)
+		return m, nil, true
+	case keymap.ActionDeleteAnnotation:
+		cmd := m.mdPreviewDeleteAnnotation()
+		return m, cmd, true
+	case keymap.ActionScrollDiffDown:
+		m.scrollMarkdownPreview(wheelStep)
+		return m, nil, true
+	case keymap.ActionScrollDiffUp:
+		m.scrollMarkdownPreview(-wheelStep)
 		return m, nil, true
 	case keymap.ActionPageDown:
 		m.scrollMarkdownPreview(m.mdPreviewPageStep())
@@ -849,9 +911,11 @@ func (m Model) handleMdPreviewAction(action keymap.Action) (tea.Model, tea.Cmd, 
 		return m, nil, true
 	case keymap.ActionHome:
 		m.layout.viewport.GotoTop()
+		m.afterMdPreviewViewportScroll()
 		return m, nil, true
 	case keymap.ActionEnd:
 		m.layout.viewport.GotoBottom()
+		m.afterMdPreviewViewportScroll()
 		return m, nil, true
 	default: // every other allowed action runs through the ordinary dispatch
 	}
@@ -866,31 +930,32 @@ func (m Model) mdPreviewPageStep() int {
 }
 
 // scrollMarkdownPreview shifts the preview viewport by delta rows, clamped to
-// the content, and repaints so the block highlight lands on the block that is
-// now topmost. It deliberately does NOT go through scrollDiffViewportLine (the
+// the content. This is the pure row-scroll path — J/K, the page and half-page
+// keys, and down/up on a document whose source map did not align — so it never
+// moves the block cursor; it only drops it when the scroll has carried its block
+// entirely off screen (see dropMdPreviewCursorIfHidden), then repaints.
+//
+// It deliberately does NOT go through scrollDiffViewportLine (the diff pane's
 // J/K path): that helper follows the shift with pinDiffCursorTo, which is a
 // no-op under preview only because of an explicit mdPreview guard in mouse.go.
-// Preview has no cursor to pin, so it calls the pure shifter directly and the
-// guard stays a backstop for the wheel rather than load-bearing here.
+// Preview has no diff cursor to pin, so it calls the pure shifter directly and
+// the guard stays a backstop for the wheel rather than load-bearing here.
 //
 // The repaint is immediate rather than deferred, and that is the one place this
 // path differs from the wheel. A key press is one event; the wheel arrives in
 // bursts of hundreds, which is what wheelState's debounce exists for (see
 // .claude/rules/gotchas.md), and the wheel keeps using it — flushWheelPending
 // repaints preview once at burst end. Repainting here costs a cached base render
-// plus two per-row passes, not a glamour render, so a held-down j does not need
+// plus two per-row passes, not a glamour render, so a held-down J does not need
 // its own debounce beside that one.
 //
 // A no-op scroll (already at an edge) repaints nothing: the offset did not move,
-// so neither did the highlight.
+// so nothing on screen changed either.
 func (m *Model) scrollMarkdownPreview(delta int) {
 	if !m.scrollDiffViewportBy(delta) {
 		return
 	}
-	if !m.file.markdownPreviewable {
-		return // preview stuck on for a file renderDiff will not preview; see panMarkdownPreview
-	}
-	m.layout.viewport.SetContent(m.renderMarkdownPreview())
+	m.afterMdPreviewViewportScroll()
 }
 
 // mdPreviewAllowedActions is the fixed allowlist of keymap actions that stay
@@ -900,16 +965,34 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 // reason — it would edit, delete, or navigate to an annotation by index, or
 // move/reposition m.nav.diffCursor in diff-line coordinates the preview
 // render does not have — but that is no longer a blanket rule: ActionConfirm
-// (a/enter) is allowed and DOES create an annotation, anchored to a block
-// through the source map instead of through m.nav.diffCursor's ordinary
-// meaning. Each remaining exclusion is explained on its own below rather than
-// folded into one shared sentence.
+// (a/enter) creates an annotation and ActionDeleteAnnotation (d) removes one,
+// both resolved through the preview cursor and the source map instead of
+// through m.nav.diffCursor's ordinary meaning. Each remaining exclusion is
+// explained on its own below rather than folded into one shared sentence.
 //
 //   - toggle_preview must stay allowed so P can turn the mode back
 //     off — this is the mode's only exit key.
-//   - confirm (a/enter) creates a line-level annotation anchored to the block
-//     the scroll-following highlight currently marks (mdPreviewHighlightAnchor)
-//     — see mdPreviewStartAnnotation, mdpreview_annotate.go. It is routed INSIDE
+//   - toggle_raw (r) redraws the block the cursor is on as its raw markdown
+//     source, one row per source line, so j/k can step between those lines
+//     and `a` can comment on the exact one. It is routed INSIDE
+//     handleMdPreviewAction above and exists only in this mode: it reads the
+//     preview cursor and rewrites the preview body, and nothing outside
+//     preview has either. Outside preview the action reaches
+//     dispatchResolvedAction, matches no case, and falls through to the pane
+//     handlers as a silent no-op — see mdPreviewToggleRaw
+//     (mdpreview_expand.go) for what it refuses and what it says when it
+//     does.
+//   - confirm (a/enter) opens an annotation input on whatever the cursor is
+//     stopped on, and there are three cases. On a RAW SOURCE LINE of an expanded
+//     block it aims at that exact source line — the case raw expansion exists
+//     for, and the only one that can target a line inside a block. On a BLOCK
+//     stop it anchors a line-level annotation to the block (seeding that cursor
+//     at the viewport center when the reader has not placed it yet —
+//     mdPreviewHighlightAnchor). On an ANNOTATION stop it EDITS that annotation,
+//     aimed at its own (Line, Type) so startAnnotation's pre-fill loads the
+//     current text and Store.Add replaces it. That is the
+//     same edit path the diff pane has always had, multi-line stash included —
+//     see mdPreviewStartAnnotation, mdpreview_annotate.go. It is routed INSIDE
 //     handleMdPreviewAction above rather than left to fall through: its
 //     ordinary fall-through target, handleEnterKey, branches on pane focus,
 //     and the tree/TOC pane is reachable while previewing (nothing in this
@@ -930,9 +1013,16 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     layout actions that never touch m.nav.diffCursor or the annotation
 //     store (theme_select and help open an overlay; toggle_tree only flips
 //     pane visibility).
-//   - dismiss (esc) only clears a leftover search-match highlight from a
-//     search that completed before preview was turned on; it never touches
-//     the cursor or the store either.
+//   - dismiss (esc) collapses an expanded block back to its rendered form —
+//     the second way out of raw source, beside pressing r again, and the one
+//     every reader tries first. It is routed INSIDE handleMdPreviewAction
+//     above, but only for that: with nothing expanded it reports itself
+//     unhandled and falls through unchanged to handleEscKey (handlers.go),
+//     which clears a leftover search-match highlight from a
+//     search that completed before preview was turned on. Neither half touches
+//     m.nav.diffCursor or the store, and the fall-through half mutates nothing
+//     at all, which is what makes reporting it unhandled safe (dispatchAction
+//     discards the returned model on that path — see app/ui/model.go).
 //   - scroll_diff_down/up (J/K) drive the viewport's YOffset directly rather
 //     than following the cursor — see pinDiffCursorTo's mdPreview guard in
 //     mouse.go for why that stays safe even though the same function also
@@ -971,12 +1061,17 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 //     m.nav.diffCursor and never touches the viewport, so it is safe to let
 //     it fall through unmodified — creating annotations in preview without a
 //     way to flush them out would be half a feature.
-//   - delete_annotation (d) is excluded: deleteAnnotation resolves its target
-//     from m.nav.diffCursor plus m.annot.cursorOnAnnotation, and preview drives
-//     neither — the cursor points at whichever block the last a/click aimed at,
-//     and cursorOnAnnotation is cleared by mdPreviewStartAnnotationAt. To remove
-//     a comment made in preview, press P, delete it in source view, press P
-//     again.
+//   - delete_annotation (d) removes the annotation the preview cursor is
+//     stopped on — an annotation painted under a block is a cursor stop of its
+//     own, reachable with j/k, which is what makes the key meaningful here at
+//     all. It is routed INSIDE handleMdPreviewAction above rather than left to
+//     fall through, for two reasons: its ordinary target (deleteAnnotation,
+//     app/ui/annotate.go) resolves what to delete from m.nav.diffCursor plus
+//     m.annot.cursorOnAnnotation, which preview drives neither of, and that
+//     function's tail can request a file diff, which would drop the reader out
+//     of preview. On a block stop, or with nothing selected, it refuses with a
+//     transient hint rather than deleting the block's annotations wholesale —
+//     see mdPreviewDeleteAnnotation (mdpreview_stops.go).
 //   - annot_list (@) is excluded: the overlay's whole purpose is its jump
 //     outcome, and that routes through jumpToAnnotationTarget ->
 //     positionOnAnnotation, which reassigns m.nav.diffCursor and moves the
@@ -1024,28 +1119,30 @@ func (m *Model) scrollMarkdownPreview(delta int) {
 // out. So the answer stays "no": to move between files, press P first, then
 // navigate, then press P again on the next markdown file.
 var mdPreviewAllowedActions = map[keymap.Action]bool{
-	keymap.ActionTogglePreview:  true,
-	keymap.ActionConfirm:        true,
-	keymap.ActionQuit:           true,
-	keymap.ActionDiscardQuit:    true,
-	keymap.ActionHelp:           true,
-	keymap.ActionThemeSelect:    true,
-	keymap.ActionToggleTree:     true,
-	keymap.ActionScrollDiffDown: true,
-	keymap.ActionScrollDiffUp:   true,
-	keymap.ActionScrollLeft:     true,
-	keymap.ActionScrollRight:    true,
-	keymap.ActionDown:           true,
-	keymap.ActionUp:             true,
-	keymap.ActionPageDown:       true,
-	keymap.ActionPageUp:         true,
-	keymap.ActionHalfPageDown:   true,
-	keymap.ActionHalfPageUp:     true,
-	keymap.ActionHome:           true,
-	keymap.ActionEnd:            true,
-	keymap.ActionDismiss:        true,
-	keymap.ActionAnnotateFile:   true,
-	keymap.ActionFlushOutput:    true,
+	keymap.ActionTogglePreview:    true,
+	keymap.ActionToggleRaw:        true,
+	keymap.ActionConfirm:          true,
+	keymap.ActionQuit:             true,
+	keymap.ActionDiscardQuit:      true,
+	keymap.ActionHelp:             true,
+	keymap.ActionThemeSelect:      true,
+	keymap.ActionToggleTree:       true,
+	keymap.ActionScrollDiffDown:   true,
+	keymap.ActionScrollDiffUp:     true,
+	keymap.ActionScrollLeft:       true,
+	keymap.ActionScrollRight:      true,
+	keymap.ActionDown:             true,
+	keymap.ActionUp:               true,
+	keymap.ActionPageDown:         true,
+	keymap.ActionPageUp:           true,
+	keymap.ActionHalfPageDown:     true,
+	keymap.ActionHalfPageUp:       true,
+	keymap.ActionHome:             true,
+	keymap.ActionEnd:              true,
+	keymap.ActionDismiss:          true,
+	keymap.ActionAnnotateFile:     true,
+	keymap.ActionFlushOutput:      true,
+	keymap.ActionDeleteAnnotation: true,
 }
 
 // mdPreviewActionAllowed reports whether action may run while markdown

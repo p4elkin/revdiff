@@ -6,6 +6,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/umputun/revdiff/app/diff"
 )
 
 // This file is the alignment corpus harness for the markdown-preview source
@@ -115,4 +120,137 @@ func TestMdPreviewSrcMapCorpusAlignment(t *testing.T) {
 	for _, k := range kinds {
 		t.Logf("  %-12s %d", k, kindCounts[mdPreviewBlockKind(k)])
 	}
+}
+
+// TestMdPreviewRawExpansionCorpusKeepsEveryLetter is the mechanical net under
+// mdPreviewClipRawSpan, and it exists because the shape it catches is invisible
+// to a fixture test: expanding one block silently DELETED a neighboring part of
+// the document from the frame, and every unit test written for the feature at the
+// time expanded the container rather than the block nested inside it.
+//
+// The property is the acceptance criterion stated as something a machine can
+// check: expanding a block replaces rows it owns, so every letter on screen
+// before the expansion is still on screen after it — the raw source of a block
+// carries the same words its render did, plus markup. Letters are counted rather
+// than compared in order because glamour wraps table cells, which interleaves the
+// columns and reorders the rendered text against its source.
+//
+// A MERMAID DIAGRAM is the one block that sentence is false about, so its
+// expectation is computed differently — see mdPreviewCorpusExpected, which states
+// what replaces it and why. It is not a weaker check: everything outside the
+// block's own rows must survive exactly as before, and the definition must
+// additionally be proven on screen.
+//
+// Same env gate and same corpus list as TestMdPreviewSrcMapCorpusAlignment above;
+// see that test's comment for how to run it. Measured on the repo's own document
+// tree it does 10298 expansions across 59 aligned documents in about 100 seconds,
+// which is why it stays out of `make test`.
+func TestMdPreviewRawExpansionCorpusKeepsEveryLetter(t *testing.T) {
+	listPath := os.Getenv(srcMapCorpusListEnv)
+	if listPath == "" {
+		t.Skipf("%s not set; skipping raw-expansion corpus check", srcMapCorpusListEnv)
+	}
+	raw, err := os.ReadFile(listPath) //nolint:gosec // path comes from the operator's own env var
+	if err != nil {
+		t.Skipf("corpus list %s unreadable: %v", listPath, err)
+	}
+
+	docs, expansions := 0, 0
+	for path := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		body, readErr := os.ReadFile(path) //nolint:gosec // same
+		if readErr != nil {
+			continue // a corpus list is a snapshot of a user's disk, not a fixture under test
+		}
+		m := mdPreviewStyledModel(t, string(body))
+		before, srcMap := m.mdPreviewBody()
+		if !srcMap.aligned {
+			continue
+		}
+		docs++
+		for bi := range srcMap.blocks() {
+			expanded := m
+			expanded.setMdPreviewCursorToBlock(bi)
+			expanded.mdPreviewToggleRaw()
+			if expanded.mdPreviewExpandedBlock() != bi {
+				continue // refused, and the refusal hint says why
+			}
+			expansions++
+			want := mdPreviewCorpusExpected(before, srcMap.blocks()[bi], m.file.lines)
+			after, _ := expanded.mdPreviewBody()
+			assert.True(t, mdPreviewCorpusCovers(mdPreviewCorpusLetters(after), want),
+				"%s: expanding block %d (kind %s, source lines %d..%d) removed content from the frame",
+				filepath.Base(path), bi, srcMap.blocks()[bi].kind,
+				srcMap.blocks()[bi].startLine, srcMap.blocks()[bi].endLine)
+		}
+	}
+	if docs == 0 {
+		t.Fatalf("corpus list %s yielded no aligned documents", listPath)
+	}
+	t.Logf("expanded %d blocks across %d aligned documents with no content lost", expansions, docs)
+}
+
+// mdPreviewCorpusExpected is the letter count the frame must still cover once
+// block a has been expanded: the frame as it was, for every block but one.
+//
+// A mermaid diagram is that one. Its rendered form is a DRAWING produced from the
+// definition rather than a typesetting of it, and the renderer writes text into
+// the drawing that appears in no source line — a `<|--` edge is labeled
+// `implements`, node labels are truncated to `+ChangedFiles...`. Requiring the
+// art's own letters to survive the expansion would therefore be requiring the
+// source to contain words the author never wrote. (Measured, not assumed: the
+// classDiagram in docs/plans/20260730-preview-manual-test-plan.md loses exactly
+// three `m` and three `p` that way — the three synthesized `implements` labels.)
+//
+// So for a diagram the art's rows drop out of the expectation and the fence's own
+// source lines are added to it. That is stronger than the plain frame check, not
+// weaker: every row OUTSIDE the block still has to survive letter for letter — the
+// direction the harness exists to police, since the deletion that motivated it hit
+// a neighboring block — and the definition now has to be proven on screen rather
+// than merely not-lost. The rows dropped are the block's own tile as the map
+// recorded it, so a pass that replaced more rows than it owns is still caught by
+// the letters outside going missing.
+func mdPreviewCorpusExpected(before string, a mdPreviewBlockAnchor, lines []diff.DiffLine) []int {
+	fenceEnd, isDiagram := mdPreviewMermaidFenceSpan(lines, a.startLine)
+	if !isDiagram || a.startLine != a.endLine {
+		return mdPreviewCorpusLetters(before)
+	}
+	var b strings.Builder
+	for row, text := range strings.Split(ansi.Strip(before), "\n") {
+		if row >= a.row && row <= a.endRow {
+			continue // the art, which the source it was drawn from does not spell
+		}
+		b.WriteString(text + "\n")
+	}
+	for i := a.startLine; i <= min(fenceEnd, len(lines)-1); i++ {
+		b.WriteString(lines[i].Content + "\n")
+	}
+	return mdPreviewCorpusLetters(b.String())
+}
+
+// mdPreviewCorpusLetters is a frame reduced to its lowercase ASCII letters:
+// styling, box drawing, bullets, indentation and wrapping all drop out, so what
+// is left is the text the reader can read.
+func mdPreviewCorpusLetters(frame string) []int {
+	var counts [26]int
+	for _, r := range strings.ToLower(ansi.Strip(frame)) {
+		if r >= 'a' && r <= 'z' {
+			counts[r-'a']++
+		}
+	}
+	return counts[:]
+}
+
+// mdPreviewCorpusCovers reports whether got holds at least as many of every
+// letter as want.
+func mdPreviewCorpusCovers(got, want []int) bool {
+	for i := range want {
+		if got[i] < want[i] {
+			return false
+		}
+	}
+	return true
 }

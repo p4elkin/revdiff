@@ -142,6 +142,91 @@ func TestMdPreviewBaseRender_CacheMissComputesAndStores(t *testing.T) {
 	assert.Equal(t, srcMap, srcMap2, "the cached source map must round-trip unchanged")
 }
 
+// mdPreviewExpandedCursorModel loads mdExpandFixture's hand-built base render
+// straight into the render cache and puts an EXPANDED cursor on block bi. The
+// cached entry is the whole point: a sentinel render nothing glamour produces
+// could ever match, so any body derived from it proves the cache served rather
+// than a fresh render answering.
+func mdPreviewExpandedCursorModel(bi int) (m Model, rendered string, sm mdPreviewSourceMap) {
+	rendered, lines, sm := mdExpandFixture()
+	m = mdPreviewTestModel(lines)
+	m.mdPreviewCache.put(m.mdPreviewCacheKey(), rendered, sm)
+	if bi >= 0 {
+		m.preview.cursor = mdPreviewCursorState{
+			set: true, ref: mdPreviewStopRef{block: bi},
+			file: m.file.name, seq: m.file.loadSeq, expanded: true,
+		}
+	}
+	return m, rendered, sm
+}
+
+// TestMdPreviewBody_ExpansionServesTheCachedBaseRender is task 4's caching
+// claim asserted rather than trusted: pressing `r` costs no glamour pass. The
+// cached entry is a hand-built sentinel, so a body carrying its rows can only
+// have come from the cache, and the entry itself must still be there afterwards
+// — expansion rewrites the finished render and never writes back.
+func TestMdPreviewBody_ExpansionServesTheCachedBaseRender(t *testing.T) {
+	m, rendered, _ := mdPreviewExpandedCursorModel(1)
+
+	body, bodyMap := m.mdPreviewBody()
+
+	assert.Equal(t, []string{"  Heading", "", "para one", "para two", "para three", "", "  tail", ""},
+		strings.Split(body, "\n"),
+		"the expanded block's rows must come from the cached sentinel render, not from a fresh one")
+	require.True(t, bodyMap.aligned)
+	assert.Len(t, bodyMap.lines, 3, "the body map must be in expanded coordinates")
+
+	cached, cachedMap, ok := m.mdPreviewCache.get(m.mdPreviewCacheKey())
+	require.True(t, ok, "expansion must not evict the base render entry")
+	assert.True(t, sameStringValue(rendered, cached), "expansion must not write a rebuilt render back into the cache")
+	assert.Empty(t, cachedMap.lines, "the cached map must stay in unexpanded coordinates")
+}
+
+// TestMdPreviewBody_CollapsedReturnsTheCachedRenderUntouched is the other half
+// of the caching obligation: with nothing expanded and nothing annotated, the
+// body IS the cached render — the same string value, so
+// mdPreviewScrollCache.forBody's compare stays O(1) instead of a whole-document
+// memcmp on every repaint.
+func TestMdPreviewBody_CollapsedReturnsTheCachedRenderUntouched(t *testing.T) {
+	m, rendered, sm := mdPreviewExpandedCursorModel(-1)
+	require.Equal(t, -1, m.mdPreviewExpandedBlock(), "fixture sanity: nothing is expanded")
+
+	body, bodyMap := m.mdPreviewBody()
+
+	assert.True(t, sameStringValue(rendered, body), "a collapsed body must be the cached render itself, not a copy")
+	assert.Equal(t, sm, bodyMap)
+}
+
+// TestMdPreviewBody_ExpansionMissesTheScrollCache is the second half of the
+// caching decision: the scroll memos key on the body string, which expansion
+// changes, so they must miss and redo the width scan. That is not a cost to
+// avoid — the raw rows have a different widest row than the rendered ones and
+// the pan clamp has to see it.
+func TestMdPreviewBody_ExpansionMissesTheScrollCache(t *testing.T) {
+	m, _, _ := mdPreviewExpandedCursorModel(-1)
+
+	// warmed through mdPreviewMaxOffset, the production reader of the memo, so
+	// this pins the path a pan actually takes rather than a hand-primed cache
+	collapsed, _ := m.mdPreviewBody()
+	collapsedWidest := m.mdPreviewMaxOffset(collapsed, 0)
+	require.True(t, m.mdPreviewCache.scroll.haveWidest, "fixture sanity: the collapsed body must warm the memo")
+
+	m.preview.cursor = mdPreviewCursorState{
+		set: true, ref: mdPreviewStopRef{block: 1},
+		file: m.file.name, seq: m.file.loadSeq, expanded: true,
+	}
+	expanded, _ := m.mdPreviewBody()
+	require.NotEqual(t, collapsed, expanded, "fixture sanity: expansion must change the body")
+
+	expandedWidest := m.mdPreviewMaxOffset(expanded, 0)
+
+	assert.Equal(t, expanded, m.mdPreviewCache.scroll.body, "the memo must re-key on the expanded body")
+	assert.Equal(t, mdPreviewMaxLineWidth(expanded), expandedWidest,
+		"the width scan must be redone against the raw rows, not answered from the collapsed body")
+	assert.NotEqual(t, collapsedWidest, expandedWidest,
+		"fixture sanity: the two bodies must have different widest rows, or this proves nothing")
+}
+
 // fenceHeavyCorpusDoc reads a real, fence-heavy plan document from this
 // repo's own completed-plans corpus for the task 4 repaint-cost measurement.
 // Falls back to skipping the benchmark rather than failing the suite if the
@@ -275,64 +360,83 @@ func mdPreviewHighlightBg(m Model) string {
 }
 
 // TestMdPreviewHighlightAnchor_FollowsTopmostFullyVisibleBlock is the task's
-// central behavior: as the offset changes, the mark moves to the topmost block
-// that is WHOLLY on screen. Scrolling one row into a block must hand the mark to
-// the next block, not keep it on the one now half off the top — that difference
-// is the whole point of "fully visible", and the only assertion here that a
-// simpler "block at the top row" rule would fail.
-func TestMdPreviewHighlightAnchor_FollowsTopmostFullyVisibleBlock(t *testing.T) {
+// central behavior AFTER the block cursor replaced the scroll-derived mark: the
+// anchor is whatever block the cursor sits on, and the viewport offset does not
+// enter into it at all. Scrolling with the cursor untouched must leave the mark
+// exactly where the reader put it — the old rule handed it to a different block
+// on every offset change, which is the behavior this replaced.
+func TestMdPreviewHighlightAnchor_FollowsTheBlockCursorNotTheOffset(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned, "fixture sanity: this document must align")
 	anchors := srcMap.blocks()
-	require.GreaterOrEqual(t, len(anchors), 4, "fixture sanity: need several blocks to scroll between")
+	require.GreaterOrEqual(t, len(anchors), 4, "fixture sanity: need several blocks to steer between")
 
-	for i := range anchors[:len(anchors)-1] {
-		m.layout.viewport.YOffset = anchors[i].row
+	for i := range anchors {
+		m.setMdPreviewCursorToBlock(i)
 		assert.Equal(t, i, m.mdPreviewHighlightAnchor(srcMap),
-			"with block %d's first row at the top, block %d must be the highlighted one", i, i)
+			"with the cursor on block %d, block %d must be the highlighted one", i, i)
 	}
 
-	// one row further down, block 1's own first row is off the top, so the mark
-	// must move on to the next whole block.
-	require.Greater(t, anchors[1].endRow, anchors[1].row, "fixture sanity: block 1 must span more than one row")
-	m.layout.viewport.YOffset = anchors[1].row + 1
-	assert.Equal(t, 2, m.mdPreviewHighlightAnchor(srcMap),
-		"a block scrolled partly off the top must hand the mark to the next fully visible block")
+	m.setMdPreviewCursorToBlock(1)
+	for _, offset := range []int{0, anchors[2].row, anchors[len(anchors)-1].row} {
+		m.layout.viewport.YOffset = offset
+		assert.Equal(t, 1, m.mdPreviewHighlightAnchor(srcMap),
+			"the viewport offset must not move the mark; the cursor is what decides it")
+	}
 }
 
-// TestMdPreviewHighlightAnchor_FallsBackWhenNothingFits covers the case a
-// "topmost fully visible" rule alone cannot answer: a viewport too short to hold
-// any whole block. The mark falls back to the block filling the screen rather
-// than disappearing.
-func TestMdPreviewHighlightAnchor_FallsBackWhenNothingFits(t *testing.T) {
+// TestMdPreviewHighlightAnchor_NothingMarkedUntilTheCursorMoves is the change's
+// headline behavior: entering preview marks nothing at all, at any offset. The
+// old rule always marked something, always near the top of the pane, which is
+// what the user rejected.
+func TestMdPreviewHighlightAnchor_NothingMarkedUntilTheCursorMoves(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned)
 	anchors := srcMap.blocks()
 	require.GreaterOrEqual(t, len(anchors), 3)
 
-	m.layout.viewport.Height = 1
-	m.layout.viewport.YOffset = anchors[2].row + 1
+	for _, offset := range []int{0, anchors[1].row, anchors[2].row} {
+		m.layout.viewport.YOffset = offset
+		assert.Equal(t, -1, m.mdPreviewHighlightAnchor(srcMap),
+			"with no cursor placed, nothing may be marked at offset %d", offset)
+	}
 
-	assert.Equal(t, 2, m.mdPreviewHighlightAnchor(srcMap),
-		"with no block fitting entirely, the block owning the top row must keep the mark")
+	rows := strings.Split(m.mdPreviewFinalRender(), "\n")
+	bg := mdPreviewHighlightBg(m)
+	require.NotEmpty(t, bg, "fixture sanity: the resolver must carry a search background")
+	for i, row := range rows {
+		assert.NotContains(t, row, bg, "row %d must carry no highlight before the cursor is placed", i)
+	}
 }
 
-// TestMdPreviewHighlightAnchor_NoAnchorAboveFirstBlockOrUnaligned pins the two
-// "nothing to mark" answers.
-func TestMdPreviewHighlightAnchor_NoAnchorAboveFirstBlockOrUnaligned(t *testing.T) {
+// TestMdPreviewHighlightAnchor_CursorPastTheEndOfTheMapMarksNothing pins the
+// defensive bound: a map that lost blocks under a placed cursor (a width where
+// alignment fails, for instance) must mark nothing rather than index past its
+// own anchors.
+func TestMdPreviewHighlightAnchor_CursorPastTheEndOfTheMapMarksNothing(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned)
-	require.Positive(t, srcMap.blocks()[0].row, "fixture sanity: glamour's top margin must leave a row above block 0")
 
-	m.layout.viewport.Height = 1
-	m.layout.viewport.YOffset = 0
-	assert.Equal(t, -1, m.mdPreviewHighlightAnchor(srcMap), "a viewport above the first block marks nothing")
+	m.setMdPreviewCursorToBlock(len(srcMap.blocks()))
 
-	m.layout.viewport.Height = 20
+	assert.Equal(t, -1, m.mdPreviewHighlightAnchor(srcMap),
+		"a cursor past the last block must mark nothing")
+}
+
+// TestMdPreviewHighlightAnchor_UnalignedMapMarksNothing pins the guard the
+// block cursor did not replace: a map that failed alignment exposes no blocks,
+// so nothing may be marked even with a cursor placed.
+func TestMdPreviewHighlightAnchor_UnalignedMapMarksNothing(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.aligned)
+	m.setMdPreviewCursorToBlock(0)
+
 	assert.Equal(t, -1, m.mdPreviewHighlightAnchor(mdPreviewSourceMap{}), "an unaligned map marks nothing")
+	assert.Equal(t, -1, m.mdPreviewHighlightAnchor(mdPreviewSourceMap{aligned: true}), "a map with no blocks marks nothing")
 }
 
 // TestMdPreviewFinalRender_PaintsHighlightOnTheAnchoredBlockOnly proves the
@@ -344,7 +448,7 @@ func TestMdPreviewFinalRender_PaintsHighlightOnTheAnchoredBlockOnly(t *testing.T
 	anchors := srcMap.blocks()
 	require.GreaterOrEqual(t, len(anchors), 4)
 
-	m.layout.viewport.YOffset = anchors[2].row
+	m.setMdPreviewCursorToBlock(2)
 	require.Equal(t, 2, m.mdPreviewHighlightAnchor(srcMap), "fixture sanity: block 2 must be the marked one")
 
 	rows := strings.Split(m.mdPreviewFinalRender(), "\n")
@@ -363,7 +467,8 @@ func TestMdPreviewFinalRender_PaintsHighlightOnTheAnchoredBlockOnly(t *testing.T
 func TestMdPreviewFinalRender_HighlightPreservesVisualShape(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
 	body, srcMap := m.mdPreviewBody()
-	m.layout.viewport.YOffset = srcMap.blocks()[2].row
+	m.setMdPreviewCursorToBlock(2)
+	require.Equal(t, 2, m.mdPreviewHighlightAnchor(srcMap), "fixture sanity: block 2 must be the marked one")
 
 	plain := strings.Split(m.applyMdPreviewScroll(body), "\n")
 	marked := strings.Split(m.mdPreviewFinalRender(), "\n")
@@ -437,21 +542,25 @@ func TestMdPreviewPaintAnnotationsTracked_ShiftsAnchorsOntoPaintedRows(t *testin
 	}
 }
 
-// TestMdPreviewWheelBurst_RepaintsOnceForTheWholeBurst is the task's
-// "one wheel burst repaints once rather than per event" checkbox. The preview
-// repaint rides the existing wheelState debounce (gen / renderPending /
-// tickInFlight, see .claude/rules/gotchas.md) rather than bringing a second one:
-// a burst of wheel events schedules exactly one tick, repaints nothing while it
-// runs, and lands its single repaint when the burst flushes.
-func TestMdPreviewWheelBurst_RepaintsOnceForTheWholeBurst(t *testing.T) {
+// TestMdPreviewWheelBurst_DropsTheCursorOnceForTheWholeBurst is the task's
+// "one wheel burst does its deferred work once rather than per event" checkbox,
+// now that the deferred work is dropping the block cursor rather than moving a
+// scroll-derived mark. The preview path rides the existing wheelState debounce
+// (gen / renderPending / tickInFlight, see .claude/rules/gotchas.md) rather than
+// bringing a second one: a burst schedules exactly one tick, touches the cursor
+// not at all while it runs, and clears it once when the burst flushes.
+func TestMdPreviewWheelBurst_DropsTheCursorOnceForTheWholeBurst(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.aligned, "fixture sanity")
+	m.setMdPreviewCursorToBlock(0) // the first block, which the burst scrolls away from
 	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 	require.Greater(t, m.layout.viewport.TotalLineCount(), m.layout.viewport.Height,
 		"fixture sanity: the document must be scrollable")
 
 	scheduled := 0
 	var model tea.Model = m
-	for range 5 {
+	for range 15 {
 		var cmd tea.Cmd
 		model, cmd = model.(Model).handleWheel(hitDiff, 2)
 		if cmd != nil {
@@ -463,32 +572,70 @@ func TestMdPreviewWheelBurst_RepaintsOnceForTheWholeBurst(t *testing.T) {
 	assert.Equal(t, 1, scheduled, "only the first wheel of a burst may schedule a tick")
 	require.True(t, m.wheel.renderPending, "the burst must still owe exactly one repaint")
 	require.True(t, m.wheel.tickInFlight, "the one scheduled tick must still be the only one in flight")
+	assert.Equal(t, 0, m.mdPreviewBlockCursor(), "no wheel event may touch the cursor itself")
+	require.Greater(t, m.layout.viewport.YOffset, srcMap.blocks()[0].endRow,
+		"fixture sanity: the burst must have carried block 0 entirely off the top")
 
-	duringBurst := m.layout.viewport.View()
 	m.flushWheelPending()
-	afterFlush := m.layout.viewport.View()
 
-	assert.NotEqual(t, duringBurst, afterFlush, "the burst's single repaint must land at flush time, not during it")
-	assert.Contains(t, afterFlush, mdPreviewHighlightBg(m), "after the flush the mark must be on a visible block")
+	assert.Equal(t, -1, m.mdPreviewBlockCursor(),
+		"the burst's single deferred pass must drop a cursor it scrolled out of view")
 	assert.False(t, m.wheel.renderPending, "the flush must clear the owed repaint")
 	assert.False(t, m.wheel.tickInFlight, "the flush must clear the in-flight tick")
 }
 
-// TestScrollMarkdownPreview_RepaintsSoTheMarkFollows covers the keyboard half:
-// j/k and the page keys repaint immediately (a key press is one event, not a
-// burst), so the mark is on the new topmost block as soon as the key lands.
-func TestScrollMarkdownPreview_RepaintsSoTheMarkFollows(t *testing.T) {
+// TestMdPreviewWheelBurst_KeepsACursorStillInView is the other half: the wheel
+// clears the cursor only when it really did hide the block, not on any scroll.
+func TestMdPreviewWheelBurst_KeepsACursorStillInView(t *testing.T) {
 	m := mdPreviewHighlightModel(t)
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.aligned, "fixture sanity")
+	target := blockVisibleAcrossScroll(t, m, srcMap, wheelStep)
+	m.setMdPreviewCursorToBlock(target)
 	m.layout.viewport.SetContent(m.renderMarkdownPreview())
+
+	model, _ := m.handleWheel(hitDiff, 2)
+	m = model.(Model)
+	m.flushWheelPending()
+
+	assert.Equal(t, target, m.mdPreviewBlockCursor(), "a wheel that leaves the block in view must keep the cursor")
+}
+
+// blockVisibleAcrossScroll returns the index of a block that is wholly inside
+// the viewport both at offset 0 and after scrolling down by scroll rows — the
+// fixture shape the "a scroll that does not hide the block keeps the cursor"
+// tests need.
+func blockVisibleAcrossScroll(t *testing.T, m Model, srcMap mdPreviewSourceMap, scroll int) int {
+	t.Helper()
+	for i, a := range srcMap.blocks() {
+		if a.row >= scroll && a.endRow <= m.layout.viewport.Height-1 {
+			return i
+		}
+	}
+	t.Fatalf("fixture sanity: no block stays wholly visible across a %d-row scroll", scroll)
+	return -1
+}
+
+// TestScrollMarkdownPreview_RepaintsAndKeepsAVisibleMark covers the keyboard
+// half: the row-scroll keys (J/K, page, half-page) repaint immediately — a key
+// press is one event, not a burst — and leave a cursor whose block is still on
+// screen exactly where it was.
+func TestScrollMarkdownPreview_RepaintsAndKeepsAVisibleMark(t *testing.T) {
+	m := mdPreviewHighlightModel(t)
 	_, srcMap := m.mdPreviewBody()
 	require.True(t, srcMap.aligned)
+	target := blockVisibleAcrossScroll(t, m, srcMap, 1)
+	m.setMdPreviewCursorToBlock(target)
+	m.layout.viewport.SetContent(m.renderMarkdownPreview())
 
 	before := m.layout.viewport.View()
-	m.scrollMarkdownPreview(srcMap.blocks()[3].row)
+	m.scrollMarkdownPreview(1)
 
 	after := m.layout.viewport.View()
-	assert.NotEqual(t, before, after, "a keyboard scroll must repaint")
-	assert.Contains(t, after, mdPreviewHighlightBg(m), "the mark must be on screen after the scroll")
+	require.Equal(t, 1, m.layout.viewport.YOffset, "fixture sanity: the scroll must have moved the viewport")
+	assert.NotEqual(t, before, after, "a keyboard scroll must move what is on screen")
+	assert.Equal(t, target, m.mdPreviewBlockCursor(), "a scroll that keeps the block in view must not move the cursor")
+	assert.Contains(t, after, mdPreviewHighlightBg(m), "the mark must still be on screen after the scroll")
 }
 
 // TestScrollMarkdownPreview_AtEdgeDoesNotRepaint pins the no-op: a scroll that
