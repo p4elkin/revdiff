@@ -499,6 +499,16 @@ bound". The message is the constant `mdPreviewUnanchorableHint`; the old second
 message ("No block in view to annotate") is gone with the scroll-derived
 highlight, because an aligned map always has a nearest block to seed on.
 
+The same message is now also shown **once on entering preview**, not only after a
+key is pressed. `toggleMarkdownPreview` asks `mdPreviewCanAnchor` (map aligned and
+at least one block — the base render's map, which is the memo the frame it just
+drew already filled, so it costs no second glamour pass) and sets the hint on the
+ON transition when the answer is no. It is an ordinary transient hint, so the next
+key clears it and it never occupies the status bar. Before this, a correct refusal
+was still a mystery: the reader had to discover it by pressing `a` and watching
+nothing happen, which is what "sometimes I don't get annotation capabilities in
+preview mode, seems a bit random" turned out to mean.
+
 The render cache (`mdpreview_cache.go`) is a single entry, not a map — the
 preview shows one file at a time, so there is never more than one base render
 worth keeping warm (same shape as `diffRenderCache`'s own per-line, not
@@ -1387,7 +1397,25 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   This was a task 2 deviation from the plan's own granularity list, which did not call this out
   explicitly; it follows the same "one target per swallowing construct" treatment the spike
   established for tables, and keeps the target list a clean partition of the document (see the
-  task 2/task 3 decision log entries on `mdPreviewQuoteParagraphs`).
+  task 2/task 3 decision log entries on `mdPreviewQuoteInfos`, formerly
+  `mdPreviewQuoteParagraphs`).
+
+  A quote whose direct children are ALL boundary kinds gets **no** target instead of one, and that
+  is not a limitation but the reason the fold works at all: its nested blocks are the targets. `> -
+  a bullet` anchors the bullet, `> ## h` anchors the heading, and so on for a fence, a table, a
+  rule or another quote. `swallowedSpan` finds no span to claim for the quote itself, so emitting a
+  target would put the quote and its first nested block on the same source line — two blocks
+  sharing one `annotation.Store` `(Line, Type)` key, which `Add` resolves by REPLACING, silently
+  destroying one reader's comment. glamour still writes the quote's chrome and so still marks it,
+  and `mdAlignState.skipTargetlessQuotes` is what accounts for that marker: it drops a
+  `BlockQuote.Prefix` hit only when the next unaccounted entry of `mdPreviewQuoteInfos` says that
+  quote produced no target. Both conditions have to hold, so a quote marker turning up where a
+  quote with a target was expected still fails alignment rather than being swallowed.
+
+  ⚠️ This used to degrade the **whole document** — one unclaimed marker, and every block in the
+  file became unanchorable. It is what the user hit as "sometimes I don't get annotation
+  capabilities in preview mode, seems a bit random": a single `> - bullet` line anywhere in a
+  118-line plan was enough. `TestMdPreviewSrcMap_QuoteWithoutOwnTargetAligns` pins every shape.
 - **Anchoring is block granularity, not character-exact.** A comment on a wrapped paragraph
   anchors to the whole paragraph, not the line or word under the cursor at the moment of wrapping
   — matching how the same paragraph would be commented in source view before this feature existed,
@@ -1455,6 +1483,23 @@ These are accepted, documented gaps in the preview mode — not bugs to fix unde
   document degrades to read-only in full, the same all-or-nothing way the adjacent-tables case
   does.
 
+  The blockquote used to share this shape and no longer does — see the blockquote entry above and
+  `skipTargetlessQuotes`. The same treatment is not extended to the list item here: a quote's
+  markers are already tracked one-for-one by `mdPreviewQuoteInfos`, so skipping one is exact, while
+  items have no such per-construct record and `item` is two thirds of every anchor the corpus
+  produces, so a skip rule for them would be a guess over the most common marker in the sequence.
+- **A blockquote whose list comes BEFORE its own trailing paragraph degrades the document.** In
+  `> - a bullet` / `>` / `> trailing para` the quote does own direct content (the trailing
+  paragraph) and so does get a target, but `swallowedSpan` gives that target the paragraph's line —
+  after the nested item's. The walk emits the quote on entering the quote, so the target sequence
+  reads quote(line 5), item(line 3), and `mdPreviewBuildSourceMap` refuses a source-line sequence
+  that is not strictly increasing. The two axes genuinely conflict here and cannot both be
+  satisfied: glamour writes the quote's chrome row BEFORE the item's row, so the quote anchor has
+  to precede the item on the row axis while following it on the source axis. Giving the quote its
+  opening line instead would collide with the item's line, which is the `(Line, Type)` key
+  collision the strictly-increasing check exists to prevent. Put the quote's own prose first
+  (`> intro` / `>` / `> - a bullet`) and the document anchors fully, each bullet included.
+
 **Preview annotations — corpus measurement (`mdpreview_srcmap_corpus_test.go`, env-gated via
 `REVDIFF_MDPREVIEW_SRCMAP_CORPUS`, same corpus definition the task 1-3 spike used: every file
 under `docs/plans/completed/`, every file directly under `docs/`, and every `.md` at the repo
@@ -1490,6 +1535,15 @@ Re-run with `go test ./app/ui -run TestMdPreviewSrcMapCorpusAlignment -v
 REVDIFF_MDPREVIEW_SRCMAP_CORPUS=<path-to-a-file-listing-one-.md-path-per-line>` — the numbers will
 drift as the corpus (this repo's own docs) grows or changes; treat this table as a snapshot, not a
 promise.
+
+⚠️ **The repo's own corpus is not a good sample for the blockquote fix, and that is worth knowing
+before reading the rate as coverage.** Over every `.md` in the repo (80 documents, `find "$PWD"
+-name '*.md' -not -path '*/vendor/*'`) `skipTargetlessQuotes` moved the rate not at all — 79/80
+before and after, the same 12,102 anchors, `README.md` unaligned on both sides — because no
+document here writes a list inside a blockquote. The shape is nonetheless common in plans written
+elsewhere: a 106-line document built to match the user's real one (six sections, each a heading, a
+paragraph, one quoted bullet or quoted ordered item, a fence and a plain list) went 0/1 to 1/1,
+45 anchors. A corpus that does not contain a shape cannot measure a fix for it.
 
 ⚠️ **The preview render is non-deterministic for about a quarter of documents — general finding,
 not specific to this feature.** The task 1-3 spike rendered the same document twice through the

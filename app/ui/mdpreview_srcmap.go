@@ -261,7 +261,7 @@ func mdPreviewRenderWithMap(lines []diff.DiffLine, width int, noColors bool) (st
 	}
 
 	targets := mdPreviewBlockTargets(doc)
-	rows, aligned := mdPreviewAlignRows(targets, mdPreviewExtractMarkers(out), mdPreviewQuoteParagraphs(doc))
+	rows, aligned := mdPreviewAlignRows(targets, mdPreviewExtractMarkers(out), mdPreviewQuoteInfos(doc))
 
 	out = mdPreviewCleanMarkers(out, noColors)
 	out, shifts := spliceMermaidArtTracked(out, nonce, arts)
@@ -324,19 +324,25 @@ func mdPreviewKindMatches(hit, want mdPreviewBlockKind) bool {
 //     runs of table markers, so the document fails alignment and degrades
 //     rather than mis-anchoring.
 //   - a blockquote gets ONE target that swallows its own paragraphs, but
-//     glamour still writes Paragraph.Prefix for each of them. quoteParagraphs
-//     carries the exact per-quote count (see mdPreviewQuoteParagraphs), which
+//     glamour still writes Paragraph.Prefix for each of them. quoteInfos
+//     carries the exact per-quote count (see mdPreviewQuoteInfos), which
 //     is what makes those extra paragraph markers accountable instead of
 //     merely skippable: the first is consumed as the quote's own leading
 //     marker where present, the rest become a budget that is drained before
 //     each later target. Draining first is correct because document order
 //     guarantees a previous quote's leftover paragraphs precede everything
 //     that follows the quote.
-func mdPreviewAlignRows(targets []mdPreviewBlockTarget, hits []mdPreviewMarkerHit, quoteParagraphs []int) ([]int, bool) {
-	st := &mdAlignState{hits: hits, quoteParagraphs: quoteParagraphs, prevRow: -1}
+//
+// A third rule covers the blockquote that gets NO target at all — see
+// skipTargetlessQuotes, and mdPreviewQuoteInfos' ownTarget field for when that
+// happens.
+func mdPreviewAlignRows(targets []mdPreviewBlockTarget, hits []mdPreviewMarkerHit,
+	quoteInfos []mdPreviewQuoteInfo) ([]int, bool) {
+	st := &mdAlignState{hits: hits, quoteInfos: quoteInfos, prevRow: -1}
 	rows := make([]int, len(targets))
 	for i, tg := range targets {
 		st.drainQuoteParagraphs()
+		st.skipTargetlessQuotes()
 		row, ok := st.take(tg.kind)
 		if !ok || row <= st.prevRow {
 			return nil, false
@@ -344,6 +350,7 @@ func mdPreviewAlignRows(targets []mdPreviewBlockTarget, hits []mdPreviewMarkerHi
 		rows[i], st.prevRow = row, row
 	}
 	st.drainQuoteParagraphs()
+	st.skipTargetlessQuotes()
 	if st.pos != len(hits) {
 		return nil, false // a marker no target claimed: the two sequences disagree
 	}
@@ -354,12 +361,12 @@ func mdPreviewAlignRows(targets []mdPreviewBlockTarget, hits []mdPreviewMarkerHi
 // struct rather than a closure set so the three consumption rules (ordinary,
 // table, blockquote) read as named steps.
 type mdAlignState struct {
-	hits            []mdPreviewMarkerHit
-	quoteParagraphs []int
-	pos             int // next unconsumed hit
-	quoteIdx        int // next unconsumed entry of quoteParagraphs
-	budget          int // quote-owned paragraph markers still to be discarded
-	prevRow         int
+	hits       []mdPreviewMarkerHit
+	quoteInfos []mdPreviewQuoteInfo
+	pos        int // next unconsumed hit
+	quoteIdx   int // next unaccounted-for entry of quoteInfos
+	budget     int // quote-owned paragraph markers still to be discarded
+	prevRow    int
 }
 
 // peek reports the kind of the next unconsumed hit.
@@ -382,6 +389,45 @@ func (s *mdAlignState) drainQuoteParagraphs() {
 		}
 		s.pos++
 		s.budget--
+	}
+}
+
+// skipTargetlessQuotes discards the BlockQuote.Prefix marker of every quote
+// that reaches here without a target of its own.
+//
+// A blockquote whose direct children are ALL boundary kinds — a list, a
+// heading, a fenced code block, a table, a thematic break, another blockquote —
+// contributes no target, because swallowedSpan (mdpreview_blocks.go) aggregates
+// only over a container's own direct content and every one of those children is
+// excluded from it as a target in its own right. glamour still writes the
+// quote's chrome and so still marks it, which used to leave one marker nobody
+// claimed and degraded the whole document to read-only: `> - a bullet` as a
+// whole document did not align, and neither did the same line with an ordered
+// item, a heading, a fence, a table or a rule inside the quote.
+//
+// The skip is exact rather than a guess, and that is the whole reason
+// mdPreviewQuoteInfos carries ownTarget alongside the paragraph count: quotes
+// appear in mdPreviewQuoteInfos in document order and their markers appear in
+// the hit sequence in the same order, so the quote at quoteIdx is always the one
+// the next unconsumed BlockQuote marker belongs to. Only a quote whose own info
+// says it produced no target has its marker dropped here; a quote that DID
+// produce one is left alone for takeQuote to consume when its target comes up.
+// Both conditions have to hold, so a genuine disagreement — a quote marker where
+// no quote is expected — still fails alignment instead of being swallowed.
+//
+// The loop matters: nested quotes (`> > - deep`) are two targetless quotes whose
+// two markers sit back to back.
+func (s *mdAlignState) skipTargetlessQuotes() {
+	for s.quoteIdx < len(s.quoteInfos) && !s.quoteInfos[s.quoteIdx].ownTarget {
+		if k, ok := s.peek(); !ok || k != mdBlockQuote {
+			return
+		}
+		s.pos++
+		// a targetless quote has no direct paragraphs by construction (one
+		// would have given swallowedSpan a span and so a target), but carry the
+		// count into the drain budget anyway rather than assuming it is zero.
+		s.budget += s.quoteInfos[s.quoteIdx].paragraphs
+		s.quoteIdx++
 	}
 }
 
@@ -411,8 +457,8 @@ func (s *mdAlignState) take(want mdPreviewBlockKind) (int, bool) {
 // here.
 func (s *mdAlignState) takeQuote() (int, bool) {
 	paragraphs := 0
-	if s.quoteIdx < len(s.quoteParagraphs) {
-		paragraphs = s.quoteParagraphs[s.quoteIdx]
+	if s.quoteIdx < len(s.quoteInfos) {
+		paragraphs = s.quoteInfos[s.quoteIdx].paragraphs
 	}
 	s.quoteIdx++
 
@@ -449,21 +495,46 @@ func (s *mdAlignState) takeTable() (int, bool) {
 	}
 }
 
-// mdPreviewQuoteParagraphs counts, per blockquote in document order, how many
-// paragraphs are its DIRECT children — exactly the paragraphs glamour marks
-// but the block walk folds into the quote's single target (see
-// mdPreviewBlockTargets' KindParagraph case). A paragraph nested deeper, e.g.
-// inside a list item inside the quote, is not counted here because glamour
-// renders it as an empty element and so never marks it.
+// mdPreviewQuoteInfo is what the alignment pass needs to know about one
+// blockquote that the target list alone cannot tell it.
+//
+// paragraphs is how many paragraphs are the quote's DIRECT children — exactly
+// the paragraphs glamour marks but the block walk folds into the quote's single
+// target (see mdPreviewBlockTargets' KindParagraph case). A paragraph nested
+// deeper, e.g. inside a list item inside the quote, is not counted because
+// glamour renders it as an empty element and so never marks it.
+//
+// ownTarget is whether the block walk emits a block_quote target for this quote
+// at all. It is false for a quote whose direct children are all boundary kinds —
+// a list, a heading, a fence, a table, a rule, another quote — since
+// swallowedSpan then finds no span to claim. glamour marks that quote's chrome
+// regardless, so the marker has to be accounted for somewhere, and
+// skipTargetlessQuotes is where. Without the field the alignment pass would have
+// to guess from the marker sequence alone, which is exactly the kind of guess the
+// whole mechanism exists to avoid.
+type mdPreviewQuoteInfo struct {
+	paragraphs int
+	ownTarget  bool
+}
+
+// mdPreviewQuoteInfos returns one entry per blockquote in doc, in document
+// order — the same order the block walk visits them in and the same order their
+// markers appear in the render, which is what lets the alignment pass consume
+// the two sequences side by side.
 //
 // This re-parses doc with the same goldmark instance the block walk uses
-// rather than having mdPreviewBlockTargets return the counts alongside its
+// rather than having mdPreviewBlockTargets return the infos alongside its
 // targets. The parse is deterministic and the render is cached, so the cost is
 // one extra parse per cache miss; the gain is that the block walk's returned
 // shape stays exactly what its own task defined and its tests pin.
-func mdPreviewQuoteParagraphs(doc string) []int {
-	root := mdBlockMarkdown.Parser().Parse(gtext.NewReader([]byte(doc)))
-	var counts []int
+//
+// ownTarget is computed by calling swallowedSpan itself, not by re-deriving the
+// condition: the two sides then cannot drift, because there is only one side.
+func mdPreviewQuoteInfos(doc string) []mdPreviewQuoteInfo {
+	src := []byte(doc)
+	root := mdBlockMarkdown.Parser().Parse(gtext.NewReader(src))
+	idx := newMdLineIndex(doc)
+	var infos []mdPreviewQuoteInfo
 	_ = gast.Walk(root, func(n gast.Node, entering bool) (gast.WalkStatus, error) {
 		if !entering || n.Kind() != gast.KindBlockquote {
 			return gast.WalkContinue, nil
@@ -474,10 +545,11 @@ func mdPreviewQuoteParagraphs(doc string) []int {
 				paragraphs++
 			}
 		}
-		counts = append(counts, paragraphs)
+		_, _, ok := swallowedSpan(n, idx)
+		infos = append(infos, mdPreviewQuoteInfo{paragraphs: paragraphs, ownTarget: ok})
 		return gast.WalkContinue, nil
 	})
-	return counts
+	return infos
 }
 
 // mdPreviewShiftRow translates a row of the pre-splice render into its row in

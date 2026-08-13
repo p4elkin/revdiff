@@ -555,9 +555,30 @@ func (m *Model) toggleMarkdownPreview() {
 	if m.modes.mdPreview {
 		m.layout.viewport.SetContent(m.renderDiff())
 		m.layout.viewport.GotoTop()
+		if !m.mdPreviewCanAnchor() {
+			m.preview.hint = mdPreviewUnanchorableHint
+		}
 		return
 	}
 	m.syncViewportToCursor()
+}
+
+// mdPreviewCanAnchor reports whether this document can carry a preview
+// annotation at all: its source map agreed with the render, and it holds at
+// least one block to attach to. It is the same condition every refusal in
+// preview already bottoms out in — mdPreviewStartAnnotation's block seed and
+// mdPreviewToggleRaw's guard both fail exactly when this is false — stated once
+// so entering preview can ask it up front.
+//
+// It reads the BASE render's map rather than mdPreviewBody's, on purpose: the
+// annotation painter degrades an unaligned base map to the empty map and cannot
+// turn an aligned one into a refusal, so the base map is what decides, and asking
+// it directly skips the expansion and annotation passes. The base render is
+// memoized (mdPreviewRenderCache) and the caller has just rendered the frame, so
+// this is a cache hit rather than a second glamour pass.
+func (m Model) mdPreviewCanAnchor() bool {
+	_, srcMap := m.mdPreviewBaseRender()
+	return srcMap.aligned && len(srcMap.blocks()) > 0
 }
 
 // renderMarkdownPreview renders the currently loaded file as a markdown
