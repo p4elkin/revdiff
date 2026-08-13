@@ -502,6 +502,13 @@ func (m *Model) mdPreviewStartAnnotation() tea.Cmd {
 // document and never resolves by scrolling, so the hint names the way out
 // instead.
 //
+// The same message is shown once on ENTERING preview when the document cannot
+// anchor (toggleMarkdownPreview -> mdPreviewCanAnchor), not only when a key is
+// pressed. A refusal that is correct is still a mystery if the reader has to
+// discover it by trying: the state belongs to the document, so it is announced
+// when the document comes on screen. It is an ordinary transient hint, so the
+// next key press clears it and it never sits in the status bar.
+//
 // The old second reason — aligned, but the viewport sat where no block could be
 // marked — is gone with the scroll-derived highlight. `a` now seeds the block
 // cursor at the viewport center when none is set (mdPreviewStartAnnotation), and

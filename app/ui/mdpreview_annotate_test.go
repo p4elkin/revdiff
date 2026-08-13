@@ -1686,3 +1686,95 @@ func TestMdPreviewClickAnnotate_BottomRow_InputIsVisible(t *testing.T) {
 	require.True(t, srcMap.liveInput.ok)
 	assert.True(t, mdPreviewInputOnScreen(got), "a click on the bottom row must still show the input it opened")
 }
+
+// TestMdPreviewStartAnnotation_ItemInsideAQuote closes the loop the source-map
+// tests open: a bullet inside a blockquote is not only anchorable, it is
+// annotatable, and the comment lands on that bullet's own source line. Before
+// skipTargetlessQuotes the whole document refused to anchor, so `a` did nothing
+// at all here.
+func TestMdPreviewStartAnnotation_ItemInsideAQuote(t *testing.T) {
+	doc := "# Plan\n\n> - first bullet\n> - second bullet\n\nafter\n"
+	lines := mdLines(doc)
+	m := mdPreviewTestModel(lines)
+	m.modes.mdPreview = true
+
+	_, srcMap := m.mdPreviewBody()
+	require.True(t, srcMap.aligned, "a list inside a quote must be anchorable")
+
+	var items []int
+	for i, a := range srcMap.blocks() {
+		if a.kind == mdBlockItem {
+			items = append(items, i)
+		}
+	}
+	require.Len(t, items, 2)
+
+	m.setMdPreviewCursorToBlock(items[1])
+	m.mdPreviewStartAnnotation()
+
+	require.True(t, m.annot.annotating, "`a` on a bullet inside a quote must open the input")
+	assert.Equal(t, "> - second bullet", lines[m.nav.diffCursor].Content,
+		"the annotation must aim at the second bullet, not the quote or the first bullet")
+}
+
+// TestToggleMarkdownPreview_HintsWhenTheDocumentCannotAnchor: entering preview
+// on an unanchorable document says so, instead of leaving the reader to find out
+// by pressing `a` and getting nothing. The message reaches the status bar,
+// which is the part worth pinning — a hint field nothing renders is the same as
+// no hint.
+func TestToggleMarkdownPreview_HintsWhenTheDocumentCannotAnchor(t *testing.T) {
+	// a list item whose only child is a nested list contributes no target while
+	// glamour still marks it, so this document degrades (see PATCH.md's
+	// accepted-limitations list)
+	m := mdPreviewTestModel(mdLines("# T\n\n-\n  - deep\n\nafter\n"))
+	_, srcMap := mdPreviewRenderWithMap(m.file.lines, 80, false)
+	require.False(t, srcMap.aligned, "fixture sanity: this document must be unanchorable")
+
+	m.toggleMarkdownPreview()
+
+	require.True(t, m.modes.mdPreview)
+	assert.Equal(t, mdPreviewUnanchorableHint, m.preview.hint)
+	assert.Contains(t, ansi.Strip(m.statusBarText()), "Preview cannot anchor this document",
+		"the hint has to reach the status bar, not just the field")
+
+	// and the other path a reader hits — pressing `a` — still says the same
+	// thing through the same status bar
+	m.preview.hint = ""
+	require.Nil(t, m.mdPreviewStartAnnotation())
+	assert.Contains(t, ansi.Strip(m.statusBarText()), "Preview cannot anchor this document")
+}
+
+// TestToggleMarkdownPreview_NoHintWhenTheDocumentAnchors is the other half: a
+// document that CAN anchor must enter preview silently. A hint on every entry
+// would be noise, and noise is what makes a real hint ignorable.
+func TestToggleMarkdownPreview_NoHintWhenTheDocumentAnchors(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# T\n\n> - a bullet inside a quote\n\nafter\n"))
+
+	m.toggleMarkdownPreview()
+
+	require.True(t, m.modes.mdPreview)
+	assert.Empty(t, m.preview.hint, "an anchorable document must enter preview with nothing to say")
+}
+
+// TestMdPreviewUnanchorableDocument_StillListsItsAnnotations pins the other half
+// of the degrade contract end to end, on a REAL unanchorable document rather
+// than a hand-built empty map: nothing is anchored, but nothing is hidden
+// either — every annotation is listed as one group above the document.
+func TestMdPreviewUnanchorableDocument_StillListsItsAnnotations(t *testing.T) {
+	m := mdPreviewTestModel(mdLines("# T\n\n-\n  - deep\n\nafter\n"))
+	m.modes.mdPreview = true
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 0, Type: "", Comment: "file-level note"})
+	m.store.Add(annotation.Annotation{File: "plan.md", Line: 1, Type: " ", Comment: "line-level note"})
+
+	body, srcMap := m.mdPreviewBody()
+	require.False(t, srcMap.aligned, "fixture sanity: this document must be unanchorable")
+
+	stripped := ansi.Strip(body)
+	fileIdx := strings.Index(stripped, "file-level note")
+	lineIdx := strings.Index(stripped, "line-level note")
+	bodyIdx := strings.Index(stripped, "deep")
+	require.GreaterOrEqual(t, fileIdx, 0, "a file-level annotation must still be visible")
+	require.GreaterOrEqual(t, lineIdx, 0, "a line-level annotation must still be visible")
+	assert.Less(t, fileIdx, bodyIdx, "the group is prepended above the document")
+	assert.Less(t, lineIdx, bodyIdx)
+}

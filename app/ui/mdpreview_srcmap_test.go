@@ -110,7 +110,8 @@ func TestMdPreviewAlignRows_TableRunCollapses(t *testing.T) {
 // quote gets the row of the paragraph that really is outside it.
 func TestMdPreviewAlignRows_QuoteParagraphsAccounted(t *testing.T) {
 	rows, ok := mdPreviewAlignRows(targetsOf(mdBlockQuote, mdBlockParagraph),
-		hitsOf(mdBlockParagraph, 2, mdBlockQuote, 2, mdBlockParagraph, 4, mdBlockParagraph, 6), []int{2})
+		hitsOf(mdBlockParagraph, 2, mdBlockQuote, 2, mdBlockParagraph, 4, mdBlockParagraph, 6),
+		[]mdPreviewQuoteInfo{{paragraphs: 2, ownTarget: true}})
 	require.True(t, ok)
 	assert.Equal(t, []int{2, 6}, rows, "the trailing paragraph target must not steal the quote's own paragraph row")
 }
@@ -120,7 +121,8 @@ func TestMdPreviewAlignRows_QuoteParagraphsAccounted(t *testing.T) {
 // paragraph budget has to survive across the nested target.
 func TestMdPreviewAlignRows_QuoteWithNestedBlock(t *testing.T) {
 	rows, ok := mdPreviewAlignRows(targetsOf(mdBlockQuote, mdBlockCodeBlock, mdBlockParagraph),
-		hitsOf(mdBlockQuote, 1, mdBlockCodeBlock, 3, mdBlockParagraph, 6, mdBlockParagraph, 9), []int{1})
+		hitsOf(mdBlockQuote, 1, mdBlockCodeBlock, 3, mdBlockParagraph, 6, mdBlockParagraph, 9),
+		[]mdPreviewQuoteInfo{{paragraphs: 1, ownTarget: true}})
 	require.True(t, ok)
 	assert.Equal(t, []int{1, 3, 9}, rows)
 }
@@ -345,25 +347,35 @@ func TestMdPreviewSrcMap_UnalignedExposesNothing(t *testing.T) {
 	assert.Equal(t, -1, sm.anchorAtLine(5))
 }
 
-// TestMdPreviewSrcMap_QuoteParagraphCounts pins the input the blockquote fold
-// depends on: the per-quote count of DIRECT paragraph children, in document
-// order, and nothing deeper.
-func TestMdPreviewSrcMap_QuoteParagraphCounts(t *testing.T) {
+// TestMdPreviewSrcMap_QuoteInfos pins the input the blockquote fold depends
+// on: per quote in document order, the count of DIRECT paragraph children (and
+// nothing deeper), plus whether the block walk emits a target for that quote at
+// all. ownTarget is false exactly when every direct child is a boundary kind,
+// which is what skipTargetlessQuotes keys off.
+func TestMdPreviewSrcMap_QuoteInfos(t *testing.T) {
 	tests := []struct {
 		name string
 		doc  string
-		want []int
+		want []mdPreviewQuoteInfo
 	}{
 		{"none", "para\n\n- item\n", nil},
-		{"single", "> one\n", []int{1}},
-		{"two paragraphs", "> one\n>\n> two\n", []int{2}},
-		{"paragraph and fence", "> one\n>\n> ```go\n> x := 1\n> ```\n>\n> two\n", []int{2}},
-		{"list inside is not a paragraph", "> intro\n>\n> - a\n> - b\n", []int{1}},
-		{"two quotes", "> a\n\npara\n\n> b\n>\n> c\n", []int{1, 2}},
+		{"single", "> one\n", []mdPreviewQuoteInfo{{paragraphs: 1, ownTarget: true}}},
+		{"two paragraphs", "> one\n>\n> two\n", []mdPreviewQuoteInfo{{paragraphs: 2, ownTarget: true}}},
+		{"paragraph and fence", "> one\n>\n> ```go\n> x := 1\n> ```\n>\n> two\n",
+			[]mdPreviewQuoteInfo{{paragraphs: 2, ownTarget: true}}},
+		{"list inside is not a paragraph", "> intro\n>\n> - a\n> - b\n",
+			[]mdPreviewQuoteInfo{{paragraphs: 1, ownTarget: true}}},
+		{"two quotes", "> a\n\npara\n\n> b\n>\n> c\n",
+			[]mdPreviewQuoteInfo{{paragraphs: 1, ownTarget: true}, {paragraphs: 2, ownTarget: true}}},
+		{"list only", "> - a\n> - b\n", []mdPreviewQuoteInfo{{paragraphs: 0, ownTarget: false}}},
+		{"fence only", "> ```go\n> x := 1\n> ```\n", []mdPreviewQuoteInfo{{paragraphs: 0, ownTarget: false}}},
+		{"heading only", "> ## h\n", []mdPreviewQuoteInfo{{paragraphs: 0, ownTarget: false}}},
+		{"nested quote with a list", "> > - deep\n",
+			[]mdPreviewQuoteInfo{{paragraphs: 0, ownTarget: false}, {paragraphs: 0, ownTarget: false}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, mdPreviewQuoteParagraphs(tc.doc))
+			assert.Equal(t, tc.want, mdPreviewQuoteInfos(tc.doc))
 		})
 	}
 }
@@ -416,4 +428,114 @@ func TestMdPreviewBuildSourceMap_RejectsNonIncreasingLines(t *testing.T) {
 			assert.Empty(t, got.blocks())
 		})
 	}
+}
+
+// TestMdPreviewSrcMap_QuoteWithoutOwnTargetAligns is the regression this whole
+// mechanism was added for. A blockquote whose direct children are ALL boundary
+// kinds contributes no target of its own (swallowedSpan finds no span to claim),
+// but glamour marks its chrome regardless, so the marker sequence carried one
+// hit nobody claimed and the WHOLE document degraded to read-only. A user hit it
+// as "sometimes I don't get annotation capabilities in preview mode, seems a bit
+// random" — the trigger was a bullet inside a quote.
+//
+// Every case here is a whole document, and each was measured unaligned before
+// skipTargetlessQuotes existed.
+func TestMdPreviewSrcMap_QuoteWithoutOwnTargetAligns(t *testing.T) {
+	tests := []struct {
+		name  string
+		doc   string
+		kinds []mdPreviewBlockKind
+	}{
+		{"bullet list in a quote", "# T\n\n> - a bullet inside a quote\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockItem, mdBlockParagraph}},
+		{"ordered list in a quote", "# T\n\n> 2. an ordered item inside a quote\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockEnum, mdBlockParagraph}},
+		{"task list in a quote", "# T\n\n> - [ ] todo\n> - [x] done\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockItem, mdBlockItem, mdBlockParagraph}},
+		{"heading in a quote", "# T\n\n> ## inner heading\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockH2, mdBlockParagraph}},
+		{"fence in a quote", "# T\n\n> ```go\n> x := 1\n> ```\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockCodeBlock, mdBlockParagraph}},
+		{"table in a quote", "# T\n\n> | a | b |\n> |---|---|\n> | 1 | 2 |\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockTable, mdBlockParagraph}},
+		{"rule in a quote", "# T\n\n> ---\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockHR, mdBlockParagraph}},
+		// two targetless quotes back to back: the skip has to loop, not fire once
+		{"quote inside a quote", "# T\n\n> > - deep bullet\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockItem, mdBlockParagraph}},
+		// a second quote later in the document must still find its own info entry
+		{"two quotes with lists", "# T\n\n> - one\n\ntext\n\n> - two\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockItem, mdBlockParagraph, mdBlockItem, mdBlockParagraph}},
+		// one quote with no target followed by one with a target: the quote-info
+		// cursor must not slip, or the later quote reads the wrong paragraph count
+		{"targetless quote then a plain quote", "# T\n\n> - one\n\ntext\n\n> plain para\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockItem, mdBlockParagraph, mdBlockQuote, mdBlockParagraph}},
+		// a quote that DOES have its own paragraph keeps its own target, and the
+		// list inside it still gets one per item
+		{"quote with a paragraph and a list", "# T\n\n> intro para\n>\n> - a bullet\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockQuote, mdBlockItem, mdBlockParagraph}},
+		{"nested sub-list inside a quote", "# T\n\n> - one\n>   - deep\n\nafter\n",
+			[]mdPreviewBlockKind{mdBlockH1, mdBlockItem, mdBlockItem, mdBlockParagraph}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, sm := mdPreviewRenderWithMap(mdLines(tc.doc), 80, false)
+			require.True(t, sm.aligned, "this document must be anchorable")
+			got := make([]mdPreviewBlockKind, 0, len(sm.blocks()))
+			for _, a := range sm.blocks() {
+				got = append(got, a.kind)
+			}
+			assert.Equal(t, tc.kinds, got)
+		})
+	}
+}
+
+// TestMdPreviewSrcMap_MultiItemQuoteAnchorsEachItem states the granularity the
+// fix produces, which the kind sequence above cannot: every item of a list
+// inside a quote is its OWN anchor, on its own source line and its own rendered
+// row, so each one can be annotated separately.
+func TestMdPreviewSrcMap_MultiItemQuoteAnchorsEachItem(t *testing.T) {
+	doc := "# T\n\n> - one\n> - two\n> - three\n\nafter\n"
+	_, sm := mdPreviewRenderWithMap(mdLines(doc), 80, false)
+	require.True(t, sm.aligned)
+
+	var items []mdPreviewBlockAnchor
+	for _, a := range sm.blocks() {
+		if a.kind == mdBlockItem {
+			items = append(items, a)
+		}
+	}
+	require.Len(t, items, 3, "each bullet inside the quote is its own anchor")
+
+	lines := mdLines(doc)
+	for i, want := range []string{"> - one", "> - two", "> - three"} {
+		assert.Equal(t, want, lines[items[i].startLine].Content,
+			"item %d must anchor to its own source line", i)
+	}
+	assert.Less(t, items[0].row, items[1].row, "each item owns a distinct rendered row")
+	assert.Less(t, items[1].row, items[2].row)
+}
+
+// TestMdPreviewSrcMap_TargetlessQuoteSkipIsNotAWildcard: the skip only fires for
+// a quote its own info says produced no target. A block_quote marker that turns
+// up where the next quote DID produce a target is still a disagreement and must
+// still refuse the document, or the safety net would have a hole in it exactly
+// the size of a blockquote.
+func TestMdPreviewSrcMap_TargetlessQuoteSkipIsNotAWildcard(t *testing.T) {
+	// a paragraph target, and a stray quote marker ahead of it
+	_, ok := mdPreviewAlignRows(targetsOf(mdBlockParagraph),
+		hitsOf(mdBlockQuote, 1, mdBlockParagraph, 2),
+		[]mdPreviewQuoteInfo{{paragraphs: 0, ownTarget: true}})
+	assert.False(t, ok, "a quote that owns a target must not have its marker skipped")
+
+	// no quote info at all: nothing says the marker is skippable
+	_, ok = mdPreviewAlignRows(targetsOf(mdBlockParagraph), hitsOf(mdBlockQuote, 1, mdBlockParagraph, 2), nil)
+	assert.False(t, ok, "an unaccounted quote marker must still fail alignment")
+
+	// and the leftover-marker check still bites: one targetless quote's marker
+	// is skipped, a second unexplained one is not
+	_, ok = mdPreviewAlignRows(targetsOf(mdBlockParagraph),
+		hitsOf(mdBlockQuote, 1, mdBlockQuote, 2, mdBlockParagraph, 3),
+		[]mdPreviewQuoteInfo{{paragraphs: 0, ownTarget: false}})
+	assert.False(t, ok, "only as many quote markers as there are targetless quotes may be skipped")
 }
